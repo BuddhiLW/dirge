@@ -1,3 +1,5 @@
+#[cfg(feature = "addons")]
+mod addons;
 mod agent;
 mod auth;
 /// Shared spawn hardening (setsid + process-group SIGKILL guard) for the
