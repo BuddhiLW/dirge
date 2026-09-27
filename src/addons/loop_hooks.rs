@@ -234,13 +234,10 @@ mod tests {
 
     #[test]
     fn system_prompt_gains_addon_text_only_when_listened() {
-        let host = host_with(
-            &[HookPoint::SystemPrompt],
-            vec![reply(json!("hive is here"))],
-        );
+        let host = host_with(&[HookPoint::SystemPrompt], vec![reply(json!("addon text"))]);
         assert_eq!(
             with_system_prompt(&host, "base".into(), None),
-            "base\n\nhive is here"
+            "base\n\naddon text"
         );
         let deaf = host_with(&[], vec![reply(json!("never"))]);
         assert_eq!(with_system_prompt(&deaf, "base".into(), None), "base");

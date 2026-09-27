@@ -632,11 +632,14 @@ pub struct PluginSettings {
 pub struct AddonsConfig {
     /// `false` loads no addons. Default true.
     pub enabled: Option<bool>,
-    /// Extra directories searched for `META-INF/hive-addons/*.edn`.
+    /// Extra directories searched for `META-INF/addons/*.edn`.
     pub paths: Vec<String>,
-    /// Extra source roots on the addon classpath (e.g. a checkout of
-    /// hive-addon's `src`), before `DIRGE_ADDON_PATH`.
+    /// Extra source roots on the addon classpath (e.g. the `src` of the
+    /// IAddon protocol library), before `DIRGE_ADDON_PATH`.
     pub source_paths: Vec<String>,
+    /// Namespace defining the IAddon protocol functions (`addon?`,
+    /// `initialize!`, `shutdown!`, `tools`, optionally `hooks` and `health`).
+    pub protocol_ns: Option<String>,
 }
 
 /// Prompt-compression engine config. Disabled → no compression. Enabled with

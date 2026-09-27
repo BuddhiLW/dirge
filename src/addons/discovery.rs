@@ -7,7 +7,7 @@ use super::domain::AddonPlan;
 use super::layout;
 
 /// How deep a search directory is walked. Deep enough for
-/// `<dir>/<repo>/resources/META-INF/hive-addons/x.edn` behind a symlink,
+/// `<dir>/<repo>/resources/META-INF/addons/x.edn` behind a symlink,
 /// shallow enough that pointing it at a home directory cannot hang startup.
 const MAX_DEPTH: usize = 6;
 
@@ -134,7 +134,6 @@ mod tests {
         }
     }
 
-    /// A hive-style addon beside the protocol library it depends on.
     #[test]
     fn portable_source_is_found_only_as_cljc_or_cljrs() {
         let tmp = fleet();
@@ -145,11 +144,12 @@ mod tests {
         assert!(!has_portable_source(&roots, "hd.jvm"));
     }
 
+    /// An addon beside the protocol library it depends on.
     fn fleet() -> TempDir {
         let tmp = TempDir::new();
         let root = tmp.path();
         write(
-            &root.join("addons/hd/resources/META-INF/hive-addons/hd.edn"),
+            &root.join("addons/hd/resources/META-INF/addons/hd.edn"),
             "{:addon/id \"hd\"}",
         );
         write(&root.join("addons/hd/src/hd/core.cljc"), "(ns hd.core)");
@@ -164,7 +164,7 @@ mod tests {
         );
         write(&root.join("lib/base/src/b.cljc"), "(ns b)");
         write(
-            &root.join("addons/hd/target/META-INF/hive-addons/stale.edn"),
+            &root.join("addons/hd/target/META-INF/addons/stale.edn"),
             "{}",
         );
         tmp
@@ -177,7 +177,7 @@ mod tests {
         let plan = plan(&[root.join("addons")], &[]);
         assert_eq!(
             plan.manifests,
-            vec![root.join("addons/hd/resources/META-INF/hive-addons/hd.edn")]
+            vec![root.join("addons/hd/resources/META-INF/addons/hd.edn")]
         );
         assert_eq!(
             plan.source_roots,
@@ -206,7 +206,7 @@ mod tests {
         let tmp = TempDir::new();
         let root = tmp.path();
         write(
-            &root.join("a/resources/META-INF/hive-addons/a.edn"),
+            &root.join("a/resources/META-INF/addons/a.edn"),
             "{:addon/id \"a\"}",
         );
         write(

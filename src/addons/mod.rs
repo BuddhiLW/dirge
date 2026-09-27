@@ -1,9 +1,9 @@
 //! Clojure addon host (cargo feature `addons`).
 //!
-//! Loads IAddons (`hive-addon.protocol/IAddon`, portable `.cljc`) into an
-//! embedded clojurust interpreter. An addon ships
-//! `resources/META-INF/hive-addons/<id>.edn`; its `tools` become loop tools
-//! and its `:dirge/*` hooks run at dirge's hook points. See docs/addons.md.
+//! Loads addons written against an IAddon protocol in portable `.cljc` into
+//! an embedded clojurust interpreter. An addon ships
+//! `resources/META-INF/addons/<id>.edn`; its `tools` become loop tools and
+//! its `:dirge/*` hooks run at dirge's hook points. See docs/addons.md.
 
 pub mod cljrs;
 pub mod discovery;
@@ -29,6 +29,9 @@ use domain::{AddonPlan, LoadFailure};
 use host::AddonHost;
 use port::HarnessSink;
 
+/// Protocol namespace used when `addons.protocol_ns` is not set.
+pub const DEFAULT_PROTOCOL_NS: &str = "hive-addon.protocol";
+
 static HOST: OnceLock<Arc<AddonHost>> = OnceLock::new();
 
 /// The process-wide host, once [`install_from_config`] started one.
@@ -48,7 +51,11 @@ pub fn install_from_config(cfg: &crate::config::Config) {
     if plan.is_empty() {
         return;
     }
-    match start(plan, Arc::new(sink::TuiSink)) {
+    let protocol_ns = settings
+        .protocol_ns
+        .as_deref()
+        .unwrap_or(DEFAULT_PROTOCOL_NS);
+    match start(plan, Arc::new(sink::TuiSink), protocol_ns) {
         Ok(host) => {
             for failure in host.failures() {
                 tracing::warn!(
@@ -82,12 +89,16 @@ pub fn shutdown() {
 /// Validate, boot, load: the plan becomes a running host. Manifests that
 /// fail validation or loading are kept as [`LoadFailure`]s beside the
 /// addons that loaded.
-pub fn start(plan: AddonPlan, sink: Arc<dyn HarnessSink>) -> Result<AddonHost, String> {
+pub fn start(
+    plan: AddonPlan,
+    sink: Arc<dyn HarnessSink>,
+    protocol_ns: &str,
+) -> Result<AddonHost, String> {
     let (valid, mut failures) = validate(&plan.manifests, &plan.source_roots);
     if valid.is_empty() {
         return Err(describe_failures(&failures));
     }
-    let isolate = Arc::new(cljrs::Isolate::spawn(plan.source_roots, sink)?);
+    let isolate = Arc::new(cljrs::Isolate::spawn(plan.source_roots, sink, protocol_ns)?);
     let host_config = json!({ "harness": "dirge", "version": env!("CARGO_PKG_VERSION") });
     let mut addons = Vec::new();
     for manifest in valid {

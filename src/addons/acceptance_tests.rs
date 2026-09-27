@@ -1,8 +1,5 @@
-//! End to end through the cljrs isolate with hive-dirge's probe addon.
-//!
-//! Needs checkouts of hive-dirge and hive-addon, found at `HIVE_DIRGE_ROOT`
-//! (default `~/PP/hive/hive-dirge`). Run with
-//! `cargo test --features addons addons::acceptance -- --ignored`.
+//! End to end through the cljrs isolate with the fixture addons under
+//! `tests/fixtures/addons`.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -10,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::json;
 
 use super::discovery;
+use super::domain::HookPoint;
 use super::port::{HarnessSink, Level};
 
 #[derive(Default)]
@@ -21,40 +19,51 @@ impl HarnessSink for RecordingSink {
     }
 }
 
-fn hive_dirge_root() -> PathBuf {
-    std::env::var_os("HIVE_DIRGE_ROOT")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join("PP/hive/hive-dirge")))
-        .expect("HIVE_DIRGE_ROOT or a home directory")
+fn fixtures() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/addons")
 }
 
 #[test]
-#[ignore = "needs hive-dirge and hive-addon checkouts"]
-fn probe_loads_runs_its_tool_and_notifies() {
-    let plan = discovery::plan(&[hive_dirge_root().join("resources")], &[]);
+fn fixture_addon_loads_runs_hooks_and_notifies() {
+    let plan = discovery::plan(
+        &[fixtures().join("echo")],
+        &[fixtures().join("protocol/src")],
+    );
+    assert_eq!(plan.manifests.len(), 2, "{:?}", plan.manifests);
     let sink = Arc::new(RecordingSink::default());
-    let host = super::start(plan, sink.clone()).expect("host starts");
+    let host = super::start(plan, sink.clone(), "fixture.addon-protocol").expect("host starts");
 
     assert!(host.failures().is_empty(), "{:?}", host.failures());
     let ids: Vec<&str> = host.addons().iter().map(|a| a.id.as_str()).collect();
-    assert_eq!(ids, vec!["hive.dirge.probe"]);
+    assert_eq!(ids, vec!["echo"], "the JVM-only manifest is skipped");
 
-    let tool = host
-        .tools()
-        .iter()
-        .find(|t| t.exposed_name == "swarm-view")
-        .expect("probe tool")
-        .clone();
+    let tool = host.tools()[0].clone();
+    assert_eq!(tool.model_name(), "count-rows");
     let (content, _) = host
         .call_tool(&tool, &json!({"rows": [1, 2, 3]}))
         .expect("tool runs");
     assert_eq!(content[0]["text"], "rows=3");
 
     assert_eq!(
+        host.texts(HookPoint::SystemPrompt, &json!({})),
+        vec!["echo addon active".to_string()]
+    );
+    assert_eq!(
         *sink.0.lock().unwrap(),
-        vec![(Level::Info, "hive.dirge.probe loaded".to_string())]
+        vec![(Level::Info, "echo loaded".to_string())]
     );
 
     host.shutdown();
     assert!(host.call_tool(&tool, &json!({})).is_err());
+}
+
+#[test]
+fn an_unknown_protocol_namespace_stops_the_host() {
+    let plan = discovery::plan(
+        &[fixtures().join("echo")],
+        &[fixtures().join("protocol/src")],
+    );
+    let err = super::start(plan, Arc::new(RecordingSink::default()), "no.such.protocol")
+        .expect_err("boot fails");
+    assert!(err.contains("no.such.protocol"), "{err}");
 }

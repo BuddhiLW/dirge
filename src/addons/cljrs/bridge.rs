@@ -2,8 +2,8 @@
 //!
 //! Only plain data crosses. Object keys become keywords on the way in, so an
 //! IAddon handler reads `(:rows params)` exactly as it does on the JVM; on
-//! the way out the Clojure host has already folded values through
-//! `hive-addon.wire/json-safe`, so maps, vectors, strings, numbers, keywords,
+//! the way out the Clojure host has already folded values through its
+//! `json-safe`, so maps, vectors, strings, numbers, keywords,
 //! booleans and nil are all this has to read. Anything else is printed.
 
 use cljrs_gc::GcPtr;
