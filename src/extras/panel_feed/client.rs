@@ -133,7 +133,7 @@ pub async fn run(
                 .await
             }
             Err(e) => {
-                note_error(&mut last_error, &e);
+                note_error_as(&mut last_error, &e, e.is_missing());
                 Outcome::Failed
             }
         };
@@ -153,15 +153,19 @@ pub async fn run(
 }
 
 /// Log a failure at `warn` the first time it is seen, `debug` while
-/// it repeats. A missing discovery file is the ordinary "producer not
-/// running" state and never warns.
+/// it repeats.
 fn note_error(last: &mut Option<String>, err: &dyn std::fmt::Display) {
+    note_error_as(last, err, false);
+}
+
+/// [`note_error`], but a `quiet` failure (a missing discovery file:
+/// the ordinary "producer not running" state) never warns.
+fn note_error_as(last: &mut Option<String>, err: &dyn std::fmt::Display, quiet: bool) {
     let text = err.to_string();
     if last.as_deref() == Some(text.as_str()) {
         tracing::debug!(target: LOG, "panel feed: {text}");
         return;
     }
-    let quiet = text.ends_with(": not found");
     if quiet {
         tracing::debug!(target: LOG, "panel feed: {text}");
     } else {
