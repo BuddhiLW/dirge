@@ -256,14 +256,14 @@ mod tests {
     #[test]
     fn summary_reads_tools_and_known_hooks_only() {
         let report = json!({
-            "id": "hive.dirge",
+            "id": "my.addon",
             "tools": [{"name": "a:b", "description": "d", "inputSchema": {"type": "object"}},
                       {"description": "nameless is dropped"}],
-            "hooks": ["dirge/on-prompt", "catchup/wrap"],
+            "hooks": ["dirge/on-prompt", "other-host/startup"],
             "health": {"status": "ok"}
         });
         let s = parse_summary(&PathBuf::from("m.edn"), &report).unwrap();
-        assert_eq!(s.id, "hive.dirge");
+        assert_eq!(s.id, "my.addon");
         assert_eq!(s.tools.len(), 1);
         assert_eq!(s.tools[0].exposed_name, "a_b");
         assert_eq!(s.hooks, vec![HookPoint::OnPrompt]);

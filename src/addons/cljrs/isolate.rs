@@ -62,15 +62,20 @@ pub struct Isolate {
 
 impl Isolate {
     /// Start the thread and boot the runtime with `source_roots` on the
-    /// classpath. Returns once the host namespace has loaded, or why it did
-    /// not.
-    pub fn spawn(source_roots: Vec<PathBuf>, sink: Arc<dyn HarnessSink>) -> Result<Self, String> {
+    /// classpath and the IAddon protocol of `protocol_ns` bound. Returns once
+    /// the host is ready, or why it is not.
+    pub fn spawn(
+        source_roots: Vec<PathBuf>,
+        sink: Arc<dyn HarnessSink>,
+        protocol_ns: &str,
+    ) -> Result<Self, String> {
         let (tx, rx) = channel();
         let (ready_tx, ready_rx) = channel();
+        let protocol_ns = protocol_ns.to_string();
         std::thread::Builder::new()
             .name("dirge-addons".into())
             .stack_size(ISOLATE_STACK_BYTES)
-            .spawn(move || serve(source_roots, sink, ready_tx, rx))
+            .spawn(move || serve(source_roots, sink, protocol_ns, ready_tx, rx))
             .map_err(|e| format!("cannot start the addon isolate: {e}"))?;
         ready_rx
             .recv()
@@ -123,10 +128,11 @@ impl AddonRuntime for Isolate {
 fn serve(
     roots: Vec<PathBuf>,
     sink: Arc<dyn HarnessSink>,
+    protocol_ns: String,
     ready: Sender<Result<(), String>>,
     rx: Receiver<Command>,
 ) {
-    let mut interp = match Interp::boot(roots, sink) {
+    let mut interp = match Interp::boot(roots, sink, &protocol_ns) {
         Ok(interp) => {
             let _ = ready.send(Ok(()));
             interp
@@ -190,7 +196,11 @@ struct Interp {
 }
 
 impl Interp {
-    fn boot(roots: Vec<PathBuf>, sink: Arc<dyn HarnessSink>) -> Result<Self, String> {
+    fn boot(
+        roots: Vec<PathBuf>,
+        sink: Arc<dyn HarnessSink>,
+        protocol_ns: &str,
+    ) -> Result<Self, String> {
         let runtime = Runtime::builder()
             .execution_mode(ExecutionMode::Tiered)
             .source_paths(roots)
@@ -209,6 +219,10 @@ impl Interp {
         interp
             .eval_str(&format!("(require '{HOST_NS})"))
             .map_err(|e| format!("cannot load {HOST_NS}: {e}"))?;
+        interp
+            .call("use-protocol!", vec![protocol_ns.into()])
+            .and_then(|answer| policy::tool_reply(&answer))
+            .map_err(|e| format!("cannot bind the IAddon protocol {protocol_ns}: {e}"))?;
         Ok(interp)
     }
 

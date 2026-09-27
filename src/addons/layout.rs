@@ -1,26 +1,26 @@
-//! Addon filesystem layout (the hive layout):
+//! Addon filesystem layout:
 //!
 //! ```text
-//! <repo>/deps.edn                                  :local/root deps
-//! <repo>/src/...                                   the .cljc sources
-//! <repo>/resources/META-INF/hive-addons/<id>.edn   the manifest
+//! <repo>/deps.edn                             :local/root deps
+//! <repo>/src/...                              the .cljc sources
+//! <repo>/resources/META-INF/addons/<id>.edn   the manifest
 //! ```
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Directory holding manifests, relative to a resources root.
-pub const MANIFEST_DIR: [&str; 2] = ["META-INF", "hive-addons"];
+/// Directories under `META-INF` that hold manifests.
+pub const MANIFEST_DIRS: [&str; 2] = ["addons", "hive-addons"];
 
-/// True when `path` is `.../META-INF/hive-addons/<name>.edn`.
+/// True when `path` is `.../META-INF/<manifest dir>/<name>.edn`.
 pub fn is_manifest(path: &Path) -> bool {
     let is_edn = path.extension().is_some_and(|e| e == "edn");
     let mut dirs = path.parent().into_iter().flat_map(Path::iter).rev();
     let parent = dirs.next();
     let grandparent = dirs.next();
     is_edn
-        && parent.is_some_and(|p| p == MANIFEST_DIR[1])
-        && grandparent.is_some_and(|g| g == MANIFEST_DIR[0])
+        && parent.is_some_and(|p| MANIFEST_DIRS.iter().any(|d| p == *d))
+        && grandparent.is_some_and(|g| g == "META-INF")
 }
 
 /// The resources root a manifest sits in (the parent of `META-INF`).
@@ -104,41 +104,43 @@ pub fn merge_roots<I: IntoIterator<Item = PathBuf>>(roots: I) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
-    const HIVE_STYLE: &str = "/w/hive-dirge/resources/META-INF/hive-addons/hive-dirge.edn";
+    const MANIFEST: &str = "/w/my-addon/resources/META-INF/addons/my-addon.edn";
 
     #[test]
     fn recognizes_only_manifests_under_meta_inf() {
-        assert!(is_manifest(Path::new(HIVE_STYLE)));
-        assert!(!is_manifest(Path::new("/w/x/resources/hive-addons/a.edn")));
-        assert!(!is_manifest(Path::new("/w/x/META-INF/hive-addons/a.clj")));
+        assert!(is_manifest(Path::new(MANIFEST)));
+        assert!(is_manifest(Path::new("/w/x/META-INF/hive-addons/a.edn")));
+        assert!(!is_manifest(Path::new("/w/x/resources/addons/a.edn")));
+        assert!(!is_manifest(Path::new("/w/x/META-INF/addons/a.clj")));
+        assert!(!is_manifest(Path::new("/w/x/META-INF/other/a.edn")));
         assert!(!is_manifest(Path::new("a.edn")));
     }
 
     #[test]
-    fn hive_layout_yields_src_and_resources() {
-        let m = Path::new(HIVE_STYLE);
-        assert_eq!(repo_root(m), Some(Path::new("/w/hive-dirge")));
+    fn repo_layout_yields_src_and_resources() {
+        let m = Path::new(MANIFEST);
+        assert_eq!(repo_root(m), Some(Path::new("/w/my-addon")));
         assert_eq!(
             own_roots(m),
             vec![
-                PathBuf::from("/w/hive-dirge/src"),
-                PathBuf::from("/w/hive-dirge/resources")
+                PathBuf::from("/w/my-addon/src"),
+                PathBuf::from("/w/my-addon/resources")
             ]
         );
     }
 
     #[test]
     fn flat_layout_treats_the_resources_root_as_the_repo() {
-        let m = Path::new("/w/probe/META-INF/hive-addons/probe.edn");
-        assert_eq!(repo_root(m), Some(Path::new("/w/probe")));
+        let m = Path::new("/w/flat/META-INF/addons/flat.edn");
+        assert_eq!(repo_root(m), Some(Path::new("/w/flat")));
     }
 
     #[test]
     fn reads_local_roots_and_ignores_other_coordinates() {
-        let deps = r#"{:deps {io.github.hive-agi/hive-addon {:local/root "../hive-addon"}
+        let deps = r#"{:deps {org.example/proto {:local/root "../proto"}
                           metosin/malli {:mvn/version "0.20.1"}
                           x/y {:local/root   "/abs/y"}}}"#;
-        assert_eq!(local_roots(deps), vec!["../hive-addon", "/abs/y"]);
+        assert_eq!(local_roots(deps), vec!["../proto", "/abs/y"]);
         assert!(local_roots("{:deps {}}").is_empty());
         assert!(local_roots(":local/root").is_empty());
     }
@@ -146,20 +148,20 @@ mod tests {
     #[test]
     fn portable_sources_munge_the_namespace() {
         assert_eq!(
-            portable_sources("hive-dirge.probe.addon"),
+            portable_sources("my-addon.core"),
             [
-                PathBuf::from("hive_dirge/probe/addon.cljc"),
-                PathBuf::from("hive_dirge/probe/addon.cljrs")
+                PathBuf::from("my_addon/core.cljc"),
+                PathBuf::from("my_addon/core.cljrs")
             ]
         );
     }
 
     #[test]
     fn dependency_roots_resolve_relative_to_the_declaring_repo() {
-        let repo = Path::new("/w/hive-dirge");
+        let repo = Path::new("/w/my-addon");
         assert_eq!(
-            dependency_root(repo, "../hive-addon"),
-            PathBuf::from("/w/hive-dirge/../hive-addon/src")
+            dependency_root(repo, "../proto"),
+            PathBuf::from("/w/my-addon/../proto/src")
         );
         assert_eq!(dependency_root(repo, "/abs/y"), PathBuf::from("/abs/y/src"));
     }

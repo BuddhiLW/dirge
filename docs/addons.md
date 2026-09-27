@@ -2,9 +2,9 @@
 
 dirge can host addons written in Clojure. They run on an embedded
 [clojurust](https://github.com/BuddhiLW/clojurust) interpreter, beside Janet
-plugins, and implement the `IAddon` protocol from
-[hive-addon](https://github.com/hive-agi/hive-addon). Written as portable
-`.cljc`, the same addon also loads in any JVM host of that protocol.
+plugins, and implement an `IAddon` protocol defined by a small Clojure
+library that dirge loads by namespace. Written as portable `.cljc`, the same
+addon also runs in any JVM host of that protocol.
 
 Build with the feature enabled:
 
@@ -18,12 +18,12 @@ An addon is a directory laid out like this:
 
 ```text
 my-addon/
-  deps.edn                                   ; optional, see below
+  deps.edn                              ; optional, see below
   src/my_addon/core.cljc
-  resources/META-INF/hive-addons/my-addon.edn
+  resources/META-INF/addons/my-addon.edn
 ```
 
-dirge searches for `META-INF/hive-addons/*.edn` manifests under:
+dirge searches for `META-INF/addons/*.edn` manifests under:
 
 1. `<project>/.dirge/addons/`
 2. `~/.config/dirge/addons/`
@@ -34,8 +34,8 @@ A symlink to an addon checkout works in any of them.
 The addon's `src/` and `resources/` go on the interpreter's source path, plus
 the `src/` of every `:local/root` dependency named in its `deps.edn`
 (followed transitively). Anything else can be added with `addons.source_paths`
-or the `DIRGE_ADDON_PATH` environment variable (a `:`-separated list).
-`hive-addon`'s `src/` must be reachable one of these ways.
+or the `DIRGE_ADDON_PATH` environment variable (a `:`-separated list). The
+protocol library's source must be reachable one of these ways.
 
 A manifest whose init namespace has no `.cljc` or `.cljrs` source on that path
 is skipped, so JVM-only addons can share a repository with portable ones.
@@ -45,10 +45,26 @@ is skipped, so JVM-only addons can share a repository with portable ones.
   "addons": {
     "enabled": true,
     "paths": ["~/src/my-addons"],
-    "source_paths": ["~/src/hive-addon/src"]
+    "source_paths": ["~/src/addon-protocol/src"],
+    "protocol_ns": "my.addon-protocol"
   }
 }
 ```
+
+## The protocol
+
+`addons.protocol_ns` names the namespace that defines the protocol. dirge
+resolves these functions from it at startup and refuses to start the host if
+a required one is missing:
+
+| Function | Required | Meaning |
+|---|---|---|
+| `(addon? x)` | yes | whether `x` implements the protocol |
+| `(initialize! addon config)` | yes | start; returns `{:success? bool :errors [...]}` |
+| `(shutdown! addon)` | yes | release resources |
+| `(tools addon)` | yes | tool definitions, see below |
+| `(hooks addon)` | no | map of hook key to function, see below |
+| `(health addon)` | no | `{:status :ok}` or similar |
 
 ## The manifest
 
@@ -59,8 +75,8 @@ is skipped, so JVM-only addons can share a repository with portable ones.
  :addon/config  {}}
 ```
 
-`init-fn` is called with `:addon/config` and must return an `IAddon`. dirge
-then calls `initialize!` with `{:addon/id … :addon/config … :dirge/host {…}}`.
+`init-fn` is called with `:addon/config` and must return an addon. dirge then
+calls `initialize!` with `{:addon/id … :addon/config … :dirge/host {…}}`.
 
 ## Tools
 
@@ -74,9 +90,9 @@ Every entry of `(tools addon)` becomes a tool the model can call:
 ```
 
 Arguments arrive as a map with keyword keys. The handler may return the
-MCP result shape above (`:isError true` marks a failure), a string, or any
-data, which the model sees as JSON. Names are restricted to `[A-Za-z0-9_-]`;
-a built-in tool's name always wins, and between addons the first loaded wins.
+result shape above (`:isError true` marks a failure), a string, or any data,
+which the model sees as JSON. Names are restricted to `[A-Za-z0-9_-]`; a
+built-in tool's name always wins, and between addons the first loaded wins.
 
 Addon tools go through the same permission check as Janet plugin tools
 (`plugin_tool`).
@@ -115,3 +131,8 @@ no-op on hosts without them.
 
 Addons load at startup, before the first agent run, on a dedicated
 interpreter thread. `shutdown!` runs for every addon when dirge exits.
+
+## Example
+
+`tests/fixtures/addons/` holds a minimal protocol namespace and an addon
+that uses a tool, a hook and `dirge.harness/notify`.

@@ -1,12 +1,46 @@
 (ns dirge.addon.host
-  "dirge's IAddon host inside the embedded cljrs runtime. Rust calls
-   load-addon!, call-tool, run-hook and shutdown-all! with plain data and
-   reads back values folded by hive-addon.wire/json-safe."
-  (:require [clojure.edn :as edn]
-            [hive-addon.protocol :as p]
-            [hive-addon.wire :as wire]))
+  "dirge's addon host inside the embedded cljrs runtime. Rust calls
+   use-protocol!, load-addon!, call-tool, run-hook and shutdown-all! with
+   plain data and reads plain data back."
+  (:require [clojure.edn :as edn]))
 
 ;; SPDX-License-Identifier: GPL-3.0-only
+
+(defn json-safe
+  "`x` folded into data a JSON writer can encode."
+  [x]
+  (cond
+    (or (nil? x) (string? x) (boolean? x) (number? x) (keyword? x)) x
+    (symbol? x)     (str x)
+    (fn? x)         "#fn"
+    (map? x)        (into {}
+                          (map (fn [[k v]]
+                                 [(if (or (string? k) (keyword? k)) k (str k))
+                                  (json-safe v)]))
+                          x)
+    (set? x)        (mapv json-safe (sort-by str x))
+    (sequential? x) (mapv json-safe x)
+    :else           (str x)))
+
+(def required-fns
+  "IAddon functions the protocol namespace must provide."
+  '[addon? initialize! shutdown! tools])
+
+(def optional-fns
+  "IAddon functions used when the protocol namespace provides them."
+  '[hooks health unimplemented-method?])
+
+(def ^:private unimplemented-re
+  #"(?i)is abstract|does not define or inherit an implementation|no implementation of (method|protocol)|no protocol method|nothing implements")
+
+(defn- default-unimplemented?
+  [t]
+  (boolean (some->> (ex-message t) (re-find unimplemented-re))))
+
+(defn failure
+  "{:error msg} for a caught throwable."
+  [t]
+  {:error (or (ex-message t) (str t))})
 
 (defn tool-view
   "What dirge needs of a tool-def: everything but the live :handler."
@@ -23,22 +57,46 @@
   [tools]
   (into {} (map (juxt :name identity)) tools))
 
-(defn failure
-  "{:error msg} for a caught throwable."
-  [t]
-  {:error (or (ex-message t) (str t))})
+(defn- resolve-fns
+  [protocol-ns names]
+  (into {} (for [n names] [(keyword n) (resolve (symbol protocol-ns (str n)))])))
 
+(defonce ^:private !protocol (atom nil))
 (defonce ^:private !addons (atom {}))
 (defonce ^:private !order (atom []))
 
-(defn- optional
-  "Call an optional IAddon method, answering `fallback` when the addon does
-   not implement it (the registry contract for excluded-tools and hooks)."
-  [method addon fallback]
+(defn- pf
+  [k]
+  (get @!protocol k))
+
+(defn use-protocol!
+  "Bind the IAddon functions of `protocol-ns`: {:ok protocol-ns} or {:error msg}."
+  [protocol-ns]
   (try
-    (method addon)
+    (require (symbol protocol-ns))
+    (let [required (resolve-fns protocol-ns required-fns)
+          missing  (sort (for [[k v] required :when (nil? v)] (name k)))]
+      (if (seq missing)
+        {:error (str protocol-ns " does not define " (apply str (interpose ", " missing)))}
+        (let [optional (resolve-fns protocol-ns optional-fns)]
+          (reset! !protocol (merge required
+                                   (into {} (remove (comp nil? val)) optional)
+                                   {:unimplemented-method? (or (:unimplemented-method? optional)
+                                                               default-unimplemented?)}))
+          {:ok protocol-ns})))
     (catch #?(:clj Throwable :default :default) t
-      (if (p/unimplemented-method? t) fallback (throw t)))))
+      (failure t))))
+
+(defn- optional
+  "Call an optional IAddon method, answering `fallback` when the protocol or
+   the addon does not provide it."
+  [k addon fallback]
+  (if-let [method (pf k)]
+    (try
+      (method addon)
+      (catch #?(:clj Throwable :default :default) t
+        (if ((pf :unimplemented-method?) t) fallback (throw t))))
+    fallback))
 
 (defn- ctor
   "The manifest's constructor fn, loading its namespace first."
@@ -51,14 +109,14 @@
   "Shut one addon down and forget it. Idempotent."
   [id]
   (when-let [{:keys [addon]} (get @!addons id)]
-    (try (p/shutdown! addon) (catch #?(:clj Throwable :default :default) _ nil))
+    (try ((pf :shutdown!) addon) (catch #?(:clj Throwable :default :default) _ nil))
     (swap! !addons dissoc id)
     (swap! !order (fn [ids] (vec (remove #{id} ids))))))
 
 (defn- install!
   [id manifest addon]
-  (let [tools (vec (p/tools addon))
-        hooks (or (optional p/hooks addon {}) {})]
+  (let [tools (vec ((pf :tools) addon))
+        hooks (or (optional :hooks addon {}) {})]
     (swap! !addons assoc id {:addon addon :manifest manifest
                              :tools (index-tools tools) :hooks hooks})
     (swap! !order (fn [ids] (conj (vec (remove #{id} ids)) id)))
@@ -66,7 +124,7 @@
      :version (:addon/version manifest)
      :tools (mapv tool-view tools)
      :hooks (hook-names hooks)
-     :health (optional p/health addon {:status :ok})}))
+     :health (optional :health addon {:status :ok})}))
 
 (defn load-addon!
   "Load the manifest at `path`: construct, initialize!, register. A manifest
@@ -74,6 +132,8 @@
    reload. Returns the addon's summary, or {:error msg}."
   [path host-config]
   (try
+    (when-not @!protocol
+      (throw (ex-info "no IAddon protocol bound; call use-protocol! first" {})))
     (let [manifest (edn/read-string (slurp path))
           id       (:addon/id manifest)
           config   (:addon/config manifest {})]
@@ -81,14 +141,14 @@
         (throw (ex-info (str "manifest has no string :addon/id: " path) {})))
       (shutdown-addon! id)
       (let [addon ((ctor manifest) config)]
-        (when-not (p/addon? addon)
+        (when-not ((pf :addon?) addon)
           (throw (ex-info (str id " constructor did not return an IAddon") {})))
-        (let [init (p/initialize! addon {:addon/id id
-                                         :addon/config config
-                                         :dirge/host host-config})]
+        (let [init ((pf :initialize!) addon {:addon/id id
+                                             :addon/config config
+                                             :dirge/host host-config})]
           (if (false? (:success? init))
             {:error (str id " failed to initialize: " (pr-str (:errors init)))}
-            (wire/json-safe (install! id manifest addon))))))
+            (json-safe (install! id manifest addon))))))
     (catch #?(:clj Throwable :default :default) t
       (failure t))))
 
@@ -97,7 +157,7 @@
   [addon-id tool-name params]
   (try
     (if-let [tool (get-in @!addons [addon-id :tools tool-name])]
-      {:ok (wire/json-safe ((:handler tool) params))}
+      {:ok (json-safe ((:handler tool) params))}
       {:error (str "no tool " tool-name " in addon " addon-id)})
     (catch #?(:clj Throwable :default :default) t
       (failure t))))
@@ -112,7 +172,7 @@
            :let [f (get-in @!addons [id :hooks k])]
            :when f]
        (try
-         {:addon id :ok (wire/json-safe (f ctx))}
+         {:addon id :ok (json-safe (f ctx))}
          (catch #?(:clj Throwable :default :default) t
            (assoc (failure t) :addon id)))))))
 
