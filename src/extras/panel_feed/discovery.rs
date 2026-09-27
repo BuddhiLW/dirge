@@ -54,7 +54,9 @@ impl PanelFeedConfig {
         if self.enabled == Some(false) {
             return None;
         }
-        let nonblank = |s: &Option<String>| s.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        fn nonblank(s: &Option<String>) -> Option<&str> {
+            s.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        }
         if let Some(url) = nonblank(&self.url) {
             return Some(Source::Explicit {
                 url: url.to_string(),

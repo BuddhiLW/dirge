@@ -1615,6 +1615,10 @@ pub async fn run_interactive(
     // first use, so producers that fired before this point have their
     // ops queued and drained on the first iterations below.
     let mut panel_rx = crate::ui::panels_ext::take_receiver();
+    // Optional external panel feed (`panel_feed` config, off by
+    // default). The handle lives for the whole loop; dropping it on
+    // any exit path stops the subscription task.
+    let _panel_feed = crate::extras::panel_feed::start(cfg.panel_feed.as_ref());
 
     let (user_tx, mut user_rx) = mpsc::unbounded_channel::<UserEvent>();
     input_reader::spawn_input_reader(user_tx.clone());
