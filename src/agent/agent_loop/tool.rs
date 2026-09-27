@@ -164,6 +164,7 @@ pub trait LoopTool: Send + Sync + std::fmt::Debug {
     /// Who contributes the tool at runtime (`"addon"` for Clojure addon
     /// tools), so that source can replace or drop exactly its own tools in a
     /// live agent. `None`, the default, for tools fixed at build time.
+    #[cfg_attr(not(feature = "addons"), allow(dead_code))]
     fn source(&self) -> Option<&str> {
         None
     }

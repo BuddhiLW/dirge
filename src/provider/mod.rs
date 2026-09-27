@@ -503,6 +503,7 @@ impl AnyAgent {
     /// uses it. The next `spawn_runner` sees the smaller set.
     ///
     /// [`LoopTool::source`]: crate::agent::agent_loop::LoopTool::source
+    #[cfg_attr(not(feature = "addons"), allow(dead_code))]
     pub fn remove_loop_tools_by_source(&mut self, source: &str) -> Vec<String> {
         let (gone, kept): (Vec<_>, Vec<_>) = self
             .loop_tools
@@ -526,6 +527,7 @@ impl AnyAgent {
     /// dynamic tool search is on, the new tools join the `tool_search`
     /// registry and stay search-gated like any other. Returns the names
     /// installed.
+    #[cfg_attr(not(feature = "addons"), allow(dead_code))]
     pub fn upsert_loop_tools(
         &mut self,
         source: &str,
