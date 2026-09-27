@@ -1811,11 +1811,10 @@ mod tests {
 
     #[test]
     fn anthropic_oauth_default_uses_claude_opus_5_5() {
-        let client = create_client_with_auth(
+        let client = create_client_with_anthropic_auth_headers(
             "anthropic",
-            Some("sk-ant-oat-test"),
             &HashMap::new(),
-            Some(ProviderAuth::Anthropic),
+            test_anthropic_headers(),
         )
         .unwrap();
 
