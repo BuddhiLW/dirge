@@ -224,15 +224,18 @@ fn addon_commands_call_dirge_tools_through_the_harness() {
         ]
     );
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-    let out = rt
-        .block_on(async { host.run_command(&run, "read") })
-        .unwrap();
+    // From the event-loop thread, as spawn_runner calls the prompt hooks; a
+    // thread of its own keeps the mark from leaking into other tests.
+    let h = host.clone();
+    let out = std::thread::spawn(move || {
+        super::cljrs::isolate::mark_event_loop_thread();
+        h.run_command(&run, "read").unwrap()
+    })
+    .join()
+    .unwrap();
     assert!(
         out.text.unwrap().contains("call-tool is unavailable"),
-        "refused on the runtime thread"
+        "refused on the event-loop thread"
     );
     assert_eq!(tools.0.lock().unwrap().len(), 2, "gateway not reached");
     host.shutdown();
