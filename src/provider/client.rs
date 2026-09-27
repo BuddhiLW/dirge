@@ -1059,6 +1059,7 @@ mod tests {
     use super::*;
     use crate::auth::store::OpenAiOAuthCredential;
     use crate::config::{ProviderAuth, ProviderEntry};
+    use crate::provider::default_model_for;
     use std::cell::Cell;
     use std::collections::HashMap;
 
@@ -1605,6 +1606,25 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_oauth_default_uses_claude_opus_5_5() {
+        let client = create_client_with_auth(
+            "anthropic",
+            Some("sk-ant-oat-test"),
+            &HashMap::new(),
+            Some(ProviderAuth::Anthropic),
+        )
+        .unwrap();
+
+        let model = client.completion_model(default_model_for("anthropic"));
+
+        match model {
+            crate::provider::AnyModel::AnthropicOauth(model) => {
+                assert_eq!(model.model, "claude-opus-5-5");
+            }
+            _ => panic!("Anthropic OAuth auth must build an Anthropic OAuth model"),
+        }
+    }
+    #[test]
     fn resolve_model_name_ties_provenance_to_a_real_codex_client() {
         use crate::provider::resolve_model_name;
 
@@ -1614,10 +1634,10 @@ mod tests {
         })
         .unwrap();
         assert!(codex.is_codex());
-        // Defaulted OpenAI id -> Codex default; explicit gpt-4o preserved
+        // Defaulted OpenAI id -> Codex default; explicit gpt-6 preserved
         // (dirge-ovjk); a non-default name is untouched.
-        assert_eq!(resolve_model_name(&codex, "gpt-4o", false), "gpt-5.5");
-        assert_eq!(resolve_model_name(&codex, "gpt-4o", true), "gpt-4o");
+        assert_eq!(resolve_model_name(&codex, "gpt-6", false), "gpt-5.5");
+        assert_eq!(resolve_model_name(&codex, "gpt-6", true), "gpt-6");
         assert_eq!(resolve_model_name(&codex, "o3", false), "o3");
 
         // A plain API-key OpenAI client is not Codex — never remapped.
@@ -1626,7 +1646,7 @@ mod tests {
         })
         .unwrap();
         assert!(!plain.is_codex());
-        assert_eq!(resolve_model_name(&plain, "gpt-4o", false), "gpt-4o");
+        assert_eq!(resolve_model_name(&plain, "gpt-6", false), "gpt-6");
     }
 
     #[test]

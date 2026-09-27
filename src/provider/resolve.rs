@@ -35,8 +35,8 @@ pub fn default_model_for(provider_name: &str) -> &'static str {
     // first-class model id; OpenRouter keeps the multi-vendor prefix
     // form since that's what its API expects.
     match parse_provider(provider_name) {
-        Some(ProviderKind::OpenAI) => "gpt-4o",
-        Some(ProviderKind::Anthropic) => "claude-sonnet-4-6",
+        Some(ProviderKind::OpenAI) => "gpt-6",
+        Some(ProviderKind::Anthropic) => "claude-opus-5-5",
         Some(ProviderKind::Gemini) => "gemini-2.0-flash",
         Some(ProviderKind::DeepSeek) => "deepseek-v4-pro",
         Some(ProviderKind::Glm) => "glm-5.2",

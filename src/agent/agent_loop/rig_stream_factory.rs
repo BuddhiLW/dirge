@@ -1407,11 +1407,8 @@ fn request_max_tokens(
     {
         return Some(ceiling);
     }
-    let anthropic_shaped = matches!(
-        crate::provider::adapter::reasoning_profile(provider, model).effort,
-        crate::provider::adapter::EffortWire::AnthropicBudget
-    );
-    if anthropic_shaped && !turn_reasoning_enabled(provider, model, opts) {
+    let anthropic_shaped = matches!(provider, Some("anthropic"));
+    if anthropic_shaped {
         return opts.max_tokens;
     }
     None
@@ -2870,6 +2867,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn claude_opus_5_5_reasoning_uses_output_config_effort_not_thinking_budget() {
+        let mut o = opts_with_reasoning(ThinkingLevel::Max);
+        o.max_tokens = Some(8192);
+
+        assert_eq!(
+            build_provider_additional_params(Some("anthropic"), Some("claude-opus-5-5"), &o),
+            Some(serde_json::json!({"output_config":{"effort":"max"}}))
+        );
+        assert_eq!(
+            request_max_tokens(Some("anthropic"), Some("claude-opus-5-5"), &o),
+            Some(8192)
+        );
+    }
     /// No resolved config (tests, paths built without one) leaves the
     /// request unset — byte-identical to the pre-fix behaviour.
     #[test]

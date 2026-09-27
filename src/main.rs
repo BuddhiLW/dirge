@@ -836,11 +836,16 @@ async fn main() -> anyhow::Result<()> {
     // flagged it `explicit`, so the Codex-default substitution and
     // per-alias default were both skipped and glm-5.2 went to OpenAI (404).
     let config_model = cli.resolution_entry(&cfg).and_then(|e| e.model);
-    // dirge-ovjk: whether the model was explicitly chosen (via --model or a
-    // provider entry's `model`) vs defaulted. The Codex-default substitution
-    // must fire only for the defaulted case, so an explicit `gpt-4o` under a
-    // Codex login is honored instead of being rewritten to the Codex default.
-    let model_explicit = cli.model.is_some() || config_model.is_some();
+    // dirge-ovjk: whether the model was explicitly chosen vs defaulted. A
+    // config-pinned provider default still counts as defaulted for Codex, so a
+    // ChatGPT account does not send the unsupported OpenAI API default id.
+    let model_explicit = provider::model_is_explicit(
+        &provider,
+        config_model.as_deref().unwrap_or(""),
+        &cfg.providers_map(),
+        cli.model.is_some(),
+        config_model.is_some(),
+    );
     let model = if !model_explicit {
         // dirge-j3jd: resolve the alias's provider TYPE so a custom alias
         // doesn't fall back to the OpenRouter default model id.
