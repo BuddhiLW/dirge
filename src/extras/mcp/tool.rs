@@ -532,10 +532,15 @@ impl CallErr {
 async fn call_once(
     server_name: &str,
     connection: &Arc<SharedConnection>,
-    params: CallToolRequestParams,
+    mut params: CallToolRequestParams,
     timeout: Duration,
 ) -> Result<rmcp::model::CallToolResult, CallErr> {
     let tool_name = params.name.to_string();
+    // Unique progress token per attempt; the guard keeps token -> tool
+    // name registered until the call settles so progress lines name the
+    // tool.
+    let progress = crate::extras::mcp::notify::global_registry().issue(&tool_name);
+    rmcp::model::RequestParamsMeta::set_progress_token(&mut params, progress.token());
     // Snapshot the current peer. Held briefly across the read-lock;
     // the actual call doesn't hold the lock so another caller can
     // swap the peer (manager-side or tool-side reconnect) without
