@@ -981,6 +981,12 @@ pub struct Config {
     /// Optional OS-level desktop notifications for turn completion and
     /// prompts waiting on human input. Absent/off by default.
     pub desktop_notifications: Option<DesktopNotificationConfig>,
+    /// External panel feed: a Server-Sent Events producer that drives
+    /// the side panels and posts notifications (`docs/panel-feed.md`).
+    /// Absent = off. Set `discovery_dir` (a directory holding a 0600
+    /// `dirge.json`, relative paths under `$XDG_RUNTIME_DIR`) or `url`
+    /// plus an optional `token_file`; `enabled = false` turns it off.
+    pub panel_feed: Option<crate::extras::panel_feed::discovery::PanelFeedConfig>,
     /// Prompt-compression engine config. `enabled = false` or
     /// `DIRGE_COMPRESSION=0` disables compression at runtime even when the
     /// feature is compiled in; the `preset` key picks the compression profile.
@@ -3154,6 +3160,27 @@ mod tests {
         assert_eq!(desktop.enabled, Some(true));
         assert_eq!(desktop.on_completion, Some(false));
         assert_eq!(desktop.on_input_required, Some(true));
+    }
+
+    #[test]
+    fn panel_feed_is_absent_by_default_and_parses() {
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert!(cfg.panel_feed.is_none());
+
+        let cfg: Config =
+            serde_json::from_str(r#"{"panel_feed": {"discovery_dir": "feeds"}}"#).unwrap();
+        let feed = cfg.panel_feed.expect("panel feed");
+        assert_eq!(feed.discovery_dir.as_deref(), Some("feeds"));
+        assert_eq!(feed.enabled, None);
+
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel_feed": {"enabled": false, "url": "http://127.0.0.1:1", "token_file": "/t"}}"#,
+        )
+        .unwrap();
+        let feed = cfg.panel_feed.expect("panel feed");
+        assert_eq!(feed.enabled, Some(false));
+        assert_eq!(feed.token_file.as_deref(), Some("/t"));
+        assert_eq!(feed.source(None), None, "explicitly disabled");
     }
 
     #[test]
