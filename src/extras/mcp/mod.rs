@@ -1,5 +1,6 @@
 pub mod client;
 pub mod config;
+pub mod notify;
 pub mod tool;
 
 use std::collections::HashMap;
