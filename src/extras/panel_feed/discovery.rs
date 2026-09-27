@@ -295,8 +295,8 @@ mod tests {
 
     #[test]
     fn discovery_document_parses_and_validates() {
-        let ep = parse_discovery(r#"{"url":"http://127.0.0.1:5/p/","token":"s3cret","pid":1}"#)
-            .unwrap();
+        let ep =
+            parse_discovery(r#"{"url":"http://127.0.0.1:5/p/","token":"s3cret","pid":1}"#).unwrap();
         assert_eq!(ep.url, "http://127.0.0.1:5/p");
         assert_eq!(ep.token.as_deref(), Some("s3cret"));
         assert!(parse_discovery(r#"{"url":"file:///etc"}"#).is_err());

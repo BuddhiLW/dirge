@@ -3167,10 +3167,8 @@ mod tests {
         let cfg: Config = serde_json::from_str("{}").unwrap();
         assert!(cfg.panel_feed.is_none());
 
-        let cfg: Config = serde_json::from_str(
-            r#"{"panel_feed": {"discovery_dir": "feeds"}}"#,
-        )
-        .unwrap();
+        let cfg: Config =
+            serde_json::from_str(r#"{"panel_feed": {"discovery_dir": "feeds"}}"#).unwrap();
         let feed = cfg.panel_feed.expect("panel feed");
         assert_eq!(feed.discovery_dir.as_deref(), Some("feeds"));
         assert_eq!(feed.enabled, None);

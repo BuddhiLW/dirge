@@ -34,10 +34,10 @@ pub mod memory_db;
 pub mod memory_graduation;
 pub mod memory_hybrid;
 pub mod memory_provider;
-/// Generic SSE panel feed (off unless `panel_feed` is configured).
-pub mod panel_feed;
 #[cfg(test)]
 mod memory_retrieval_eval;
+/// Generic SSE panel feed (off unless `panel_feed` is configured).
+pub mod panel_feed;
 pub mod salience;
 pub mod session_db;
 pub mod session_search;

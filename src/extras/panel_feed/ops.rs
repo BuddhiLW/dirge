@@ -44,7 +44,10 @@ pub enum Skip {
     /// An op this client does not handle (a newer producer).
     UnknownOp(String),
     /// A known op missing a required field.
-    Missing { op: &'static str, field: &'static str },
+    Missing {
+        op: &'static str,
+        field: &'static str,
+    },
 }
 
 /// Port the feed writes effects into.
@@ -63,10 +66,8 @@ impl FeedSink for UiSink {
                 crate::ui::panels_ext::panel_send(op);
             }
             FeedEffect::Notify { level, message } => {
-                let message = crate::ui::ansi::strip_escapes(
-                    &message,
-                    crate::ui::ansi::StripPolicy::STRICT,
-                );
+                let message =
+                    crate::ui::ansi::strip_escapes(&message, crate::ui::ansi::StripPolicy::STRICT);
                 crate::ui::notifications::notify_send(match level {
                     NotifyLevel::Info => Notification::Info(message),
                     NotifyLevel::Warn => Notification::Warn(message),
@@ -92,7 +93,8 @@ pub fn face_of(name: Option<&str>) -> PanelFace {
 }
 
 fn str_field<'a>(obj: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
-    keys.iter().find_map(|k| obj.get(*k).and_then(Value::as_str))
+    keys.iter()
+        .find_map(|k| obj.get(*k).and_then(Value::as_str))
 }
 
 fn panel_id(obj: &Map<String, Value>) -> Option<String> {
@@ -180,8 +182,7 @@ fn append_tab(obj: &Map<String, Value>) -> Result<FeedEffect, Skip> {
         .get("line")
         .and_then(line_of)
         .or_else(|| {
-            str_field(obj, &["text"])
-                .map(|t| PanelLine::new(t, face_of(str_field(obj, &["face"]))))
+            str_field(obj, &["text"]).map(|t| PanelLine::new(t, face_of(str_field(obj, &["face"]))))
         })
         .ok_or(Skip::Missing {
             op: OP,

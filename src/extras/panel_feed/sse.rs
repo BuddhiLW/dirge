@@ -298,10 +298,7 @@ mod tests {
     fn incomplete_event_is_held_until_blank_line() {
         let mut p = SseParser::new();
         assert!(p.feed(b"data: partial\n").unwrap().is_empty());
-        assert_eq!(
-            p.feed(b"\n").unwrap(),
-            vec![ev(None, "message", "partial")]
-        );
+        assert_eq!(p.feed(b"\n").unwrap(), vec![ev(None, "message", "partial")]);
     }
 
     #[test]

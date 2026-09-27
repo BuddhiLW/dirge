@@ -99,7 +99,9 @@ async fn serve(listener: TcpListener, seen: mpsc::UnboundedSender<Seen>) {
         let _ = seen.send(req);
         if !line.contains(TOKEN_QUERY) {
             let _ = sock
-                .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
                 .await;
             continue;
         }
@@ -291,7 +293,10 @@ async fn wrong_token_is_retried_and_reply_reports_status() {
             .await
             .expect("attempt")
             .expect("request");
-        assert!(r.request_line().starts_with("GET /feed/events?token=wrong "));
+        assert!(
+            r.request_line()
+                .starts_with("GET /feed/events?token=wrong ")
+        );
     }
     let err = reply_to(&source, &ReplyAction::Refresh).await.unwrap_err();
     assert!(
