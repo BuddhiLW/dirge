@@ -205,6 +205,22 @@ impl AnyAgent {
             }
         }
 
+        let command_hooks = crate::agent::command_hooks::global();
+        let mut prompt = prompt;
+        if let Some(hooks) = &command_hooks {
+            system_prompt = crate::agent::command_hooks::loop_hooks::with_session_context(
+                hooks,
+                system_prompt,
+                self.session_id.as_deref(),
+                !history.is_empty(),
+            );
+            prompt.text = crate::agent::command_hooks::loop_hooks::submitted_prompt(
+                hooks,
+                self.session_id.as_deref(),
+                prompt.text,
+            );
+        }
+
         // Convert rig history → loop messages (Session-side
         // user/assistant/toolResult shapes).
         let loop_history = rig_history_to_loop_messages(history);
@@ -315,6 +331,7 @@ impl AnyAgent {
         // auto-compaction can fire on_pre_compress. `None` paths
         // (no provider attached) keep legacy no-op behavior.
         cfg.memory_provider = self.memory_provider.clone();
+        cfg.command_hooks = command_hooks.map(crate::agent::command_hooks::HookBinding::main);
         #[cfg(feature = "plugin")]
         {
             cfg.plugin_mgr = crate::plugin::hook::global();
@@ -558,11 +575,21 @@ impl AnyAgent {
             ),
             None => self.build_stream_fn(tool_defs),
         };
+        let command_hooks = crate::agent::command_hooks::global();
+        let system_prompt = match &command_hooks {
+            Some(hooks) => crate::agent::command_hooks::loop_hooks::with_subagent_context(
+                hooks,
+                system_prompt,
+                child_session_id,
+            ),
+            None => system_prompt,
+        };
         let mut cfg = LoopSpawnConfig::minimal(
             retrying_stream_fn(inner_stream_fn, RecoveryPolicy::default()),
             prompt,
         );
         cfg.system_prompt = system_prompt;
+        cfg.command_hooks = command_hooks.map(crate::agent::command_hooks::HookBinding::subagent);
         cfg.tools = tools;
         cfg.provider_name = Some(provider);
         cfg.reasoning = self.reasoning;

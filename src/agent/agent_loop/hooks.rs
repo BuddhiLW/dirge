@@ -55,6 +55,8 @@ pub struct BeforeToolCallReturn {
     /// args are what the tool executes with. Hooks that don't
     /// mutate should return the input args unchanged.
     pub args: Value,
+    /// Notes for the model, prepended to this call's result.
+    pub context: Vec<String>,
 }
 
 /// `beforeToolCall` hook signature. Pi (types.ts:262):

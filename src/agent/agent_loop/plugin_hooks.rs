@@ -76,6 +76,7 @@ pub fn before_hook_from_plugin_manager(pm: Arc<Mutex<PluginManager>>) -> BeforeT
                     return BeforeToolCallReturn {
                         result: None,
                         args: ctx.args,
+                        context: Vec::new(),
                     };
                 }
             };
@@ -119,6 +120,7 @@ pub fn before_hook_from_plugin_manager(pm: Arc<Mutex<PluginManager>>) -> BeforeT
                     return BeforeToolCallReturn {
                         result: None,
                         args: ctx.args,
+                        context: Vec::new(),
                     };
                 }
             };
@@ -131,6 +133,7 @@ pub fn before_hook_from_plugin_manager(pm: Arc<Mutex<PluginManager>>) -> BeforeT
                     return BeforeToolCallReturn {
                         result: None,
                         args: ctx.args,
+                        context: Vec::new(),
                     };
                 }
             };
@@ -145,6 +148,7 @@ pub fn before_hook_from_plugin_manager(pm: Arc<Mutex<PluginManager>>) -> BeforeT
                         reason: Some(reason),
                     }),
                     args: ctx.args,
+                    context: Vec::new(),
                 };
             }
 
@@ -178,6 +182,7 @@ pub fn before_hook_from_plugin_manager(pm: Arc<Mutex<PluginManager>>) -> BeforeT
             BeforeToolCallReturn {
                 result: None,
                 args: final_args,
+                context: Vec::new(),
             }
         })
     })
