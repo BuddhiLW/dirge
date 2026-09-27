@@ -482,6 +482,7 @@ async fn prepare_tool_call(
         // Thread it forward to execute. Pi mutates in-place; we
         // pass by value (documented in hooks.rs).
         validated_args = ret.args;
+        repair_notes.extend(ret.context);
 
         if signal.is_cancelled() {
             return PrepareOutcome::Immediate {
