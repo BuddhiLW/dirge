@@ -624,6 +624,24 @@ pub struct PluginSettings {
     pub auto_start: Option<bool>,
 }
 
+/// The `addons` key: the Clojure IAddon host (cargo feature `addons`).
+/// Absent = enabled whenever a manifest is found in `.dirge/addons/` or
+/// `~/.config/dirge/addons/`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AddonsConfig {
+    /// `false` loads no addons. Default true.
+    pub enabled: Option<bool>,
+    /// Extra directories searched for `META-INF/addons/*.edn`.
+    pub paths: Vec<String>,
+    /// Extra source roots on the addon classpath (e.g. the `src` of the
+    /// IAddon protocol library), before `DIRGE_ADDON_PATH`.
+    pub source_paths: Vec<String>,
+    /// Namespace defining the IAddon protocol functions (`addon?`,
+    /// `initialize!`, `shutdown!`, `tools`, optionally `hooks` and `health`).
+    pub protocol_ns: Option<String>,
+}
+
 /// Prompt-compression engine config. Disabled → no compression. Enabled with
 /// no preset → the "dirge" default (lossless transforms + tool-output
 /// windowing, no output-shaping). Other presets (e.g. `"agent"`,
@@ -970,6 +988,9 @@ pub struct Config {
     /// the `.janet` file stem under a plugin search dir). Absent entry =
     /// enabled, not auto-started (backward compatible).
     pub plugins: Option<HashMap<String, PluginSettings>>,
+    /// Clojure IAddon host settings (cargo feature `addons`). Absent =
+    /// load every addon found in the default search directories.
+    pub addons: Option<AddonsConfig>,
     /// Claude-Code-compatible command hooks: the same shape as the `hooks`
     /// key of Claude Code's `settings.json` (event name to matcher groups
     /// of `{ "type": "command", "command", "timeout" }`). Absent = none.

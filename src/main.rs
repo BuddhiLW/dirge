@@ -582,6 +582,10 @@ async fn main() -> anyhow::Result<()> {
     let cfg = config::load();
 
     crate::agent::command_hooks::install_from_config(&cfg);
+    // Clojure IAddons: discovered and loaded before the agent is built, so
+    // their tools and hooks are part of the first run.
+    #[cfg(feature = "addons")]
+    crate::addons::install_from_config(&cfg);
     crate::compression::init_from_config(cfg.compression.clone().unwrap_or_default());
     crate::compression::set_cli_disabled(cli.no_compression);
     crate::prompt_cache::init_from_config(cfg.prompt_cache.as_ref().and_then(|c| c.ttl.as_deref()));
@@ -2128,6 +2132,9 @@ async fn main() -> anyhow::Result<()> {
         // adapter + debuggee can be orphaned in their own process group.
         #[cfg(feature = "dap")]
         crate::dap::session::shutdown_active_session().await;
+        // IAddon `shutdown!` for every loaded addon, newest first.
+        #[cfg(feature = "addons")]
+        crate::addons::shutdown();
         // dirge-x949: MCP shutdown moved INTO run_interactive — for the
         // interactive path the connected manager is now owned there
         // (delivered by the background loader), so it shuts the servers
