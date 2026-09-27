@@ -22,6 +22,7 @@ For configuration keys and provider setup, see [config.md](config.md).
 | [verification-discipline.md](verification-discipline.md) | Project gate, CI advisory, masked-command guard, exploration-prologue bound, capability tier, and how to measure a loop change |
 | [tool-input-repair.md](tool-input-repair.md) | Repair layer for malformed tool calls — repair kinds, `dirge-hints` schema annotations, telemetry |
 | [plugins.md](plugins.md) | Janet plugin authoring — hook reference, `harness/*` API, examples |
+| [hooks.md](hooks.md) | Claude-Code-compatible command hooks (`hooks` / `claude_hooks`), events, payload dialect |
 | [themes.md](themes.md) | Built-in palettes and custom theme JSON schema |
 | [releasing.md](releasing.md) | Cutting a release — the six distribution channels, what drives each, required secrets |
 | [storyboards/](storyboards/) | Step-by-step walkthroughs of user-facing flows |

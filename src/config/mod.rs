@@ -970,6 +970,14 @@ pub struct Config {
     /// the `.janet` file stem under a plugin search dir). Absent entry =
     /// enabled, not auto-started (backward compatible).
     pub plugins: Option<HashMap<String, PluginSettings>>,
+    /// Claude-Code-compatible command hooks: the same shape as the `hooks`
+    /// key of Claude Code's `settings.json` (event name to matcher groups
+    /// of `{ "type": "command", "command", "timeout" }`). Absent = none.
+    pub hooks: Option<crate::agent::command_hooks::HooksConfig>,
+    /// When true, also run the hooks declared in `~/.claude/settings.json`
+    /// and the project's `.claude/settings.json` /
+    /// `.claude/settings.local.json`. Default false.
+    pub claude_hooks: Option<bool>,
     /// Optional OS-level desktop notifications for turn completion and
     /// prompts waiting on human input. Absent/off by default.
     pub desktop_notifications: Option<DesktopNotificationConfig>,

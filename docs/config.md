@@ -931,6 +931,15 @@ Plugin authors: read your own settings in **load-time** code with
 after, so capture it at the top level — not from a shared hook, where it
 would reflect the last plugin loaded.
 
+### Command hooks (`hooks`, `claude_hooks`)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `hooks` | absent | Claude-Code-compatible command hooks, same shape as the `hooks` key of Claude Code's `settings.json`. |
+| `claude_hooks` | `false` | Also run the hooks declared in `~/.claude/settings.json` and the project's `.claude/settings.json` / `.claude/settings.local.json`. |
+
+Reference: [hooks.md](hooks.md).
+
 ## Sandbox configuration
 
 The `sandbox` key accepts three forms:

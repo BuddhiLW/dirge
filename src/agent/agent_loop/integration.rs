@@ -555,6 +555,10 @@ pub struct LoopSpawnConfig {
     /// insights every time. `None` is a no-op (no provider attached, or a
     /// non-interactive test path).
     pub memory_provider: Option<std::sync::Arc<dyn crate::extras::memory_provider::MemoryProvider>>,
+
+    /// Claude-Code-compatible command hooks for this loop (`PreToolUse`,
+    /// `PostToolUse`, and its stop event). `None` installs none.
+    pub command_hooks: Option<crate::agent::command_hooks::HookBinding>,
 }
 
 impl LoopSpawnConfig {
@@ -609,6 +613,7 @@ impl LoopSpawnConfig {
             max_tokens: None,
             bg_store: None,
             memory_provider: None,
+            command_hooks: None,
         }
     }
 }
@@ -777,6 +782,14 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
                 None => Some(plugin_followup),
             };
         }
+    }
+
+    if let Some(binding) = &cfg.command_hooks {
+        crate::agent::command_hooks::loop_hooks::install(
+            &mut loop_config,
+            binding,
+            cfg.session_id.clone(),
+        );
     }
 
     let mut context = Context {

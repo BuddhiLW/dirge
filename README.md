@@ -495,6 +495,7 @@ as `auto_start`.
 | [docs/lsp.md](docs/lsp.md) | LSP integration and built-in server set |
 | [docs/tui.md](docs/tui.md) | Key bindings, avatar, tool-output display, themes |
 | [docs/plugins.md](docs/plugins.md) | Janet plugin authoring — hooks, `harness/*` API, examples |
+| [docs/hooks.md](docs/hooks.md) | Claude-Code-compatible command hooks (`hooks`, `claude_hooks`) |
 | [docs/agent-loop.md](docs/agent-loop.md) | Multi-turn execution loop architecture |
 | [docs/tool-input-repair.md](docs/tool-input-repair.md) | Repair layer for malformed tool calls |
 | [docs/themes.md](docs/themes.md) | Built-in palettes and custom theme schema |
