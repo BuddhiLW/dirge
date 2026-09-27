@@ -16,14 +16,14 @@
 #![allow(deprecated)]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{
-    ClientInfo, LoggingLevel, LoggingMessageNotificationParam, NumberOrString,
-    ProgressNotificationParam, ProgressToken,
+    ClientInfo, LoggingLevel, LoggingMessageNotificationParam, ProgressNotificationParam,
+    ProgressToken,
 };
 use rmcp::service::{NotificationContext, RoleClient};
 
@@ -41,12 +41,19 @@ const COALESCE_PRUNE_AT: usize = 256;
 // Progress token registry
 // ---------------------------------------------------------------------------
 
-/// Allocates unique progress tokens and maps each live token to the tool
-/// name it was issued for.
+/// Tracks in-flight tool calls per server so progress lines can name the
+/// tool.
+///
+/// rmcp 3.1.1 assigns `_meta.progressToken` itself (a per-peer counter,
+/// unique per request) and overwrites any caller-supplied token; the
+/// high-level `call_tool` does not expose the assigned token. So the
+/// token cannot be mapped to a tool before sending. Instead: when exactly
+/// one call is in flight on a server, its progress is attributed to that
+/// tool; with several concurrent calls the line stays generic.
 #[derive(Default)]
 pub struct ProgressRegistry {
-    next: AtomicI64,
-    tools: Mutex<HashMap<ProgressToken, String>>,
+    next: AtomicU64,
+    inflight: Mutex<HashMap<String, Vec<(u64, String)>>>,
 }
 
 impl ProgressRegistry {
@@ -54,63 +61,57 @@ impl ProgressRegistry {
         Self::default()
     }
 
-    /// Issue a fresh token for a call to `tool`. The mapping lives until
-    /// the returned guard drops.
-    pub fn issue(self: &Arc<Self>, tool: &str) -> ProgressTokenGuard {
-        let n = self.next.fetch_add(1, Ordering::Relaxed) + 1;
-        let token = ProgressToken(NumberOrString::Number(n));
-        self.tools
+    /// Record a call to `tool` on `server`; it stays in flight until the
+    /// returned guard drops.
+    pub fn issue(self: &Arc<Self>, server: &str, tool: &str) -> InflightGuard {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        self.inflight
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(token.clone(), tool.to_string());
-        ProgressTokenGuard {
+            .entry(server.to_string())
+            .or_default()
+            .push((id, tool.to_string()));
+        InflightGuard {
             registry: Arc::clone(self),
-            token,
+            server: server.to_string(),
+            id,
         }
     }
 
-    /// Tool name a token was issued for, if it is still live.
-    pub fn tool_for(&self, token: &ProgressToken) -> Option<String> {
-        self.tools
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(token)
-            .cloned()
+    /// The tool in flight on `server`, if exactly one is.
+    pub fn tool_for(&self, server: &str) -> Option<String> {
+        let map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        match map.get(server).map(Vec::as_slice) {
+            Some([(_, tool)]) => Some(tool.clone()),
+            _ => None,
+        }
     }
 
-    fn release(&self, token: &ProgressToken) {
-        self.tools
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(token);
-    }
-
-    #[cfg(test)]
-    fn live(&self) -> usize {
-        self.tools.lock().unwrap().len()
+    fn release(&self, server: &str, id: u64) {
+        let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(v) = map.get_mut(server) {
+            v.retain(|(i, _)| *i != id);
+            if v.is_empty() {
+                map.remove(server);
+            }
+        }
     }
 }
 
-/// Keeps a token registered for the duration of one tool call.
-pub struct ProgressTokenGuard {
+/// Keeps one call registered as in flight.
+pub struct InflightGuard {
     registry: Arc<ProgressRegistry>,
-    token: ProgressToken,
+    server: String,
+    id: u64,
 }
 
-impl ProgressTokenGuard {
-    pub fn token(&self) -> ProgressToken {
-        self.token.clone()
-    }
-}
-
-impl Drop for ProgressTokenGuard {
+impl Drop for InflightGuard {
     fn drop(&mut self) {
-        self.registry.release(&self.token);
+        self.registry.release(&self.server, self.id);
     }
 }
 
-/// Process-wide registry. Tokens are unique across servers, so one map
-/// serves every connection and survives reconnects.
+/// Process-wide registry shared by every connection; survives reconnects.
 pub fn global_registry() -> Arc<ProgressRegistry> {
     static GLOBAL: LazyLock<Arc<ProgressRegistry>> =
         LazyLock::new(|| Arc::new(ProgressRegistry::new()));
@@ -304,7 +305,7 @@ impl McpClientHandler {
         if !admitted {
             return;
         }
-        let tool = self.registry.tool_for(&params.progress_token);
+        let tool = self.registry.tool_for(&self.server);
         let line = format_progress(
             tool.as_deref(),
             params.progress,
@@ -390,22 +391,26 @@ mod tests {
         }
     }
 
+    use rmcp::model::NumberOrString;
+
     fn tok(n: i64) -> ProgressToken {
         ProgressToken(NumberOrString::Number(n))
     }
 
     #[test]
-    fn registry_issues_unique_tokens_and_releases_on_drop() {
+    fn registry_names_the_single_inflight_tool_per_server() {
         let reg = Arc::new(ProgressRegistry::new());
-        let a = reg.issue("alpha");
-        let b = reg.issue("beta");
-        assert_ne!(a.token(), b.token());
-        assert_eq!(reg.tool_for(&a.token()).as_deref(), Some("alpha"));
-        assert_eq!(reg.tool_for(&b.token()).as_deref(), Some("beta"));
-        let at = a.token();
+        let a = reg.issue("s1", "alpha");
+        let _other = reg.issue("s2", "gamma");
+        assert_eq!(reg.tool_for("s1").as_deref(), Some("alpha"));
+        let b = reg.issue("s1", "beta");
+        // Ambiguous while two calls share the server.
+        assert_eq!(reg.tool_for("s1"), None);
         drop(a);
-        assert_eq!(reg.tool_for(&at), None);
-        assert_eq!(reg.live(), 1);
+        assert_eq!(reg.tool_for("s1").as_deref(), Some("beta"));
+        drop(b);
+        assert_eq!(reg.tool_for("s1"), None);
+        assert_eq!(reg.tool_for("s2").as_deref(), Some("gamma"));
     }
 
     #[test]
@@ -468,8 +473,8 @@ mod tests {
         let reg = Arc::new(ProgressRegistry::new());
         let sink = Arc::new(RecordingSink::default());
         let h = McpClientHandler::new("srv", Arc::clone(&reg), sink.clone());
-        let guard = reg.issue("index");
-        let t = guard.token();
+        let _guard = reg.issue("srv", "index");
+        let t = tok(7);
         h.handle_progress(&ProgressNotificationParam::new(t.clone(), 1.0).with_total(4.0));
         h.handle_progress(&ProgressNotificationParam::new(t.clone(), 2.0).with_total(4.0));
         h.handle_progress(&ProgressNotificationParam::new(t.clone(), 4.0).with_total(4.0));
@@ -493,5 +498,78 @@ mod tests {
         ));
         assert_eq!(sink.lines(), vec!["ERR|[mcp:srv] loud"]);
         assert_eq!(*sink.debugs.lock().unwrap(), vec!["[mcp:srv] quiet"]);
+    }
+
+    /// End to end over an in-process duplex pipe: a scripted JSON-RPC
+    /// server answers `initialize`, then on `tools/call` echoes progress
+    /// for the request's `_meta.progressToken` plus a warning log before
+    /// replying. The handler must name the tool and surface the warning.
+    #[tokio::test]
+    async fn duplex_progress_and_logging_reach_the_sink() {
+        use rmcp::model::CallToolRequestParams;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let (r, mut w) = tokio::io::split(server_io);
+            let mut lines = BufReader::new(r).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let msg: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let id = msg.get("id").cloned();
+                let reply = match msg["method"].as_str() {
+                    Some("initialize") => vec![serde_json::json!({
+                        "jsonrpc": "2.0", "id": id, "result": {
+                            "protocolVersion": msg["params"]["protocolVersion"],
+                            "capabilities": {"tools": {}, "logging": {}},
+                            "serverInfo": {"name": "scripted", "version": "0"}
+                        }
+                    })],
+                    Some("tools/call") => {
+                        let token = msg["params"]["_meta"]["progressToken"].clone();
+                        vec![
+                            serde_json::json!({"jsonrpc": "2.0",
+                                "method": "notifications/progress",
+                                "params": {"progressToken": token, "progress": 2, "total": 2}}),
+                            serde_json::json!({"jsonrpc": "2.0",
+                                "method": "notifications/message",
+                                "params": {"level": "warning", "data": "slow disk"}}),
+                            serde_json::json!({"jsonrpc": "2.0", "id": id,
+                                "result": {"content": [], "isError": false}}),
+                        ]
+                    }
+                    _ => vec![],
+                };
+                for m in reply {
+                    let mut s = m.to_string();
+                    s.push('\n');
+                    w.write_all(s.as_bytes()).await.unwrap();
+                }
+                w.flush().await.unwrap();
+            }
+        });
+
+        let reg = Arc::new(ProgressRegistry::new());
+        let sink = Arc::new(RecordingSink::default());
+        let handler = McpClientHandler::new("srv", Arc::clone(&reg), sink.clone());
+        let rs = rmcp::service::serve_client(handler, client_io)
+            .await
+            .expect("initialize");
+        let guard = reg.issue("srv", "reindex");
+        let params = CallToolRequestParams::new("reindex");
+        rs.peer().call_tool(params).await.expect("call_tool");
+        drop(guard);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while sink.lines().len() < 2 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut got = sink.lines();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["WARN|[mcp:srv] slow disk", "srv|reindex: 2/2 (100%)"]
+        );
+        drop(rs);
+        server.abort();
     }
 }
