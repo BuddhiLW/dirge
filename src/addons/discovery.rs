@@ -11,8 +11,15 @@ use super::layout;
 /// shallow enough that pointing it at a home directory cannot hang startup.
 const MAX_DEPTH: usize = 6;
 
-/// Directories never worth descending into.
-const SKIP: &[&str] = &[".git", "target", "node_modules", ".cpcache", ".clj-kondo"];
+/// Directories never worth descending into, beside every hidden one
+/// (`.git`, `.cpcache`, or a `.worktrees` checkout that would otherwise
+/// offer a second copy of each manifest).
+const SKIP: &[&str] = &["target", "node_modules"];
+
+/// True for a child directory the walks do not enter.
+fn skipped(name: &str) -> bool {
+    name.starts_with('.') || SKIP.contains(&name)
+}
 
 /// How deep an addon's `src` is walked for its own sources: namespaces
 /// nest deeper than manifests do.
@@ -64,11 +71,11 @@ fn walk(
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            let skipped = path
+            let skip = path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| SKIP.contains(&n));
-            if !skipped {
+                .is_some_and(skipped);
+            if !skip {
                 walk(&path, depth + 1, max_depth, keep, found);
             }
         } else if keep(&path) {
@@ -198,7 +205,35 @@ mod tests {
             &root.join("addons/hd/target/META-INF/addons/stale.edn"),
             "{}",
         );
+        write(
+            &root.join("addons/hd/.worktrees/branch/resources/META-INF/addons/hd.edn"),
+            "{:addon/id \"hd\"}",
+        );
+        write(
+            &root.join("addons/hd/.worktrees/branch/src/hd/core.cljc"),
+            "(ns hd.core)",
+        );
         tmp
+    }
+
+    #[test]
+    fn own_sources_are_the_repos_portable_files_only() {
+        let tmp = fleet();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join("addons/hd/src/hd/jvm.clj"), "(ns hd.jvm)");
+        write(
+            &root.join("addons/hd/src/hd/deep/x.cljrs"),
+            "(ns hd.deep.x)",
+        );
+        let manifest = root.join("addons/hd/resources/META-INF/addons/hd.edn");
+        assert_eq!(
+            own_sources(&[manifest]),
+            vec![
+                root.join("addons/hd/src/hd/core.cljc"),
+                root.join("addons/hd/src/hd/deep/x.cljrs"),
+            ],
+            "no .clj, nothing from lib/ (a dependency), nothing hidden"
+        );
     }
 
     #[test]
