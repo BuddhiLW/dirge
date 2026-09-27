@@ -2668,6 +2668,24 @@ pub async fn run_interactive(
                                         renderer.request_repaint();
                                         continue;
                                     }
+                                    Some(
+                                        a @ (KeyAction::PanelNextTab
+                                        | KeyAction::PanelPrevTab
+                                        | KeyAction::PanelRefresh),
+                                    ) => {
+                                        // Reply to the external panel producer; a
+                                        // failure arrives as a notification.
+                                        crate::extras::panel_feed::spawn_reply(match a {
+                                            KeyAction::PanelNextTab => {
+                                                crate::extras::panel_feed::ReplyAction::NextTab
+                                            }
+                                            KeyAction::PanelPrevTab => {
+                                                crate::extras::panel_feed::ReplyAction::PrevTab
+                                            }
+                                            _ => crate::extras::panel_feed::ReplyAction::Refresh,
+                                        });
+                                        continue;
+                                    }
                                     _ => {}
                                 }
 

@@ -195,7 +195,12 @@ static SUBCOMMAND_ENTRIES: &[(&str, &[&str])] = &[
             "help",
         ],
     ),
-    ("/panel", &["on", "off", "auto", "debug"]),
+    (
+        "/panel",
+        &[
+            "on", "off", "auto", "debug", "next", "prev", "refresh", "focus", "unfocus",
+        ],
+    ),
     ("/plugins", &["load"]),
     ("/display", &[]), // dynamic: pane spec
     ("/kill", &[]),    // dynamic: subagent ID

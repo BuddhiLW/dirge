@@ -25,6 +25,7 @@ use serde_json::json;
 use tokio::sync::watch;
 
 use crate::sync_util::LockExt;
+use crate::ui::notifications::Notification;
 use client::{FeedOptions, ReplyError};
 use discovery::{PanelFeedConfig, Source};
 
@@ -34,7 +35,6 @@ static ACTIVE: Mutex<Option<Source>> = Mutex::new(None);
 
 /// One reply the user can send back to the producer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // key bindings that send replies land separately
 pub enum ReplyAction {
     /// Focus the item `target` (an id the producer showed).
     Focus(String),
@@ -46,7 +46,48 @@ pub enum ReplyAction {
     Refresh,
 }
 
+/// Usage line for the reply verbs of `/panel`.
+pub const REPLY_USAGE: &str = "usage: /panel next|prev|refresh|unfocus|focus <id>";
+
 impl ReplyAction {
+    /// Parse the words after `/panel` into a reply (pure). `Err`
+    /// carries a user-facing usage message.
+    pub fn parse(args: &[&str]) -> Result<Self, String> {
+        let verb = args.first().map(|s| s.trim()).unwrap_or("");
+        let rest = &args[args.len().min(1)..];
+        let action = match verb {
+            "next" | "next-tab" => Self::NextTab,
+            "prev" | "prev-tab" => Self::PrevTab,
+            "refresh" => Self::Refresh,
+            "unfocus" => Self::Unfocus,
+            "focus" => {
+                return match rest {
+                    [id] if !id.trim().is_empty() => Ok(Self::Focus(id.trim().to_string())),
+                    [] => Err(format!("/panel focus needs an item id ({REPLY_USAGE})")),
+                    _ => Err(format!("/panel focus takes one id ({REPLY_USAGE})")),
+                };
+            }
+            "" => return Err(REPLY_USAGE.to_string()),
+            other => return Err(format!("unknown /panel action '{other}' ({REPLY_USAGE})")),
+        };
+        if rest.is_empty() {
+            Ok(action)
+        } else {
+            Err(format!("/panel {verb} takes no argument ({REPLY_USAGE})"))
+        }
+    }
+
+    /// The wire name of the action.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Focus(_) => "focus",
+            Self::Unfocus => "unfocus",
+            Self::NextTab => "next-tab",
+            Self::PrevTab => "prev-tab",
+            Self::Refresh => "refresh",
+        }
+    }
+
     /// The JSON body POSTed to `<url>/reply` (pure).
     pub fn to_json(&self) -> String {
         let value = match self {
@@ -61,13 +102,62 @@ impl ReplyAction {
 }
 
 /// Send `action` to the running feed's producer.
-#[allow(dead_code)] // key bindings that send replies land separately
 pub async fn reply(action: ReplyAction) -> Result<(), ReplyError> {
     let source = ACTIVE
         .lock_ignore_poison()
         .clone()
         .ok_or(ReplyError::NotRunning)?;
     reply_to(&source, &action).await
+}
+
+/// Where replies are sent. Production: [`LiveFeed`]; tests record.
+pub trait ReplyTransport: Send + Sync {
+    fn send(&self, action: &ReplyAction) -> impl Future<Output = Result<(), ReplyError>> + Send;
+}
+
+/// The running feed's producer (re-resolved on every reply).
+pub struct LiveFeed;
+
+impl ReplyTransport for LiveFeed {
+    async fn send(&self, action: &ReplyAction) -> Result<(), ReplyError> {
+        reply(action.clone()).await
+    }
+}
+
+/// The notification a failed reply surfaces (pure). No running feed
+/// is a warning; a refused or broken request is an error.
+pub fn failure_notice(action: &ReplyAction, err: &ReplyError) -> Notification {
+    let message = crate::ui::ansi::strip_escapes(
+        &format!("panel reply '{}' failed: {err}", action.name()),
+        crate::ui::ansi::StripPolicy::STRICT,
+    );
+    match err {
+        ReplyError::NotRunning => Notification::Warn(message),
+        _ => Notification::Error(message),
+    }
+}
+
+/// Send `action` through `transport`; a failure comes back as the
+/// notification to show.
+pub async fn send_reply<T: ReplyTransport>(
+    transport: &T,
+    action: ReplyAction,
+) -> Option<Notification> {
+    match transport.send(&action).await {
+        Ok(()) => None,
+        Err(err) => Some(failure_notice(&action, &err)),
+    }
+}
+
+/// Fire `action` at the running feed without blocking the caller; a
+/// failure is posted on the notification channel. Must be called
+/// inside a tokio runtime.
+pub fn spawn_reply(action: ReplyAction) {
+    tokio::spawn(async move {
+        if let Some(notice) = send_reply(&LiveFeed, action).await {
+            crate::ui::notifications::notify_send(notice);
+        }
+    });
 }
 
 /// Send `action` to the producer behind `source`.

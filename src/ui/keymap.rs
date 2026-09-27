@@ -87,6 +87,12 @@ pub enum KeyAction {
     /// to the main screen and mouse reporting died (wheel scrolls native
     /// scrollback, selection uncaptured) — conventional Ctrl+L "redraw".
     RedrawTerminal,
+    /// Ask the external panel producer to show its next view.
+    PanelNextTab,
+    /// Ask the external panel producer to show its previous view.
+    PanelPrevTab,
+    /// Ask the external panel producer to repaint everything it shows.
+    PanelRefresh,
 }
 
 impl Command for KeyAction {
@@ -163,6 +169,24 @@ impl Command for KeyAction {
             KeyAction::RedrawTerminal,
             "redraw_terminal",
             &[(KeyCode::Char('l'), KeyModifiers::CONTROL)],
+        ),
+        // External panel replies. Alt+`]`/`[` are unusable: they are the
+        // introducers of terminal reports and CSI, so the punctuation
+        // pair next to them on the keyboard is used instead.
+        (
+            KeyAction::PanelNextTab,
+            "panel_next_tab",
+            &[(KeyCode::Char('.'), KeyModifiers::ALT)],
+        ),
+        (
+            KeyAction::PanelPrevTab,
+            "panel_prev_tab",
+            &[(KeyCode::Char(','), KeyModifiers::ALT)],
+        ),
+        (
+            KeyAction::PanelRefresh,
+            "panel_refresh",
+            &[(KeyCode::Char('/'), KeyModifiers::ALT)],
         ),
     ];
 }
@@ -753,6 +777,36 @@ mod tests {
         assert_eq!(
             km.resolve(&ev(KeyCode::Char('l'), KeyModifiers::CONTROL)),
             Some(KeyAction::RedrawTerminal)
+        );
+    }
+
+    /// External panel replies sit on Alt+. / Alt+, / Alt+/ and shadow
+    /// no other default in either keymap.
+    #[test]
+    fn panel_reply_keys_collide_with_nothing() {
+        let km = Keymap::defaults();
+        let input = InputKeymap::defaults();
+        for (c, want) in [
+            ('.', KeyAction::PanelNextTab),
+            (',', KeyAction::PanelPrevTab),
+            ('/', KeyAction::PanelRefresh),
+        ] {
+            let key = ev(KeyCode::Char(c), KeyModifiers::ALT);
+            assert_eq!(km.resolve(&key), Some(want));
+            assert_eq!(input.resolve_lenient(&key), None);
+        }
+        for (_, _, chords) in KeyAction::ALL {
+            for chord in *chords {
+                let owners = KeyAction::ALL
+                    .iter()
+                    .filter(|(_, _, cs)| cs.contains(chord))
+                    .count();
+                assert_eq!(owners, 1, "{chord:?} bound twice");
+            }
+        }
+        assert_eq!(
+            KeyAction::from_command("panel-next-tab"),
+            Some(KeyAction::PanelNextTab)
         );
     }
 

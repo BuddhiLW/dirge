@@ -1081,6 +1081,9 @@ routes to the right one by its command name.
 | `kill_subagent` | `ctrl-k` | Kill the focused subagent |
 | `drop_queue` | `alt-x` | Drop queued interjections (without cancelling the run) |
 | `cycle_prompt` | `shift-tab` | Cycle the active prompt layer to the next available prompt |
+| `panel_next_tab` | `alt-.` | External panel feed: ask the producer for its next view |
+| `panel_prev_tab` | `alt-,` | External panel feed: ask the producer for its previous view |
+| `panel_refresh` | `alt-/` | External panel feed: ask the producer to repaint |
 
 ### Input-editor commands
 

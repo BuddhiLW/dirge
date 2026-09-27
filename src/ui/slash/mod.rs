@@ -903,7 +903,10 @@ fn slash_commands() -> Vec<(&'static str, &'static str)> {
         ),
         ("/mode", "view or set the permission/security mode"),
         ("/model", "list configured models, or switch to one"),
-        ("/panel", "toggle the side panels on or off"),
+        (
+            "/panel",
+            "toggle the side panels; next|prev|refresh|focus <id>|unfocus drive an external panel",
+        ),
         ("/plan", "run the phased plan workflow on a request"),
         ("/plugins", "list or load plugins"),
         ("/prompt", "list, switch, or reset the active prompt layer"),

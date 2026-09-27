@@ -309,3 +309,105 @@ async fn wrong_token_is_retried_and_reply_reports_status() {
     assert!(sink.0.lock().unwrap().is_empty());
     std::fs::remove_dir_all(dir).ok();
 }
+
+mod reply_command {
+    use std::sync::Mutex;
+
+    use super::super::client::ReplyError;
+    use super::super::{ReplyAction, ReplyTransport, failure_notice, send_reply};
+    use crate::ui::notifications::Notification;
+
+    #[test]
+    fn parses_every_verb() {
+        let ok = |args: &[&str]| ReplyAction::parse(args).expect("valid");
+        assert_eq!(ok(&["next"]), ReplyAction::NextTab);
+        assert_eq!(ok(&["next-tab"]), ReplyAction::NextTab);
+        assert_eq!(ok(&["prev"]), ReplyAction::PrevTab);
+        assert_eq!(ok(&["refresh"]), ReplyAction::Refresh);
+        assert_eq!(ok(&["unfocus"]), ReplyAction::Unfocus);
+        assert_eq!(ok(&["focus", "w-1"]), ReplyAction::Focus("w-1".into()));
+    }
+
+    #[test]
+    fn rejects_bad_input_with_usage() {
+        for args in [
+            &[][..],
+            &["sideways"][..],
+            &["focus"][..],
+            &["focus", "a", "b"][..],
+            &["next", "x"][..],
+        ] {
+            let err = ReplyAction::parse(args).expect_err("invalid");
+            assert!(err.contains("usage: /panel"), "{args:?} -> {err}");
+        }
+        let missing = ReplyAction::parse(&["focus"]).unwrap_err();
+        assert!(missing.contains("needs an item id"), "{missing}");
+    }
+
+    /// Records every action and answers with a canned result.
+    struct Recording {
+        sent: Mutex<Vec<ReplyAction>>,
+        answer: fn() -> Result<(), ReplyError>,
+    }
+
+    impl ReplyTransport for Recording {
+        async fn send(&self, action: &ReplyAction) -> Result<(), ReplyError> {
+            self.sent.lock().unwrap().push(action.clone());
+            (self.answer)()
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_goes_through_the_transport() {
+        let t = Recording {
+            sent: Mutex::new(Vec::new()),
+            answer: || Ok(()),
+        };
+        assert!(send_reply(&t, ReplyAction::NextTab).await.is_none());
+        assert!(
+            send_reply(&t, ReplyAction::Focus("x".into()))
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            *t.sent.lock().unwrap(),
+            [ReplyAction::NextTab, ReplyAction::Focus("x".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn failures_become_notifications() {
+        let not_running = Recording {
+            sent: Mutex::new(Vec::new()),
+            answer: || Err(ReplyError::NotRunning),
+        };
+        match send_reply(&not_running, ReplyAction::Refresh).await {
+            Some(Notification::Warn(m)) => {
+                assert!(m.contains("refresh") && m.contains("no panel feed"), "{m}")
+            }
+            other => panic!("expected a warning, got {other:?}"),
+        }
+        let refused = Recording {
+            sent: Mutex::new(Vec::new()),
+            answer: || Err(ReplyError::Status(503)),
+        };
+        match send_reply(&refused, ReplyAction::PrevTab).await {
+            Some(Notification::Error(m)) => {
+                assert!(m.contains("prev-tab") && m.contains("503"), "{m}")
+            }
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transport_errors_are_errors_and_escape_free() {
+        let n = failure_notice(
+            &ReplyAction::NextTab,
+            &ReplyError::Http("boom \u{1b}[31mred".into()),
+        );
+        match n {
+            Notification::Error(m) => assert!(!m.contains('\u{1b}'), "{m:?}"),
+            other => panic!("{other:?}"),
+        }
+    }
+}

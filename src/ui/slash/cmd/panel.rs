@@ -1,5 +1,6 @@
 //! /panel and /display handlers.
 
+use crate::extras::panel_feed::{self, ReplyAction};
 use crate::ui::renderer::{PanelMode, parse_display_spec};
 use crate::ui::slash::{SlashCtx, c_agent, c_error};
 
@@ -11,11 +12,22 @@ pub(crate) async fn cmd_panel(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow:
         "off" => Some(PanelMode::Off),
         "auto" => Some(PanelMode::Auto),
         "debug" => Some(PanelMode::Debug),
-        other => {
-            ctx.renderer.write_line(
-                &format!("unknown /panel mode '{}' (use on|off|auto|debug)", other),
-                c_error(),
-            )?;
+        _ => {
+            // Anything else is a reply to the external panel producer.
+            match ReplyAction::parse(&parts[1..]) {
+                Ok(action) => {
+                    let name = action.name();
+                    panel_feed::spawn_reply(action);
+                    ctx.renderer
+                        .write_line(&format!("panel reply '{name}' requested"), c_agent())?;
+                }
+                Err(usage) => {
+                    ctx.renderer.write_line(
+                        &format!("{usage} (display modes: on|off|auto|debug)"),
+                        c_error(),
+                    )?;
+                }
+            }
             return Ok(());
         }
     };
