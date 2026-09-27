@@ -20,6 +20,7 @@ pub mod policy;
 pub mod port;
 pub mod sink;
 pub mod tool;
+pub mod tool_calls;
 
 #[cfg(test)]
 mod acceptance_tests;
@@ -163,16 +164,26 @@ fn register_commands(host: &AddonHost) {
 }
 
 /// What `dirge.harness` reaches in this process: the TUI for notifications
-/// and panels, and the MCP servers dirge connects to.
+/// and panels, dirge's loop tools, and the MCP servers dirge connects to.
 fn harness() -> Harness {
     let tui = Arc::new(sink::TuiSink);
     let mut harness = Harness::with_sink(tui.clone());
     harness.panels = tui;
+    if let Some(live) = tool_calls::LoopTools::live(Arc::new(addon_tool_names)) {
+        harness.tools = Arc::new(live);
+    }
     #[cfg(feature = "mcp")]
     if let Some(live) = mcp::LiveMcp::current() {
         harness.mcp = Arc::new(live);
     }
     harness
+}
+
+/// Names the model sees for the running host's addon tools.
+fn addon_tool_names() -> Vec<String> {
+    global()
+        .map(|host| host.tools().into_iter().map(|t| t.exposed_name).collect())
+        .unwrap_or_default()
 }
 
 fn protocol_ns(settings: &crate::config::AddonsConfig) -> &str {

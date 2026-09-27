@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use super::discovery;
 use super::domain::{HookPoint, PanelRequest};
-use super::port::{Harness, HarnessSink, Level, McpGateway, PanelSink};
+use super::port::{Harness, HarnessSink, Level, McpGateway, NoTools, PanelSink, ToolGateway};
 
 #[derive(Default)]
 struct RecordingSink(Mutex<Vec<(Level, String)>>);
@@ -44,6 +44,24 @@ impl McpGateway for ScriptedMcp {
             .unwrap()
             .push((server.into(), tool.into(), args.clone()));
         Ok(json!({"content": [{"type": "text", "text": format!("found {}", args["q"])}]}))
+    }
+}
+
+/// One dirge tool, `read`, answering the path it was handed.
+#[derive(Default)]
+struct ScriptedTools(Mutex<Vec<(String, Value)>>);
+
+impl ToolGateway for ScriptedTools {
+    fn names(&self) -> Vec<String> {
+        vec!["read".to_string()]
+    }
+
+    fn call(&self, tool: &str, args: &Value) -> Result<String, String> {
+        self.0.lock().unwrap().push((tool.into(), args.clone()));
+        match tool {
+            "read" => Ok(format!("contents of {}", args["path"])),
+            other => Err(format!("no tool named '{other}'")),
+        }
     }
 }
 
@@ -108,12 +126,13 @@ fn addon_commands_reach_the_panel_and_mcp_through_the_harness() {
         sink: Arc::new(RecordingSink::default()),
         panels: panels.clone(),
         mcp: mcp.clone(),
+        tools: Arc::new(NoTools),
     };
     let host =
         super::start(echo_plan(&fixtures().join("echo")), harness, PROTOCOL).expect("host starts");
 
     let names: Vec<String> = host.commands().into_iter().map(|c| c.name).collect();
-    assert_eq!(names, vec!["ask", "echo"]);
+    assert_eq!(names, vec!["ask", "echo", "run"]);
 
     let echo = host.command("echo").expect("echo registered");
     let out = host.run_command(&echo, "hello there").expect("echo runs");
@@ -159,6 +178,42 @@ fn mcp_calls_are_refused_while_the_event_loop_waits_on_the_addon() {
         "refused"
     );
     assert!(mcp.0.lock().unwrap().is_empty());
+    host.shutdown();
+}
+
+#[test]
+fn addon_commands_call_dirge_tools_through_the_harness() {
+    let tools = Arc::new(ScriptedTools::default());
+    let mut harness = Harness::with_sink(Arc::new(RecordingSink::default()));
+    harness.tools = tools.clone();
+    let host = Arc::new(
+        super::start(echo_plan(&fixtures().join("echo")), harness, PROTOCOL).expect("host starts"),
+    );
+    let run = host.command("run").expect("run registered");
+
+    let out = host.run_command(&run, "read").expect("run runs");
+    assert_eq!(out.text.as_deref(), Some("contents of \"README.md\""));
+    let out = host.run_command(&run, "nowhere").expect("run runs");
+    assert_eq!(out.text.as_deref(), Some("error: no tool named 'nowhere'"));
+    assert_eq!(
+        *tools.0.lock().unwrap(),
+        vec![
+            ("read".into(), json!({"path": "README.md"})),
+            ("nowhere".into(), json!({"path": "README.md"})),
+        ]
+    );
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let out = rt
+        .block_on(async { host.run_command(&run, "read") })
+        .unwrap();
+    assert!(
+        out.text.unwrap().contains("call-tool is unavailable"),
+        "refused on the runtime thread"
+    );
+    assert_eq!(tools.0.lock().unwrap().len(), 2, "gateway not reached");
     host.shutdown();
 }
 

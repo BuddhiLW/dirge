@@ -57,6 +57,16 @@ pub trait McpGateway: Send + Sync + 'static {
     fn call(&self, server: &str, tool: &str, args: &Value) -> Result<Value, String>;
 }
 
+/// dirge's own loop tools, as `dirge.harness/call-tool` reaches them. Calls
+/// block the calling thread until the tool answers.
+pub trait ToolGateway: Send + Sync + 'static {
+    /// Names of the tools addon code may call.
+    fn names(&self) -> Vec<String>;
+
+    /// Run `tool` with JSON object `args`. `Ok` carries its output as text.
+    fn call(&self, tool: &str, args: &Value) -> Result<String, String>;
+}
+
 /// Everything the `dirge.harness` natives reach, injected when the runtime
 /// boots.
 #[derive(Clone)]
@@ -64,16 +74,31 @@ pub struct Harness {
     pub sink: Arc<dyn HarnessSink>,
     pub panels: Arc<dyn PanelSink>,
     pub mcp: Arc<dyn McpGateway>,
+    pub tools: Arc<dyn ToolGateway>,
 }
 
 impl Harness {
-    /// Notifications to `sink`; no panels, no MCP servers.
+    /// Notifications to `sink`; no panels, no MCP servers, no tools.
     pub fn with_sink(sink: Arc<dyn HarnessSink>) -> Self {
         Self {
             sink,
             panels: Arc::new(NoPanels),
             mcp: Arc::new(NoMcp),
+            tools: Arc::new(NoTools),
         }
+    }
+}
+
+/// A host without callable tools.
+pub struct NoTools;
+
+impl ToolGateway for NoTools {
+    fn names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn call(&self, tool: &str, _args: &Value) -> Result<String, String> {
+        Err(format!("no tool named '{tool}'"))
     }
 }
 

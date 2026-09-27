@@ -122,6 +122,14 @@ The `dirge.harness` namespace is available to addon code:
 | `(log level msg)` | a log event on the `dirge::addon` target |
 | `(cwd)` | dirge's working directory |
 | `(version)` | the dirge version |
+| `(tools)` | names of the dirge tools `call-tool` can run |
+| `(call-tool name)` / `(call-tool name args)` | run a dirge tool (built-in or MCP) with the `args` map; answers `{:ok text}` or `{:error msg}` |
+
+`call-tool` goes through the tool's own permission check, so a call to
+`bash` still asks the user. It refuses addon tools and `task`, and it is
+unavailable from `:dirge/system-prompt` and `:dirge/on-prompt` hooks and
+during load and shutdown, while dirge is waiting on the addon; call it from
+a command, a tool or a tool-call hook.
 
 To keep an addon portable, resolve these at call time, for example
 `(when-let [f (resolve 'dirge.harness/notify)] (f "hi"))`, so the code is a

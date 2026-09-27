@@ -20,6 +20,10 @@ const BLOCKED_MCP_CALL: &str = "mcp-call is unavailable while dirge waits on thi
      (system-prompt and on-prompt hooks, load, shutdown); call it from a command, \
      a tool or a tool-call hook";
 
+const BLOCKED_CALL_TOOL: &str = "call-tool is unavailable while dirge waits on this addon \
+     (system-prompt and on-prompt hooks, load, shutdown); call it from a command, \
+     a tool or a tool-call hook";
+
 /// Register `dirge.harness` into `globals`.
 ///
 /// - `(notify msg)` / `(notify msg level)`: a line in dirge's chat area;
@@ -41,8 +45,19 @@ const BLOCKED_MCP_CALL: &str = "mcp-call is unavailable while dirge waits on thi
 ///   `{:op :show :id :title :lines [...]}` (or `:markdown "..."` instead of
 ///   `:lines`), `{:op :append :id :text :face}`, `{:op :focus :id :title}` or
 ///   `{:op :close :id}`. Answers true when the change was delivered.
+/// - `(tools)`: names of the dirge tools `call-tool` reaches.
+/// - `(call-tool name)` / `(call-tool name args)`: run a dirge tool (a
+///   built-in or an MCP tool) with the `args` map. Answers `{:ok text}` or
+///   `{:error msg}`. Blocks until the tool answers. Addon tools and `task`
+///   are refused, and so is any call while dirge's event loop waits on the
+///   addon, as for `mcp-call`.
 pub fn install(globals: &Arc<GlobalEnv>, harness: Harness, caller_on_runtime: Rc<Cell<bool>>) {
-    let Harness { sink, panels, mcp } = harness;
+    let Harness {
+        sink,
+        panels,
+        mcp,
+        tools,
+    } = harness;
     define(globals, "notify", Arity::Variadic { min: 1 }, move |args| {
         let level = args.get(1).map_or(Level::Info, level_of);
         sink.notify(level, &text(&args[0]));
@@ -70,12 +85,13 @@ pub fn install(globals: &Arc<GlobalEnv>, harness: Harness, caller_on_runtime: Rc
     define(globals, "mcp-servers", Arity::Fixed(0), move |_| {
         Ok(bridge::to_clj(&Json::from(gateway.servers())))
     });
+    let mcp_blocked = caller_on_runtime.clone();
     define(
         globals,
         "mcp-call",
         Arity::Variadic { min: 2 },
         move |args| {
-            if caller_on_runtime.get() {
+            if mcp_blocked.get() {
                 return Ok(bridge::to_clj(&json!({ "error": BLOCKED_MCP_CALL })));
             }
             let params = args.get(2).map_or_else(|| json!({}), bridge::to_json);
@@ -99,6 +115,26 @@ pub fn install(globals: &Arc<GlobalEnv>, harness: Harness, caller_on_runtime: Rc
                 tracing::warn!(target: "dirge::addon", %error, "panel op ignored");
                 Ok(Value::Bool(false))
             }
+        },
+    );
+    let catalog = tools.clone();
+    define(globals, "tools", Arity::Fixed(0), move |_| {
+        Ok(bridge::to_clj(&Json::from(catalog.names())))
+    });
+    define(
+        globals,
+        "call-tool",
+        Arity::Variadic { min: 1 },
+        move |args| {
+            if caller_on_runtime.get() {
+                return Ok(bridge::to_clj(&json!({ "error": BLOCKED_CALL_TOOL })));
+            }
+            let params = args.get(1).map_or_else(|| json!({}), bridge::to_json);
+            let answer = match tools.call(&text(&args[0]), &params) {
+                Ok(output) => json!({ "ok": output }),
+                Err(error) => json!({ "error": error }),
+            };
+            Ok(bridge::to_clj(&answer))
         },
     );
     globals.mark_loaded(HARNESS_NS);

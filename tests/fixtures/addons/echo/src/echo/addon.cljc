@@ -27,6 +27,13 @@
       {:text   (apply str (map :text (:content answer)))
        :prompt (str "summarize " args)})))
 
+(defn- run-command
+  [{:keys [args]}]
+  (let [answer ((harness "call-tool") args {:path "README.md"})]
+    {:text (if-let [error (:error answer)]
+             (str "error: " error)
+             (:ok answer))}))
+
 (defrecord EchoAddon [state]
   p/IAddon
   (addon-id [_] "echo")
@@ -47,7 +54,9 @@
      :dirge/commands      {"echo" {:description "Echo the arguments into a panel"
                                    :handler     echo-command}
                            "ask"  {:description "Ask the fixture MCP server"
-                                   :handler     ask-command}}})
+                                   :handler     ask-command}
+                           "run"  {:description "Run a dirge tool on README.md"
+                                   :handler     run-command}}})
   (health [_]
     {:status (if @state :ok :down)}))
 
