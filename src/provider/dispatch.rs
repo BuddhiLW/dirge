@@ -164,6 +164,17 @@ fn resolve_codex_default(is_codex: bool, requested: &str, explicit: bool) -> Str
     }
 }
 
+pub(crate) fn model_is_explicit(
+    provider_alias: &str,
+    requested: &str,
+    providers: &std::collections::HashMap<String, crate::config::ProviderEntry>,
+    cli_model_explicit: bool,
+    config_model_present: bool,
+) -> bool {
+    cli_model_explicit
+        || (config_model_present
+            && requested != super::default_model_for_alias(provider_alias, providers))
+}
 /// Decide the effective startup model name and its explicitness, then resolve
 /// the Codex default (dirge-ovjk follow-up). Consolidates the fresh / resume /
 /// `--model`-override cases:
@@ -216,22 +227,45 @@ mod resolve_model_name_tests {
     // to the OpenAI default can't silently make the matrix below vacuous.
     #[test]
     fn openai_default_is_the_id_that_gets_remapped() {
-        assert_eq!(super::super::default_model_for("openai"), "gpt-4o");
+        assert_eq!(super::super::default_model_for("openai"), "gpt-6");
     }
 
     #[test]
     fn defaulted_openai_id_under_codex_becomes_the_codex_default() {
-        assert_eq!(
-            resolve_codex_default(true, "gpt-4o", false),
-            OPENAI_CODEX_OAUTH_DEFAULT_MODEL
-        );
+        assert_eq!(resolve_codex_default(true, "gpt-6", false), "gpt-5.5");
     }
 
     #[test]
-    fn explicit_gpt_4o_under_codex_is_preserved() {
+    fn configured_openai_default_under_codex_is_not_explicit() {
+        let providers = std::collections::HashMap::from([(
+            "chatgpt".to_string(),
+            crate::config::ProviderEntry {
+                provider_type: Some("openai".to_string()),
+                ..Default::default()
+            },
+        )]);
+        assert!(!model_is_explicit(
+            "chatgpt", "gpt-6", &providers, false, true
+        ));
+    }
+
+    #[test]
+    fn configured_non_default_under_codex_stays_explicit() {
+        let providers = std::collections::HashMap::from([(
+            "chatgpt".to_string(),
+            crate::config::ProviderEntry {
+                provider_type: Some("openai".to_string()),
+                ..Default::default()
+            },
+        )]);
+        assert!(model_is_explicit("chatgpt", "o3", &providers, false, true));
+    }
+
+    #[test]
+    fn explicit_gpt_6_under_codex_is_preserved() {
         // dirge-ovjk: the bug. An explicit choice must never be rewritten,
         // even when it happens to equal the OpenAI default id.
-        assert_eq!(resolve_codex_default(true, "gpt-4o", true), "gpt-4o");
+        assert_eq!(resolve_codex_default(true, "gpt-6", true), "gpt-6");
     }
 
     #[test]
@@ -242,8 +276,8 @@ mod resolve_model_name_tests {
 
     #[test]
     fn non_codex_clients_never_remap() {
-        assert_eq!(resolve_codex_default(false, "gpt-4o", false), "gpt-4o");
-        assert_eq!(resolve_codex_default(false, "gpt-4o", true), "gpt-4o");
+        assert_eq!(resolve_codex_default(false, "gpt-6", false), "gpt-6");
+        assert_eq!(resolve_codex_default(false, "gpt-6", true), "gpt-6");
         assert_eq!(resolve_codex_default(false, "o3", false), "o3");
     }
 
@@ -253,22 +287,22 @@ mod resolve_model_name_tests {
     fn fresh_start_resolves_from_the_cli_config_model() {
         // No resumed session: use (requested, requested_explicit).
         assert_eq!(
-            resolve_startup_model_for(true, "gpt-4o", false, false, None),
+            resolve_startup_model_for(true, "gpt-6", false, false, None),
             ("gpt-5.5".to_string(), false)
         );
         assert_eq!(
-            resolve_startup_model_for(true, "gpt-4o", true, false, None),
-            ("gpt-4o".to_string(), true)
+            resolve_startup_model_for(true, "gpt-6", true, false, None),
+            ("gpt-6".to_string(), true)
         );
     }
 
     #[test]
     fn resume_honors_an_explicit_saved_model_under_codex() {
-        // Follow-up #1: a session saved with an explicit gpt-4o keeps it on a
-        // plain resume — the shim must not revert the choice to gpt-5.5.
+        // Follow-up #1: a session saved with an explicit gpt-6 keeps it on a
+        // plain resume — the shim must not rewrite an explicit choice.
         assert_eq!(
-            resolve_startup_model_for(true, "gpt-4o", false, false, Some(("gpt-4o", true))),
-            ("gpt-4o".to_string(), true)
+            resolve_startup_model_for(true, "gpt-6", false, false, Some(("gpt-6", true))),
+            ("gpt-6".to_string(), true)
         );
     }
 
@@ -277,7 +311,7 @@ mod resolve_model_name_tests {
         // A pre-fix session saved the unresolved OpenAI default; its explicit
         // flag deserializes to false, so it still maps to the Codex default.
         assert_eq!(
-            resolve_startup_model_for(true, "gpt-4o", false, false, Some(("gpt-4o", false))),
+            resolve_startup_model_for(true, "gpt-6", false, false, Some(("gpt-6", false))),
             ("gpt-5.5".to_string(), false)
         );
     }

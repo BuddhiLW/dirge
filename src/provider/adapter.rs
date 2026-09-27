@@ -39,8 +39,10 @@ pub enum EffortWire {
     /// Top-level `{"reasoning_effort":"low"|"medium"|"high"}` with
     /// unsupported extreme levels clamped to the standard three-value set.
     TopLevelStandardEffort,
-    /// `{"thinking":{"type":"enabled","budget_tokens":N}}` — Anthropic (budget).
+    /// `{"thinking":{"type":"enabled","budget_tokens":N}}` — Anthropic budget-mode models.
     AnthropicBudget,
+    /// `{"output_config":{"effort":"low"|"medium"|"high"|"xhigh"|"max"}}` — Claude Opus 5.5.
+    AnthropicOutputEffort,
     /// `{"generationConfig":{"thinkingConfig":{"thinkingBudget":N}}}` —
     /// Gemini 2.5, which takes a token budget and rejects `thinkingLevel`.
     ///
@@ -114,7 +116,7 @@ pub struct ReasoningProfile {
 pub fn reasoning_profile(provider: Option<&str>, model: Option<&str>) -> ReasoningProfile {
     match provider {
         Some("anthropic") => ReasoningProfile {
-            effort: EffortWire::AnthropicBudget,
+            effort: anthropic_effort_wire(model),
             disable: anthropic_disable_wire(model),
         },
         Some("deepseek") => ReasoningProfile {
@@ -240,6 +242,27 @@ fn thinking_level_to_glm_effort(level: ThinkingLevel) -> Option<&'static str> {
     }
 }
 
+fn thinking_level_to_anthropic_output_effort(level: ThinkingLevel) -> Option<&'static str> {
+    match level {
+        ThinkingLevel::Off => None,
+        ThinkingLevel::Minimal | ThinkingLevel::Low => Some("low"),
+        ThinkingLevel::Medium => Some("medium"),
+        ThinkingLevel::High => Some("high"),
+        ThinkingLevel::Xhigh => Some("xhigh"),
+        ThinkingLevel::Max => Some("max"),
+    }
+}
+fn anthropic_bare_model_id(model: Option<&str>) -> Option<String> {
+    let id = model?.trim().to_ascii_lowercase();
+    id.rsplit('/').next().map(str::to_string)
+}
+
+fn anthropic_effort_wire(model: Option<&str>) -> EffortWire {
+    match anthropic_bare_model_id(model).as_deref() {
+        Some("claude-opus-5-5") => EffortWire::AnthropicOutputEffort,
+        _ => EffortWire::AnthropicBudget,
+    }
+}
 /// How `off` reaches an Anthropic model.
 ///
 /// Omitting `thinking` was a correct disable through Claude 4.6 and stopped
@@ -260,11 +283,12 @@ fn thinking_level_to_glm_effort(level: ThinkingLevel) -> Option<&'static str> {
 /// legacy `claude-3-5-sonnet-…` puts the version first, the current
 /// `claude-<family>-<major>…` puts the family first.
 fn anthropic_disable_wire(model: Option<&str>) -> DisableWire {
-    let Some(model) = model else {
+    let Some(bare) = anthropic_bare_model_id(model) else {
         return DisableWire::None;
     };
-    let id = model.trim().to_ascii_lowercase();
-    let bare = id.rsplit('/').next().unwrap_or(id.as_str());
+    if bare == "claude-opus-5-5" {
+        return DisableWire::AnthropicUnconditional;
+    }
     let Some(rest) = bare.strip_prefix("claude-") else {
         return DisableWire::None;
     };
@@ -475,6 +499,8 @@ impl ReasoningProfile {
                     || serde_json::json!({ "thinking": { "type": "enabled", "budget_tokens": b } }),
                 )
             }
+            EffortWire::AnthropicOutputEffort => thinking_level_to_anthropic_output_effort(level)
+                .map(|effort| serde_json::json!({ "output_config": { "effort": effort } })),
             EffortWire::GeminiBudget => {
                 let b = budget_for_level(level, budgets);
                 (b > 0)
@@ -590,6 +616,27 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_opus_5_5_uses_output_config_effort() {
+        let profile = reasoning_profile(Some("anthropic"), Some("claude-opus-5-5"));
+        assert_eq!(
+            (profile.effort, profile.disable),
+            (
+                EffortWire::AnthropicOutputEffort,
+                DisableWire::AnthropicUnconditional
+            )
+        );
+        assert_eq!(
+            profile.effort_params(ThinkingLevel::Xhigh, None),
+            Some(serde_json::json!({"output_config":{"effort":"xhigh"}}))
+        );
+        assert_eq!(
+            profile.effort_params(ThinkingLevel::Max, None),
+            Some(serde_json::json!({"output_config":{"effort":"max"}}))
+        );
+        assert_eq!(profile.effort_params(ThinkingLevel::Off, None), None);
+        assert_eq!(profile.disable_params(), None);
+    }
+    #[test]
     fn profile_table_none_and_unknown() {
         let none = reasoning_profile(None, None);
         assert_eq!(
@@ -683,11 +730,13 @@ mod tests {
                 "omitting the parameter is still a correct disable on {id}",
             );
         }
-        assert_eq!(
-            anthropic_disable_wire(Some("claude-fable-5-1")),
-            DisableWire::AnthropicUnconditional,
-            "Fable's thinking is unconditional and it rejects the toggle",
-        );
+        for id in ["claude-fable-5-1", "claude-opus-5-5"] {
+            assert_eq!(
+                anthropic_disable_wire(Some(id)),
+                DisableWire::AnthropicUnconditional,
+                "{id} rejects the disabled toggle",
+            );
+        }
         // Not knowing means keeping the pre-#827 behaviour.
         assert_eq!(anthropic_disable_wire(None), DisableWire::None);
         assert_eq!(
@@ -710,6 +759,10 @@ mod tests {
         );
         assert_eq!(
             reasoning_profile(Some("anthropic"), Some("claude-fable-5-1")).disable_params(),
+            None,
+        );
+        assert_eq!(
+            reasoning_profile(Some("anthropic"), Some("claude-opus-5-5")).disable_params(),
             None,
         );
     }

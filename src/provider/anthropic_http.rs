@@ -48,7 +48,7 @@ const ANTHROPIC_BETA_CONTEXT_MANAGEMENT: &str = "context-management-2025-06-27";
 
 /// `User-Agent` that identifies the request as first-party Claude Code.
 /// Without it the subscription path returns a third-party "extra usage" 400.
-const CLAUDE_CODE_USER_AGENT: &str = "claude-cli/2.1.75";
+const CLAUDE_CODE_USER_AGENT: &str = "claude-cli/2.1.280";
 
 impl AnthropicHttpClient {
     /// A static bearer with no refresh — the env-token path and tests. The
@@ -275,7 +275,7 @@ fn strip_temperature_if_thinking(value: &mut serde_json::Value) {
     }
 }
 
-const CLAUDE_CODE_VERSION: &str = "2.1.169";
+const CLAUDE_CODE_VERSION: &str = "2.1.280";
 const BILLING_HEADER_SALT: &str = "59cf53e54c78";
 const BILLING_HEADER_POSITIONS: [usize; 3] = [4, 7, 20];
 const TEXT_REPLACEMENTS: [(&str, &str); 1] = [(
@@ -808,7 +808,7 @@ mod tests {
             system[0]["text"]
                 .as_str()
                 .unwrap_or("")
-                .contains("x-anthropic-billing-header: cc_version=2.1.169.")
+                .contains("x-anthropic-billing-header: cc_version=2.1.280.")
         );
         assert_eq!(system[1]["text"], CLAUDE_CODE_SYSTEM_PROMPT);
         assert!(system.iter().any(|block| {
@@ -1050,6 +1050,12 @@ mod tests {
         assert!(
             out.headers().get("x-api-key").is_none(),
             "the api-key header must not ride along with an OAuth bearer",
+        );
+        assert_eq!(
+            out.headers()
+                .get(http::header::USER_AGENT)
+                .and_then(|v| v.to_str().ok()),
+            Some("claude-cli/2.1.280"),
         );
     }
 

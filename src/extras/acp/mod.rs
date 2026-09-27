@@ -377,8 +377,7 @@ async fn run_prompt(
             .cfg
             .resolve_role(crate::config::ConfigRole::Default)
             .and_then(|(_, e)| e.model);
-        let model_explicit = state.cli.model.is_some() || config_model.is_some();
-        let model_str = if !model_explicit {
+        let model_str = if state.cli.model.is_none() && config_model.is_none() {
             // dirge-j3jd: resolve the alias's provider TYPE so a custom alias
             // doesn't fall back to the OpenRouter default model id.
             CompactString::new(crate::provider::default_model_for_alias(
@@ -388,6 +387,13 @@ async fn run_prompt(
         } else {
             state.cli.resolve_model(&state.cfg)
         };
+        let model_explicit = crate::provider::model_is_explicit(
+            &provider_str,
+            &model_str,
+            &state.cfg.providers_map(),
+            state.cli.model.is_some(),
+            config_model.is_some(),
+        );
         (model_str, model_explicit)
     };
 

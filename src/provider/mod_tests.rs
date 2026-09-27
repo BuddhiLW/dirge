@@ -1377,7 +1377,7 @@ fn default_model_for_entry_resolves_alias_provider_type() {
         base_url: Some("https://proxy.internal/v1".to_string()),
         ..Default::default()
     };
-    assert_eq!(default_model_for_entry("my-openai", &entry), "gpt-4o");
+    assert_eq!(default_model_for_entry("my-openai", &entry), "gpt-6");
 
     let anthropic = ProviderEntry {
         provider_type: Some("anthropic".to_string()),
@@ -1385,7 +1385,7 @@ fn default_model_for_entry_resolves_alias_provider_type() {
     };
     assert_eq!(
         default_model_for_entry("work-claude", &anthropic),
-        "claude-sonnet-4-6"
+        "claude-opus-5-5"
     );
 }
 
@@ -1402,11 +1402,11 @@ fn default_model_for_alias_uses_map_then_builtin_fallback() {
         },
     )]);
     // Custom alias → resolved via entry → OpenAI default.
-    assert_eq!(default_model_for_alias("my-openai", &providers), "gpt-4o");
+    assert_eq!(default_model_for_alias("my-openai", &providers), "gpt-6");
     // Undeclared name that IS a built-in → direct resolution.
     assert_eq!(
         default_model_for_alias("anthropic", &providers),
-        "claude-sonnet-4-6"
+        "claude-opus-5-5"
     );
     // The bare alias WITHOUT the map would have wrongly fallen back here:
     assert_eq!(default_model_for("my-openai"), "deepseek/deepseek-v4-flash");
