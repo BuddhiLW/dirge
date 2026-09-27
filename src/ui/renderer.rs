@@ -589,6 +589,9 @@ pub struct Renderer {
     /// ui-redesign: idle-state info for the left panel. Painted when
     /// `subagent_status` is empty so the gutter never looks dead.
     left_panel_info: LeftPanelInfo,
+    /// Externally-driven panels painted in the left panel above the
+    /// AGENTS box. Mutated only through `apply_external_panel_op`.
+    external_panels: crate::ui::panels_ext::ExternalPanels,
     /// DAP debug panel snapshot — updated each UI tick when a
     /// DAP session is active and panel mode is Debug.
     #[cfg(feature = "dap")]
@@ -745,6 +748,7 @@ impl Renderer {
             panel_data: PanelData::default(),
             subagent_status: Vec::new(),
             left_panel_info: LeftPanelInfo::default(),
+            external_panels: Default::default(),
             #[cfg(feature = "dap")]
             debug_panel_data: None,
             alert_overlay: None,
@@ -889,6 +893,7 @@ impl Renderer {
             panel_data,
             left_panel_info,
             subagent_status,
+            external_panels,
             alert_overlay,
             alert_scroll,
             alert_max_scroll,
@@ -1101,6 +1106,7 @@ impl Renderer {
             modified_offset: *modified_offset,
             left_info: left_panel_info,
             subagents: subagent_status,
+            external_panels,
             avatar,
             body,
             status: cached_status.as_str(),
@@ -1421,6 +1427,23 @@ impl Renderer {
     /// repaints the gutter.
     pub fn set_subagent_status(&mut self, rows: Vec<SubagentStatusRow>) {
         self.subagent_status = rows;
+    }
+
+    /// Replace the whole external panel set.
+    #[allow(dead_code)]
+    pub fn set_external_panels(&mut self, panels: crate::ui::panels_ext::ExternalPanels) {
+        self.external_panels = panels;
+    }
+
+    /// Fold one external panel op into the left-panel state; the
+    /// next paint shows the result.
+    pub fn apply_external_panel_op(&mut self, op: crate::ui::panels_ext::PanelOp) {
+        self.external_panels.apply(op);
+    }
+
+    #[allow(dead_code)]
+    pub fn external_panels(&self) -> &crate::ui::panels_ext::ExternalPanels {
+        &self.external_panels
     }
 
     /// ui-redesign: set the idle-state info shown in the left panel

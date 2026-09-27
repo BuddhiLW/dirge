@@ -16,6 +16,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color as RColor, Style};
 use ratatui::widgets::Widget;
 
+use crate::ui::panels_ext::ExternalPanels;
 use crate::ui::renderer::{LeftPanelInfo, PanelData, SubagentStatusRow};
 
 use super::chat::crossterm_to_ratatui;
@@ -135,6 +136,7 @@ impl<'a> Widget for SubPanel<'a> {
 pub struct LeftPanel<'a> {
     info: &'a LeftPanelInfo,
     subagents: &'a [SubagentStatusRow],
+    external: Option<&'a ExternalPanels>,
     style: Style,
 }
 
@@ -143,8 +145,15 @@ impl<'a> LeftPanel<'a> {
         Self {
             info,
             subagents,
+            external: None,
             style: Style::default().fg(RColor::Green),
         }
+    }
+
+    /// Externally-driven panels to paint above the AGENTS box.
+    pub fn external_panels(mut self, panels: &'a ExternalPanels) -> Self {
+        self.external = Some(panels);
+        self
     }
 
     /// Override the frame/border style so the left panel tracks the
@@ -161,7 +170,14 @@ impl<'a> Widget for LeftPanel<'a> {
         if area.width == 0 || area.height == 0 {
             return;
         }
-        paint_idle_card(buf, area, self.info, self.subagents, self.style);
+        paint_idle_card(
+            buf,
+            area,
+            self.info,
+            self.subagents,
+            self.external,
+            self.style,
+        );
     }
 }
 
@@ -179,11 +195,46 @@ fn kfmt(n: u64) -> String {
     }
 }
 
+/// Rows kept free for a minimal ACTIVITY box (top + 1 row + bottom +
+/// spacer) when sizing external panels, so they can't evict it.
+const ACTIVITY_MIN_ROWS: u16 = 4;
+
+/// One sub-panel ready to paint: title + coloured body rows.
+type BoxLines = (String, Vec<(String, RColor)>);
+
+/// Fit external panels into `budget` rows (each box costs its body
+/// rows + 2 borders + 1 spacer). Panels are taken in paint order; one
+/// that doesn't fit whole is trimmed to the rows left (at least one
+/// body row), and panels past the budget are skipped. Empty panels
+/// show a placeholder row so an open panel is always visible.
+fn fit_external_panels(panels: &ExternalPanels, budget: u16) -> Vec<BoxLines> {
+    let mut left = budget as usize;
+    let mut out = Vec::new();
+    for p in panels.panels() {
+        if left < 4 {
+            break;
+        }
+        let want = p.lines.len().max(1);
+        let rows = want.min(left - 3);
+        let lines: Vec<(String, RColor)> = if p.lines.is_empty() {
+            vec![("·".to_string(), RColor::DarkGray)]
+        } else {
+            p.visible_lines(rows)
+                .map(|l| (l.text.clone(), crossterm_to_ratatui(l.face.color())))
+                .collect()
+        };
+        left -= rows + 3;
+        out.push((p.title.clone(), lines));
+    }
+    out
+}
+
 fn paint_idle_card(
     buf: &mut Buffer,
     area: Rect,
     info: &LeftPanelInfo,
     subagents: &[SubagentStatusRow],
+    external: Option<&ExternalPanels>,
     style: Style,
 ) {
     let dim = RColor::DarkGray;
@@ -301,6 +352,21 @@ fn paint_idle_card(
     };
     let agents_reserve = 2 + agent_lines.len() as u16 + 1;
 
+    // External panels — sized from what is left after CONTEXT and the
+    // GIT/AGENTS reserves, keeping room for a minimal ACTIVITY box.
+    let external_budget = (area.y + area.height)
+        .saturating_sub(area.y + dy)
+        .saturating_sub(git_reserve)
+        .saturating_sub(agents_reserve)
+        .saturating_sub(ACTIVITY_MIN_ROWS);
+    let external_boxes = external
+        .map(|e| fit_external_panels(e, external_budget))
+        .unwrap_or_default();
+    let external_reserve: u16 = external_boxes
+        .iter()
+        .map(|(_, l)| 2 + l.len() as u16 + 1)
+        .sum();
+
     // [ACTIVITY] — recent tool ticker (newest last). Capped to whatever
     // vertical room is left after CONTEXT and the reserved GIT/AGENTS
     // boxes. Only rendered when at least one content row fits AFTER
@@ -310,6 +376,7 @@ fn paint_idle_card(
     let avail = (area.y + area.height)
         .saturating_sub(area.y + dy)
         .saturating_sub(git_reserve)
+        .saturating_sub(external_reserve)
         .saturating_sub(agents_reserve);
     let max_act = avail.saturating_sub(2) as usize; // minus the box borders
     if max_act >= 1 {
@@ -329,6 +396,10 @@ fn paint_idle_card(
 
     if let Some(lines) = git_lines {
         place(buf, &mut dy, "GIT", lines);
+    }
+
+    for (title, lines) in external_boxes {
+        place(buf, &mut dy, &title, lines);
     }
 
     // [AGENTS]
@@ -1066,6 +1137,88 @@ mod tests {
             dump.contains("· (none)"),
             "idle AGENTS box should show the empty-state placeholder:\n{dump}"
         );
+    }
+
+    fn dump_left_panel(
+        info: &LeftPanelInfo,
+        ext: &crate::ui::panels_ext::ExternalPanels,
+        w: u16,
+        h: u16,
+    ) -> Vec<String> {
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                f.render_widget(
+                    LeftPanel::new(info, &[]).external_panels(ext),
+                    Rect::new(0, 0, w, h),
+                )
+            })
+            .unwrap();
+        let backend = terminal.backend().clone();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| backend.buffer().cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// External panels paint as their own boxes BETWEEN the vitals and
+    /// the AGENTS box, focused panel first.
+    #[test]
+    fn left_panel_paints_external_panels_above_agents() {
+        use crate::ui::panels_ext::{ExternalPanels, PanelFace, PanelLine, PanelOp};
+        let info = LeftPanelInfo::default();
+        let mut ext = ExternalPanels::default();
+        ext.apply(PanelOp::Show {
+            id: "status".into(),
+            title: "STATUS".into(),
+            lines: vec![PanelLine::new("all good", PanelFace::Success)],
+        });
+        ext.apply(PanelOp::FocusTab {
+            id: "log".into(),
+            title: "LOG".into(),
+        });
+        ext.apply(PanelOp::AppendTab {
+            id: "log".into(),
+            line: PanelLine::new("event one", PanelFace::Dim),
+        });
+        let rows = dump_left_panel(&info, &ext, 30, 40);
+        let dump = rows.join("\n");
+        let find = |needle: &str| {
+            rows.iter()
+                .position(|r| r.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} missing:\n{dump}"))
+        };
+        let (log, status, agents) = (find("[LOG]"), find("[STATUS]"), find("[AGENTS]"));
+        assert!(log < status, "focused panel paints first:\n{dump}");
+        assert!(status < agents, "external panels sit above AGENTS:\n{dump}");
+        assert!(dump.contains("event one") && dump.contains("all good"));
+        assert!(dump.contains("CONTEXT"), "vitals still painted:\n{dump}");
+    }
+
+    /// On a short panel an oversized external panel is trimmed so the
+    /// AGENTS box still fits below it.
+    #[test]
+    fn left_panel_external_panels_respect_height_reserve() {
+        use crate::ui::panels_ext::{ExternalPanels, PanelFace, PanelLine, PanelOp};
+        let info = LeftPanelInfo::default();
+        let mut ext = ExternalPanels::default();
+        ext.apply(PanelOp::Show {
+            id: "big".into(),
+            title: "BIG".into(),
+            lines: (0..100)
+                .map(|i| PanelLine::new(format!("row {i}"), PanelFace::Normal))
+                .collect(),
+        });
+        let rows = dump_left_panel(&info, &ext, 30, 24);
+        let dump = rows.join("\n");
+        assert!(dump.contains("[BIG]"), "external panel missing:\n{dump}");
+        assert!(dump.contains("row 0"), "head of a Show panel kept:\n{dump}");
+        assert!(!dump.contains("row 99"), "body trimmed to fit:\n{dump}");
+        assert!(dump.contains("[AGENTS]"), "AGENTS box evicted:\n{dump}");
     }
 
     /// LeftPanel with running subagents lists them inside the AGENTS box

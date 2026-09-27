@@ -61,6 +61,8 @@ pub struct Scene<'a> {
     pub left_info: &'a LeftPanelInfo,
     /// Left panel: subagent status rows (used when non-empty).
     pub subagents: &'a [SubagentStatusRow],
+    /// Left panel: externally-driven panels, painted above AGENTS.
+    pub external_panels: &'a crate::ui::panels_ext::ExternalPanels,
     /// Avatar face spec.
     pub avatar: Option<AvatarSpec<'a>>,
     /// Bottom strip body — editor input or overlay.
@@ -120,7 +122,9 @@ pub fn render_frame(scene: &Scene, f: &mut Frame<'_>) {
     // Left panel — idle card or subagent list. Skip on narrow terminals.
     if scene.show_left_panel && layout.left_panel.width >= LEFT_PANEL_MIN_W {
         f.render_widget(
-            LeftPanel::new(scene.left_info, scene.subagents).border_style(frame_style),
+            LeftPanel::new(scene.left_info, scene.subagents)
+                .external_panels(scene.external_panels)
+                .border_style(frame_style),
             layout.left_panel,
         );
     }
@@ -341,6 +345,10 @@ fn paint_picker_overlay(
 // `BottomBody` is Copy so `render_frame` can pass it to BottomStrip
 // directly without a clone helper.
 
+/// Empty external panel set for scenes that have none.
+pub static NO_EXTERNAL_PANELS: crate::ui::panels_ext::ExternalPanels =
+    crate::ui::panels_ext::ExternalPanels::new();
+
 /// Single empty editor row, used as the default `rows` slice when
 /// no input has been typed yet.
 #[allow(dead_code)]
@@ -368,6 +376,7 @@ pub fn empty_scene<'a>(
         modified_offset: 0,
         left_info,
         subagents,
+        external_panels: &NO_EXTERNAL_PANELS,
         avatar: None,
         body: BottomBody::Editor {
             rows: EMPTY_ROWS,
@@ -622,6 +631,7 @@ mod tests {
             modified_offset: 0,
             left_info: &info,
             subagents: &subs,
+            external_panels: &NO_EXTERNAL_PANELS,
             avatar: None,
             body: BottomBody::Overlay {
                 title: "[ALERT]",
@@ -990,6 +1000,7 @@ mod tests {
             modified_offset: 0,
             left_info: &info,
             subagents: &subs,
+            external_panels: &NO_EXTERNAL_PANELS,
             avatar: None,
             body: BottomBody::Editor {
                 rows: EMPTY_ROWS,
@@ -1024,6 +1035,7 @@ mod tests {
             modified_offset: 0,
             left_info: &info,
             subagents: &subs,
+            external_panels: &NO_EXTERNAL_PANELS,
             avatar: None,
             body: BottomBody::Editor {
                 rows: &hello_rows,
