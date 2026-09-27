@@ -69,6 +69,9 @@ pub use completion::register_plugin_commands;
 #[cfg(feature = "slash-completion")]
 pub use completion::register_alias_commands;
 
+#[cfg(all(feature = "slash-completion", feature = "addons"))]
+pub use completion::register_addon_commands;
+
 #[inline]
 pub(super) fn c_agent() -> Color {
     theme::agent()
@@ -701,6 +704,7 @@ pub async fn handle_slash(
             });
         }
         "/loop" => cmd::loop_cmd::cmd_loop(&mut ctx, &parts, text).await?,
+        "/addons" => cmd::addons::cmd_addons(&mut ctx, &parts).await?,
         "/prompt" => return cmd::prompt::cmd_prompt(&mut ctx, &parts).await,
         "/agent" | "/agents" => cmd::agent::cmd_agent(&mut ctx, &parts).await?,
         "/plan" => cmd::plan::cmd_plan(&mut ctx, &parts, text).await?,
@@ -811,6 +815,13 @@ pub async fn handle_slash(
                     return Ok(SlashOutcome::Handled);
                 }
             }
+            // Then commands Clojure addons registered (`:dirge/commands`).
+            #[cfg(feature = "addons")]
+            if let Some(host) = crate::addons::global()
+                && let Some(command) = host.command(parts[0].trim_start_matches('/'))
+            {
+                return cmd::addons::run_command(&mut ctx, host, command, text).await;
+            }
             ctx.renderer.write_line(
                 &format!("unknown command: {} (try /help)", parts[0]),
                 c_error(),
@@ -846,6 +857,7 @@ fn compress_instructions(parts: &[&str]) -> Option<String> {
 /// feature.
 fn slash_commands() -> Vec<(&'static str, &'static str)> {
     let mut cmds = vec![
+        ("/addons", "list Clojure addons, or reload them in place"),
         ("/agent", "switch to a named agent, or turn agents off"),
         ("/agents", "list available agents"),
         ("/allow", "manage the session permission allowlist"),

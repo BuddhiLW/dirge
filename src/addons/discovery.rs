@@ -14,17 +14,48 @@ const MAX_DEPTH: usize = 6;
 /// Directories never worth descending into.
 const SKIP: &[&str] = &[".git", "target", "node_modules", ".cpcache", ".clj-kondo"];
 
+/// How deep an addon's `src` is walked for its own sources: namespaces
+/// nest deeper than manifests do.
+const MAX_SOURCE_DEPTH: usize = 12;
+
 /// Every manifest under `dirs`, sorted so load order is stable.
 pub fn manifests(dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut found = BTreeSet::new();
     for dir in dirs {
-        walk(dir, 0, &mut found);
+        walk(dir, 0, MAX_DEPTH, &layout::is_manifest, &mut found);
     }
     found.into_iter().collect()
 }
 
-fn walk(dir: &Path, depth: usize, found: &mut BTreeSet<PathBuf>) {
-    if depth > MAX_DEPTH {
+/// The portable source files of the repositories `manifests` come from,
+/// canonical and sorted: each repository's own `src`, never the
+/// `:local/root` libraries it depends on. What a reload evaluates again.
+pub fn own_sources(manifests: &[PathBuf]) -> Vec<PathBuf> {
+    let mut found = BTreeSet::new();
+    for manifest in manifests {
+        if let Some(src) =
+            layout::repo_root(manifest).and_then(|r| r.join("src").canonicalize().ok())
+        {
+            walk(
+                &src,
+                0,
+                MAX_SOURCE_DEPTH,
+                &layout::is_portable_source,
+                &mut found,
+            );
+        }
+    }
+    found.into_iter().collect()
+}
+
+fn walk(
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    keep: &dyn Fn(&Path) -> bool,
+    found: &mut BTreeSet<PathBuf>,
+) {
+    if depth > max_depth {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -38,9 +69,9 @@ fn walk(dir: &Path, depth: usize, found: &mut BTreeSet<PathBuf>) {
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| SKIP.contains(&n));
             if !skipped {
-                walk(&path, depth + 1, found);
+                walk(&path, depth + 1, max_depth, keep, found);
             }
-        } else if layout::is_manifest(&path) {
+        } else if keep(&path) {
             found.insert(path);
         }
     }

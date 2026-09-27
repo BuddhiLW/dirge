@@ -1,15 +1,24 @@
 //! The `dirge.harness` namespace addon code calls.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use cljrs_gc::GcPtr;
 use cljrs_runtime::env::env::GlobalEnv;
 use cljrs_value::{Arity, NativeFn, Value, ValueResult};
+use serde_json::{Value as Json, json};
 
-use crate::addons::port::{HarnessSink, Level};
+use super::bridge;
+use crate::addons::policy;
+use crate::addons::port::{Harness, Level};
 
 /// Namespace addon code requires to reach dirge.
 pub const HARNESS_NS: &str = "dirge.harness";
+
+const BLOCKED_MCP_CALL: &str = "mcp-call is unavailable while dirge waits on this addon \
+     (system-prompt and on-prompt hooks, load, shutdown); call it from a command, \
+     a tool or a tool-call hook";
 
 /// Register `dirge.harness` into `globals`.
 ///
@@ -18,7 +27,22 @@ pub const HARNESS_NS: &str = "dirge.harness";
 /// - `(log level msg)`: a `tracing` event on the `dirge::addon` target.
 /// - `(cwd)`: dirge's working directory.
 /// - `(version)`: the dirge version string.
-pub fn install(globals: &Arc<GlobalEnv>, sink: Arc<dyn HarnessSink>) {
+/// - `(mcp-servers)`: names of the MCP servers dirge is connected to.
+/// - `(mcp-call server tool)` / `(mcp-call server tool args)`: call an MCP
+///   tool through dirge's own connection. Answers the tool result
+///   (`{:content [...] :isError bool}`), or `{:error msg}` when the call
+///   could not be made. Blocks until the server answers. Refused (an
+///   `{:error}` answer) while dirge's event loop is waiting on the addon, as
+///   it is for `:dirge/system-prompt`, `:dirge/on-prompt`, loading and
+///   shutdown: the call would need that loop to make progress.
+/// - `(json-parse text)`: JSON text as data (object keys as keywords), or
+///   nil when it is not JSON.
+/// - `(panel op)`: change a box in the side panel; `op` is
+///   `{:op :show :id :title :lines [...]}` (or `:markdown "..."` instead of
+///   `:lines`), `{:op :append :id :text :face}`, `{:op :focus :id :title}` or
+///   `{:op :close :id}`. Answers true when the change was delivered.
+pub fn install(globals: &Arc<GlobalEnv>, harness: Harness, caller_on_runtime: Rc<Cell<bool>>) {
+    let Harness { sink, panels, mcp } = harness;
     define(globals, "notify", Arity::Variadic { min: 1 }, move |args| {
         let level = args.get(1).map_or(Level::Info, level_of);
         sink.notify(level, &text(&args[0]));
@@ -42,6 +66,41 @@ pub fn install(globals: &Arc<GlobalEnv>, sink: Arc<dyn HarnessSink>) {
             env!("CARGO_PKG_VERSION").to_string(),
         )))
     });
+    let gateway = mcp.clone();
+    define(globals, "mcp-servers", Arity::Fixed(0), move |_| {
+        Ok(bridge::to_clj(&Json::from(gateway.servers())))
+    });
+    define(
+        globals,
+        "mcp-call",
+        Arity::Variadic { min: 2 },
+        move |args| {
+            if caller_on_runtime.get() {
+                return Ok(bridge::to_clj(&json!({ "error": BLOCKED_MCP_CALL })));
+            }
+            let params = args.get(2).map_or_else(|| json!({}), bridge::to_json);
+            let answer = mcp
+                .call(&text(&args[0]), &text(&args[1]), &params)
+                .unwrap_or_else(|error| json!({ "error": error }));
+            Ok(bridge::to_clj(&answer))
+        },
+    );
+    define(globals, "json-parse", Arity::Fixed(1), |args| {
+        Ok(serde_json::from_str::<Json>(&text(&args[0]))
+            .map_or(Value::Nil, |data| bridge::to_clj(&data)))
+    });
+    define(
+        globals,
+        "panel",
+        Arity::Fixed(1),
+        move |args| match policy::panel_request(&bridge::to_json(&args[0])) {
+            Ok(request) => Ok(Value::Bool(panels.panel(request))),
+            Err(error) => {
+                tracing::warn!(target: "dirge::addon", %error, "panel op ignored");
+                Ok(Value::Bool(false))
+            }
+        },
+    );
     globals.mark_loaded(HARNESS_NS);
 }
 
@@ -59,10 +118,12 @@ fn define(
     );
 }
 
-/// A string argument as text; anything else printed.
+/// A string argument as text; a keyword without its colon; anything else
+/// printed.
 fn text(v: &Value) -> String {
     match v {
         Value::Str(s) => s.get().clone(),
+        Value::Keyword(k) => k.get().full_name(),
         other => other.to_string(),
     }
 }

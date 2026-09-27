@@ -91,6 +91,27 @@ pub fn portable_sources(ns: &str) -> [PathBuf; 2] {
     ]
 }
 
+/// True for a file cljrs can load a namespace from.
+pub fn is_portable_source(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e == "cljc" || e == "cljrs")
+}
+
+/// The namespace `file` holds when loaded from `root`, the inverse of
+/// [`portable_sources`]: `root/a/b_c/d.cljc` is `a.b-c.d`. `None` when the
+/// file is not a portable source under `root`.
+pub fn namespace_of(root: &Path, file: &Path) -> Option<String> {
+    if !is_portable_source(file) {
+        return None;
+    }
+    let rel = file.strip_prefix(root).ok()?.with_extension("");
+    let parts: Vec<String> = rel
+        .iter()
+        .map(|p| p.to_str().map(|s| s.replace('_', "-")))
+        .collect::<Option<_>>()?;
+    (!parts.is_empty()).then(|| parts.join("."))
+}
+
 /// Sorted, de-duplicated source roots.
 pub fn merge_roots<I: IntoIterator<Item = PathBuf>>(roots: I) -> Vec<PathBuf> {
     roots
@@ -105,6 +126,18 @@ mod tests {
     use super::*;
 
     const MANIFEST: &str = "/w/my-addon/resources/META-INF/addons/my-addon.edn";
+
+    #[test]
+    fn namespace_of_inverts_portable_sources() {
+        let root = Path::new("/w/a/src");
+        for ns in ["my-addon.core", "a.b-c.d", "x"] {
+            for rel in portable_sources(ns) {
+                assert_eq!(namespace_of(root, &root.join(rel)).as_deref(), Some(ns));
+            }
+        }
+        assert_eq!(namespace_of(root, Path::new("/w/a/src/a/jvm.clj")), None);
+        assert_eq!(namespace_of(root, Path::new("/elsewhere/a.cljc")), None);
+    }
 
     #[test]
     fn recognizes_only_manifests_under_meta_inf() {

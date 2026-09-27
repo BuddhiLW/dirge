@@ -2,8 +2,10 @@
 //!
 //! Loads addons written against an IAddon protocol in portable `.cljc` into
 //! an embedded clojurust interpreter. An addon ships
-//! `resources/META-INF/addons/<id>.edn`; its `tools` become loop tools and
-//! its `:dirge/*` hooks run at dirge's hook points. See docs/addons.md.
+//! `resources/META-INF/addons/<id>.edn`; its `tools` become loop tools, its
+//! `:dirge/*` hooks run at dirge's hook points and its `:dirge/commands`
+//! become slash commands. `/addons reload` swaps all of it in place. See
+//! docs/addons.md.
 
 pub mod cljrs;
 pub mod discovery;
@@ -12,6 +14,8 @@ pub mod host;
 pub mod layout;
 pub mod loop_hooks;
 pub mod manifest;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod policy;
 pub mod port;
 pub mod sink;
@@ -25,16 +29,17 @@ use std::sync::{Arc, OnceLock};
 
 use serde_json::json;
 
-use domain::{AddonPlan, LoadFailure};
-use host::AddonHost;
-use port::HarnessSink;
+use domain::{AddonPlan, LoadFailure, ReloadReport};
+use host::{AddonHost, LoadSet};
+use port::Harness;
 
 /// Protocol namespace used when `addons.protocol_ns` is not set.
 pub const DEFAULT_PROTOCOL_NS: &str = "hive-addon.protocol";
 
 static HOST: OnceLock<Arc<AddonHost>> = OnceLock::new();
 
-/// The process-wide host, once [`install_from_config`] started one.
+/// The process-wide host, once [`install_from_config`] or [`reload`]
+/// started one.
 pub fn global() -> Option<Arc<AddonHost>> {
     HOST.get().cloned()
 }
@@ -51,11 +56,7 @@ pub fn install_from_config(cfg: &crate::config::Config) {
     if plan.is_empty() {
         return;
     }
-    let protocol_ns = settings
-        .protocol_ns
-        .as_deref()
-        .unwrap_or(DEFAULT_PROTOCOL_NS);
-    match start(plan, Arc::new(sink::TuiSink), protocol_ns) {
+    match start(plan, harness(), protocol_ns(&settings)) {
         Ok(host) => {
             for failure in host.failures() {
                 tracing::warn!(
@@ -71,12 +72,38 @@ pub fn install_from_config(cfg: &crate::config::Config) {
                 tools = host.tools().len(),
                 "addon host started"
             );
-            let _ = HOST.set(Arc::new(host));
+            publish(Arc::new(host));
         }
         Err(error) => {
             tracing::warn!(target: "dirge::addon", %error, "addon host did not start");
         }
     }
+}
+
+/// Discover again and replace every addon in place: the host's reload when
+/// one is running, a fresh start when dirge booted without addons. Blocks
+/// on the isolate; call it off the async runtime (`spawn_blocking`).
+pub fn reload(
+    settings: &crate::config::AddonsConfig,
+) -> Result<(Arc<AddonHost>, ReloadReport), String> {
+    if settings.enabled == Some(false) {
+        return Err("addons are disabled (addons.enabled is false)".to_string());
+    }
+    let plan = discovery::plan(&search_dirs(settings), &extra_roots(settings));
+    if let Some(host) = global() {
+        let report = host.reload(load_set(&plan, true));
+        register_commands(&host);
+        return Ok((host, report));
+    }
+    let host = Arc::new(start(plan, harness(), protocol_ns(settings))?);
+    let report = ReloadReport {
+        loaded: host.addons().into_iter().map(|a| a.id).collect(),
+        failures: host.failures(),
+        tools_added: host.tools().into_iter().map(|t| t.exposed_name).collect(),
+        ..ReloadReport::default()
+    };
+    publish(host.clone());
+    Ok((global().unwrap_or(host), report))
 }
 
 /// Shut every addon down. Call once on exit.
@@ -89,25 +116,70 @@ pub fn shutdown() {
 /// Validate, boot, load: the plan becomes a running host. Manifests that
 /// fail validation or loading are kept as [`LoadFailure`]s beside the
 /// addons that loaded.
-pub fn start(
-    plan: AddonPlan,
-    sink: Arc<dyn HarnessSink>,
-    protocol_ns: &str,
-) -> Result<AddonHost, String> {
-    let (valid, mut failures) = validate(&plan.manifests, &plan.source_roots);
-    if valid.is_empty() {
-        return Err(describe_failures(&failures));
+pub fn start(plan: AddonPlan, harness: Harness, protocol_ns: &str) -> Result<AddonHost, String> {
+    let set = load_set(&plan, false);
+    if set.manifests.is_empty() {
+        return Err(describe_failures(&set.failures));
     }
-    let isolate = Arc::new(cljrs::Isolate::spawn(plan.source_roots, sink, protocol_ns)?);
+    let isolate = Arc::new(cljrs::Isolate::spawn(
+        set.source_roots.clone(),
+        harness,
+        protocol_ns,
+    )?);
     let host_config = json!({ "harness": "dirge", "version": env!("CARGO_PKG_VERSION") });
-    let mut addons = Vec::new();
-    for manifest in valid {
-        match policy::parse_summary(&manifest, &isolate.load(&manifest, &host_config)) {
-            Ok(summary) => addons.push(summary),
-            Err(failure) => failures.push(failure),
-        }
+    Ok(AddonHost::load(isolate, set, host_config))
+}
+
+/// What loading `plan` works from. `with_sources` lists the addons' own
+/// source files, which only a reload evaluates.
+fn load_set(plan: &AddonPlan, with_sources: bool) -> LoadSet {
+    let (manifests, failures) = validate(&plan.manifests, &plan.source_roots);
+    let sources = if with_sources {
+        discovery::own_sources(&manifests)
+    } else {
+        Vec::new()
+    };
+    LoadSet {
+        manifests,
+        failures,
+        source_roots: plan.source_roots.clone(),
+        sources,
     }
-    Ok(AddonHost::new(isolate, addons, failures))
+}
+
+fn publish(host: Arc<AddonHost>) {
+    register_commands(&host);
+    let _ = HOST.set(host);
+}
+
+/// Tab completion for the commands `host`'s addons registered.
+fn register_commands(host: &AddonHost) {
+    #[cfg(feature = "slash-completion")]
+    crate::ui::slash::register_addon_commands(
+        host.commands().into_iter().map(|c| c.name).collect(),
+    );
+    #[cfg(not(feature = "slash-completion"))]
+    let _ = host;
+}
+
+/// What `dirge.harness` reaches in this process: the TUI for notifications
+/// and panels, and the MCP servers dirge connects to.
+fn harness() -> Harness {
+    let tui = Arc::new(sink::TuiSink);
+    let mut harness = Harness::with_sink(tui.clone());
+    harness.panels = tui;
+    #[cfg(feature = "mcp")]
+    if let Some(live) = mcp::LiveMcp::current() {
+        harness.mcp = Arc::new(live);
+    }
+    harness
+}
+
+fn protocol_ns(settings: &crate::config::AddonsConfig) -> &str {
+    settings
+        .protocol_ns
+        .as_deref()
+        .unwrap_or(DEFAULT_PROTOCOL_NS)
 }
 
 /// Manifests that parse and whose init namespace has portable source.

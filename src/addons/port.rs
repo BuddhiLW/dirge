@@ -1,22 +1,102 @@
 //! Traits the addon host depends on: the runtime and the notification sink.
 
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use serde_json::Value;
 
-use super::domain::{HookPoint, HookReply};
+use super::domain::{HookPoint, HookReply, PanelRequest};
 
 /// A running addon runtime. Calls are synchronous round trips: the only
 /// adapter serializes them onto one interpreter thread, so an async caller
 /// wraps them in `spawn_blocking`.
 pub trait AddonRuntime: Send + Sync + 'static {
+    /// Load one manifest: construct, initialize, register. An addon already
+    /// loaded under the same id is shut down first. Answers the load report,
+    /// a summary or `{"error": msg}`.
+    fn load(&self, manifest: &Path, host_config: &Value) -> Value;
+
+    /// Shut one addon down and forget it. Idempotent.
+    fn unload(&self, addon_id: &str);
+
+    /// Evaluate `files` again so their namespaces run the code now on disk.
+    /// Answers the files that failed, with why.
+    fn reload_sources(&self, files: &[PathBuf]) -> Vec<(PathBuf, String)>;
+
+    /// Replace the roots `require` searches.
+    fn set_source_roots(&self, roots: &[PathBuf]);
+
     /// Invoke `tool` of `addon_id` with JSON `args`. `Ok` carries the
     /// handler's return value, `Err` a message fit for the model.
     fn call_tool(&self, addon_id: &str, tool: &str, args: &Value) -> Result<Value, String>;
+
+    /// Run slash command `name` of `addon_id` with `ctx`.
+    fn run_command(&self, addon_id: &str, name: &str, ctx: &Value) -> Result<Value, String>;
 
     /// Call every addon's `point` hook with `ctx`, in load order.
     fn run_hook(&self, point: HookPoint, ctx: &Value) -> Vec<HookReply>;
 
     /// Shut every addon down. Idempotent.
     fn shutdown(&self);
+}
+
+/// Where `dirge.harness/panel` delivers side-panel changes.
+pub trait PanelSink: Send + Sync + 'static {
+    /// `false` when the change was dropped (no UI, or it is backed up).
+    fn panel(&self, request: PanelRequest) -> bool;
+}
+
+/// The MCP servers dirge is connected to, as `dirge.harness/mcp-call`
+/// reaches them. Calls block the calling thread until the server answers.
+pub trait McpGateway: Send + Sync + 'static {
+    /// Names of the servers currently connected.
+    fn servers(&self) -> Vec<String>;
+
+    /// Call `tool` on `server` with JSON object `args`. `Ok` carries the
+    /// tool result (`{"content": [...], "isError": bool, ...}`).
+    fn call(&self, server: &str, tool: &str, args: &Value) -> Result<Value, String>;
+}
+
+/// Everything the `dirge.harness` natives reach, injected when the runtime
+/// boots.
+#[derive(Clone)]
+pub struct Harness {
+    pub sink: Arc<dyn HarnessSink>,
+    pub panels: Arc<dyn PanelSink>,
+    pub mcp: Arc<dyn McpGateway>,
+}
+
+impl Harness {
+    /// Notifications to `sink`; no panels, no MCP servers.
+    pub fn with_sink(sink: Arc<dyn HarnessSink>) -> Self {
+        Self {
+            sink,
+            panels: Arc::new(NoPanels),
+            mcp: Arc::new(NoMcp),
+        }
+    }
+}
+
+/// A host without a side panel.
+pub struct NoPanels;
+
+impl PanelSink for NoPanels {
+    fn panel(&self, _request: PanelRequest) -> bool {
+        false
+    }
+}
+
+/// A host without MCP servers.
+pub struct NoMcp;
+
+impl McpGateway for NoMcp {
+    fn servers(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn call(&self, server: &str, _tool: &str, _args: &Value) -> Result<Value, String> {
+        Err(format!("no MCP server named {server} is connected"))
+    }
 }
 
 /// Severity of a harness notification.

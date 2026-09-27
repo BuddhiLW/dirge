@@ -26,6 +26,10 @@ use super::host::AddonHost;
 /// Permission umbrella shared with Janet plugin tools.
 const PERMISSION_TOOL: &str = "plugin_tool";
 
+/// [`LoopTool::source`] of every addon tool: `/addons reload` swaps exactly
+/// these in a live agent.
+pub const SOURCE: &str = "addon";
+
 pub struct AddonLoopTool {
     spec: ToolSpec,
     host: Arc<AddonHost>,
@@ -85,6 +89,10 @@ impl LoopTool for AddonLoopTool {
 
     fn parameters(&self) -> &Value {
         &self.spec.input_schema
+    }
+
+    fn source(&self) -> Option<&str> {
+        Some(SOURCE)
     }
 
     fn execute<'a>(

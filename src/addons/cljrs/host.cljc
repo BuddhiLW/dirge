@@ -1,7 +1,8 @@
 (ns dirge.addon.host
   "dirge's addon host inside the embedded cljrs runtime. Rust calls
-   use-protocol!, load-addon!, call-tool, run-hook and shutdown-all! with
-   plain data and reads plain data back."
+   use-protocol!, load-addon!, shutdown-addon!, reload-sources!, call-tool,
+   run-command, run-hook and shutdown-all! with plain data and reads plain
+   data back."
   (:require [clojure.edn :as edn]))
 
 ;; SPDX-License-Identifier: GPL-3.0-only
@@ -56,6 +57,23 @@
   "tool-defs keyed by :name."
   [tools]
   (into {} (map (juxt :name identity)) tools))
+
+(defn command-index
+  "The slash commands in a hooks map's :dirge/commands entry, keyed by name:
+   {\"name\" {:description d :handler f}}. Entries without a handler are
+   dropped."
+  [hooks]
+  (into {}
+        (for [[k spec] (get hooks :dirge/commands)
+              :when (some? (:handler spec))]
+          [(name k) {:description (or (:description spec) "")
+                     :handler     (:handler spec)}])))
+
+(defn command-views
+  "What dirge needs of indexed commands: names and descriptions, sorted."
+  [commands]
+  (vec (for [[n {:keys [description]}] (sort-by key commands)]
+         {:name n :description description})))
 
 (defn- resolve-fns
   [protocol-ns names]
@@ -115,15 +133,18 @@
 
 (defn- install!
   [id manifest addon]
-  (let [tools (vec ((pf :tools) addon))
-        hooks (or (optional :hooks addon {}) {})]
+  (let [tools    (vec ((pf :tools) addon))
+        hooks    (or (optional :hooks addon {}) {})
+        commands (command-index hooks)]
     (swap! !addons assoc id {:addon addon :manifest manifest
-                             :tools (index-tools tools) :hooks hooks})
+                             :tools (index-tools tools) :hooks hooks
+                             :commands commands})
     (swap! !order (fn [ids] (conj (vec (remove #{id} ids)) id)))
     {:id id
      :version (:addon/version manifest)
      :tools (mapv tool-view tools)
      :hooks (hook-names hooks)
+     :commands (command-views commands)
      :health (optional :health addon {:status :ok})}))
 
 (defn load-addon!
@@ -162,6 +183,17 @@
     (catch #?(:clj Throwable :default :default) t
       (failure t))))
 
+(defn run-command
+  "Run slash command `command` of `addon-id` with `ctx`: {:ok answer} or
+   {:error msg}."
+  [addon-id command ctx]
+  (try
+    (if-let [{:keys [handler]} (get-in @!addons [addon-id :commands command])]
+      {:ok (json-safe (handler ctx))}
+      {:error (str "no command " command " in addon " addon-id)})
+    (catch #?(:clj Throwable :default :default) t
+      (failure t))))
+
 (defn run-hook
   "Call every loaded addon's `hook-key` hook with `ctx`, in load order:
    a vector of {:addon id :ok result} / {:addon id :error msg}."
@@ -175,6 +207,36 @@
          {:addon id :ok (json-safe (f ctx))}
          (catch #?(:clj Throwable :default :default) t
            (assoc (failure t) :addon id)))))))
+
+(defn- load-source!
+  "load-file `path`, leaving *ns* where it was: nil, or {:error msg}."
+  [path]
+  (let [saved  (ns-name *ns*)
+        result (try
+                 (load-file path)
+                 nil
+                 (catch #?(:clj Throwable :default :default) t
+                   (failure t)))]
+    (in-ns saved)
+    result))
+
+(defn reload-sources!
+  "Evaluate again every source in `sources` ({:file path :ns name}) whose
+   namespace is loaded, so it runs the code now on disk. Namespaces not
+   loaded yet are left to `require`. A file that fails is retried while a
+   pass still makes progress, since it may need a definition a later file
+   adds. Answers the files that still fail: [{:file path :error msg}]."
+  [sources]
+  (loop [pending (vec (for [{:keys [file ns]} sources
+                            :when (find-ns (symbol ns))]
+                        file))]
+    (let [failed (vec (keep (fn [f]
+                              (when-let [e (load-source! f)]
+                                (assoc e :file f)))
+                            pending))]
+      (if (or (empty? failed) (= (count failed) (count pending)))
+        failed
+        (recur (mapv :file failed))))))
 
 (defn shutdown-all!
   "Shut every addon down, newest first."

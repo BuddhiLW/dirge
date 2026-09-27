@@ -1451,7 +1451,10 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(not(feature = "loop"))]
         let loop_mode = false;
         if !cli.resolve_no_tools(&cfg) && (cli.print || loop_mode) {
-            Some(extras::mcp::McpClientManager::connect_all(servers).await)
+            let mgr = extras::mcp::McpClientManager::connect_all(servers).await;
+            #[cfg(feature = "addons")]
+            crate::addons::mcp::publish(&mgr);
+            Some(mgr)
         } else {
             None
         }
@@ -2047,6 +2050,10 @@ async fn main() -> anyhow::Result<()> {
             let ask = ask_tx.clone();
             tokio::spawn(async move {
                 let mgr = extras::mcp::McpClientManager::connect_all(&servers).await;
+                // Addon code reaches the same connections through
+                // `dirge.harness/mcp-call`.
+                #[cfg(feature = "addons")]
+                crate::addons::mcp::publish(&mgr);
                 let mcp_tools = mgr.collect_tools(perm, ask).await;
                 let wrapped = crate::agent::builder::wrap_mcp_tools(mcp_tools).await;
                 // Deliver the payload, then nudge the UI loop to drain it.

@@ -10,6 +10,23 @@
   [params]
   {:content [{:type "text" :text (str "rows=" (count (:rows params)))}]})
 
+(defn- harness
+  [f]
+  (resolve (symbol "dirge.harness" f)))
+
+(defn- echo-command
+  [{:keys [args]}]
+  ((harness "panel") {:op :show :id "echo" :title "Echo" :lines [args]})
+  {:text (str "echo: " args)})
+
+(defn- ask-command
+  [{:keys [args]}]
+  (let [answer ((harness "mcp-call") "fixture" "lookup" {:q args})]
+    (if-let [error (:error answer)]
+      {:text (str "error: " error)}
+      {:text   (apply str (map :text (:content answer)))
+       :prompt (str "summarize " args)})))
+
 (defrecord EchoAddon [state]
   p/IAddon
   (addon-id [_] "echo")
@@ -26,7 +43,11 @@
       :inputSchema {:type "object" :properties {:rows {:type "array"}}}
       :handler     count-rows}])
   (hooks [_]
-    {:dirge/system-prompt (fn [_] "echo addon active")})
+    {:dirge/system-prompt (fn [_] "echo addon active")
+     :dirge/commands      {"echo" {:description "Echo the arguments into a panel"
+                                   :handler     echo-command}
+                           "ask"  {:description "Ask the fixture MCP server"
+                                   :handler     ask-command}}})
   (health [_]
     {:status (if @state :ok :down)}))
 

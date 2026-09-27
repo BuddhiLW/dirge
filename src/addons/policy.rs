@@ -4,7 +4,10 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use super::domain::{AddonSummary, BeforeOutcome, HookPoint, HookReply, LoadFailure, ToolSpec};
+use super::domain::{
+    AddonSummary, BeforeOutcome, CommandOutput, CommandSpec, HookPoint, HookReply, LoadFailure,
+    PanelRequest, ToolSpec,
+};
 
 /// Longest tool name the providers accept.
 const MAX_TOOL_NAME: usize = 64;
@@ -79,13 +82,155 @@ pub fn parse_summary(manifest: &Path, report: &Value) -> Result<AddonSummary, Lo
                 .collect()
         })
         .unwrap_or_default();
+    let commands = report
+        .get("commands")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|c| {
+                    let name = str_field(c, "name")?.trim_start_matches('/');
+                    valid_command_name(name).then(|| CommandSpec {
+                        addon_id: id.clone(),
+                        name: name.to_string(),
+                        description: str_field(c, "description").unwrap_or("").to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(AddonSummary {
         id,
         manifest: manifest.to_path_buf(),
         tools,
         hooks,
+        commands,
         health: report.get("health").cloned().unwrap_or(Value::Null),
     })
+}
+
+/// Longest slash command name an addon may register.
+const MAX_COMMAND_NAME: usize = 32;
+
+/// A command name is 1 to 32 characters of `[a-z0-9_:-]`, starting with a
+/// letter, so it can never be mistaken for a path or carry terminal bytes.
+pub fn valid_command_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let first_ok = chars.next().is_some_and(|c| c.is_ascii_lowercase());
+    first_ok
+        && name.len() <= MAX_COMMAND_NAME
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_:-".contains(c))
+}
+
+/// The commands users can type: every addon's commands in load order, a
+/// later one whose name is already taken dropped, like tools. Also returns
+/// the `(addon-id, name)` of each dropped command.
+pub fn unique_commands(addons: &[AddonSummary]) -> (Vec<CommandSpec>, Vec<(String, String)>) {
+    let mut seen = std::collections::HashSet::new();
+    let mut kept = Vec::new();
+    let mut dropped = Vec::new();
+    for command in addons.iter().flat_map(|a| a.commands.iter()) {
+        if seen.insert(command.name.clone()) {
+            kept.push(command.clone());
+        } else {
+            dropped.push((command.addon_id.clone(), command.name.clone()));
+        }
+    }
+    (kept, dropped)
+}
+
+/// The `ctx` a command handler receives for the text typed after its name.
+pub fn command_ctx(args: &str, cwd: &str) -> Value {
+    let argv: Vec<&str> = args.split_whitespace().collect();
+    json!({ "args": args.trim(), "argv": argv, "cwd": cwd })
+}
+
+/// A command handler's answer: nil, a string (shown), or a map with `text`,
+/// `markdown` (both shown) and `prompt` (submitted as the next turn).
+pub fn command_output(answer: &Value) -> CommandOutput {
+    let shown = |key: &str| {
+        str_field(answer, key)
+            .map(str::trim_end)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+    };
+    match answer {
+        Value::String(s) if !s.trim().is_empty() => CommandOutput {
+            text: Some(s.trim_end().to_string()),
+            prompt: None,
+        },
+        Value::Object(_) => CommandOutput {
+            text: shown("text").or_else(|| shown("markdown")),
+            prompt: shown("prompt").map(|p| p.trim().to_string()),
+        },
+        _ => CommandOutput::default(),
+    }
+}
+
+/// `(dirge.harness/panel op)`'s map as a panel request.
+///
+/// `{:op "show" :id :title :lines [{:text :face} | "text"]}`,
+/// `{:op "show" :id :title :markdown "..."}`, `{:op "append" :id :text :face}`,
+/// `{:op "focus" :id :title}`, `{:op "close" :id}`. `op` may be a keyword.
+pub fn panel_request(op: &Value) -> Result<PanelRequest, String> {
+    let kind = str_field(op, "op")
+        .map(|k| k.trim_start_matches(':'))
+        .ok_or("panel op needs :op")?;
+    let id = str_field(op, "id")
+        .filter(|id| !id.trim().is_empty())
+        .ok_or("panel op needs a non-empty :id")?
+        .to_string();
+    let title = || str_field(op, "title").unwrap_or(&id).to_string();
+    match kind {
+        "show" => match str_field(op, "markdown") {
+            Some(markdown) => Ok(PanelRequest::Markdown {
+                title: title(),
+                markdown: markdown.to_string(),
+                id,
+            }),
+            None => Ok(PanelRequest::Show {
+                title: title(),
+                lines: panel_lines(op.get("lines")),
+                id,
+            }),
+        },
+        "append" => Ok(PanelRequest::Append {
+            text: str_field(op, "text").unwrap_or("").to_string(),
+            face: str_field(op, "face").unwrap_or("normal").to_string(),
+            id,
+        }),
+        "focus" => Ok(PanelRequest::Focus { title: title(), id }),
+        "close" => Ok(PanelRequest::Close { id }),
+        other => Err(format!("unknown panel op {other}")),
+    }
+}
+
+fn panel_lines(lines: Option<&Value>) -> Vec<(String, String)> {
+    lines
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .map(|row| match row {
+                    Value::String(s) => (s.clone(), "normal".to_string()),
+                    other => (
+                        str_field(other, "text").unwrap_or("").to_string(),
+                        str_field(other, "face").unwrap_or("normal").to_string(),
+                    ),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Exposed tool names in `after` but not `before`, and the reverse.
+pub fn tool_diff(before: &[ToolSpec], after: &[ToolSpec]) -> (Vec<String>, Vec<String>) {
+    let names = |tools: &[ToolSpec]| -> std::collections::BTreeSet<String> {
+        tools.iter().map(|t| t.exposed_name.clone()).collect()
+    };
+    let (old, new) = (names(before), names(after));
+    (
+        new.difference(&old).cloned().collect(),
+        old.difference(&new).cloned().collect(),
+    )
 }
 
 /// The tools the model is offered: every addon's tools in load order, a
@@ -132,6 +277,23 @@ pub fn hook_replies(answer: &Value) -> Vec<HookReply> {
                         addon_id,
                         result: tool_reply(row),
                     })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The host's `reload-sources!` answer, `[{:file path :error msg}]`, as
+/// `(file, error)` pairs. A malformed answer reports nothing.
+pub fn source_errors(answer: &Value) -> Vec<(std::path::PathBuf, String)> {
+    answer
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let file = str_field(row, "file")?;
+                    let error = str_field(row, "error").unwrap_or("could not be evaluated");
+                    Some((std::path::PathBuf::from(file), error.to_string()))
                 })
                 .collect()
         })
@@ -417,5 +579,127 @@ mod tests {
             assert_eq!(HookPoint::from_key(&format!(":{}", p.key())), Some(p));
         }
         assert_eq!(HookPoint::from_key("dirge/unknown"), None);
+    }
+
+    #[test]
+    fn summary_reads_commands_and_drops_unsafe_names() {
+        let report = json!({
+            "id": "a",
+            "commands": [
+                {"name": "/swarm", "description": "grid"},
+                {"name": "kanban:list"},
+                {"name": "Bad Name"},
+                {"name": "x\u{1b}[31m"},
+                {"description": "nameless"}
+            ]
+        });
+        let s = parse_summary(&PathBuf::from("a.edn"), &report).unwrap();
+        let names: Vec<_> = s.commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["swarm", "kanban:list"]);
+        assert_eq!(s.commands[0].description, "grid");
+        assert_eq!(s.commands[0].addon_id, "a");
+    }
+
+    #[test]
+    fn command_names_are_short_lowercase_words() {
+        assert!(valid_command_name("swarm"));
+        assert!(valid_command_name("k8s-pods"));
+        assert!(!valid_command_name(""));
+        assert!(!valid_command_name("9lives"));
+        assert!(!valid_command_name("../x"));
+        assert!(!valid_command_name(&"a".repeat(33)));
+    }
+
+    #[test]
+    fn first_addon_keeps_a_contested_command() {
+        let with = |id: &str, names: &[&str]| {
+            parse_summary(
+                &PathBuf::from(format!("{id}.edn")),
+                &json!({"id": id, "commands": names.iter().map(|n| json!({"name": n})).collect::<Vec<_>>()}),
+            )
+            .unwrap()
+        };
+        let (kept, dropped) = unique_commands(&[with("a", &["x", "y"]), with("b", &["x", "z"])]);
+        let names: Vec<_> = kept
+            .iter()
+            .map(|c| (c.addon_id.as_str(), c.name.as_str()))
+            .collect();
+        assert_eq!(names, vec![("a", "x"), ("a", "y"), ("b", "z")]);
+        assert_eq!(dropped, vec![("b".to_string(), "x".to_string())]);
+    }
+
+    #[test]
+    fn command_ctx_splits_argv() {
+        assert_eq!(
+            command_ctx("  list  todo ", "/w"),
+            json!({"args": "list  todo", "argv": ["list", "todo"], "cwd": "/w"})
+        );
+    }
+
+    #[test]
+    fn command_answers_read_as_text_and_prompt() {
+        assert_eq!(command_output(&Value::Null), CommandOutput::default());
+        assert_eq!(command_output(&json!("  ")), CommandOutput::default());
+        assert_eq!(
+            command_output(&json!("done\n")),
+            CommandOutput {
+                text: Some("done".into()),
+                prompt: None
+            }
+        );
+        assert_eq!(
+            command_output(&json!({"markdown": "# t", "prompt": " go on "})),
+            CommandOutput {
+                text: Some("# t".into()),
+                prompt: Some("go on".into())
+            }
+        );
+    }
+
+    #[test]
+    fn panel_ops_parse_each_shape() {
+        assert_eq!(
+            panel_request(
+                &json!({"op": ":show", "id": "p", "lines": ["a", {"text": "b", "face": "warn"}]})
+            ),
+            Ok(PanelRequest::Show {
+                id: "p".into(),
+                title: "p".into(),
+                lines: vec![("a".into(), "normal".into()), ("b".into(), "warn".into())],
+            })
+        );
+        assert_eq!(
+            panel_request(&json!({"op": "show", "id": "p", "title": "T", "markdown": "# x"})),
+            Ok(PanelRequest::Markdown {
+                id: "p".into(),
+                title: "T".into(),
+                markdown: "# x".into()
+            })
+        );
+        assert_eq!(
+            panel_request(&json!({"op": "append", "id": "log", "text": "hi"})),
+            Ok(PanelRequest::Append {
+                id: "log".into(),
+                text: "hi".into(),
+                face: "normal".into()
+            })
+        );
+        assert_eq!(
+            panel_request(&json!({"op": "close", "id": "p"})),
+            Ok(PanelRequest::Close { id: "p".into() })
+        );
+        assert!(panel_request(&json!({"op": "show"})).is_err());
+        assert!(panel_request(&json!({"id": "p"})).is_err());
+        assert!(panel_request(&json!({"op": "explode", "id": "p"})).is_err());
+    }
+
+    #[test]
+    fn tool_diff_names_what_came_and_went() {
+        let before = summary("a", &["x", "y"]).tools;
+        let after = summary("a", &["y", "z"]).tools;
+        assert_eq!(
+            tool_diff(&before, &after),
+            (vec!["z".to_string()], vec!["x".to_string()])
+        );
     }
 }

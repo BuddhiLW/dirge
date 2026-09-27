@@ -80,6 +80,28 @@ impl ToolSpec {
     }
 }
 
+/// One slash command an addon contributes, listed under the `:dirge/commands`
+/// key of its `hooks` map:
+/// `{:dirge/commands {"name" {:description "..." :handler (fn [ctx] ...)}}}`.
+/// The handler gets `{:args "rest of the line" :argv [...] :cwd ...}` and
+/// answers nil, a string, or a map read as a [`CommandOutput`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandSpec {
+    pub addon_id: String,
+    /// The name typed after `/`.
+    pub name: String,
+    pub description: String,
+}
+
+/// What an addon command asked dirge to do with its answer.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CommandOutput {
+    /// Shown in the chat area.
+    pub text: Option<String>,
+    /// Submitted as the next user prompt, starting a turn.
+    pub prompt: Option<String>,
+}
+
 /// What loading one manifest produced.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AddonSummary {
@@ -87,7 +109,53 @@ pub struct AddonSummary {
     pub manifest: PathBuf,
     pub tools: Vec<ToolSpec>,
     pub hooks: Vec<HookPoint>,
+    pub commands: Vec<CommandSpec>,
     pub health: Value,
+}
+
+/// What `/addons reload` changed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReloadReport {
+    /// Ids loaded, in load order.
+    pub loaded: Vec<String>,
+    pub failures: Vec<LoadFailure>,
+    /// Source files that did not evaluate; the addons using them may run
+    /// stale code.
+    pub source_errors: Vec<LoadFailure>,
+    /// Exposed tool names that appeared or disappeared.
+    pub tools_added: Vec<String>,
+    pub tools_removed: Vec<String>,
+}
+
+/// One change an addon asks of dirge's side panel.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PanelRequest {
+    /// Create or replace panel `id` with `lines` of `(text, face)`.
+    Show {
+        id: String,
+        title: String,
+        lines: Vec<(String, String)>,
+    },
+    /// Create or replace panel `id` with rendered markdown.
+    Markdown {
+        id: String,
+        title: String,
+        markdown: String,
+    },
+    /// Add one line to log-style panel `id`.
+    Append {
+        id: String,
+        text: String,
+        face: String,
+    },
+    /// Make `id` a log-style panel painted first.
+    Focus {
+        id: String,
+        title: String,
+    },
+    Close {
+        id: String,
+    },
 }
 
 /// A manifest that failed to load, kept so `/addons` can say why.
