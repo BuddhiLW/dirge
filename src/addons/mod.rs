@@ -48,7 +48,12 @@ pub fn global() -> Option<Arc<AddonHost>> {
 /// Discover and load addons for this process. A no-op when disabled or when
 /// no manifest is found, so a build with the feature costs nothing until an
 /// addon is installed. Failures are logged, never fatal.
+///
+/// Called on the thread that runs dirge's single-threaded event loop, which
+/// it marks: prompt hooks, loading and shutdown reach the isolate from that
+/// thread, and addon code must not wait on the loop while it waits.
 pub fn install_from_config(cfg: &crate::config::Config) {
+    cljrs::isolate::mark_event_loop_thread();
     let settings = cfg.addons.clone().unwrap_or_default();
     if settings.enabled == Some(false) {
         return;

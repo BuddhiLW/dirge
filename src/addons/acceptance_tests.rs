@@ -167,17 +167,38 @@ fn mcp_calls_are_refused_while_the_event_loop_waits_on_the_addon() {
         super::start(echo_plan(&fixtures().join("echo")), harness, PROTOCOL).expect("host starts"),
     );
     let ask = host.command("ask").expect("ask registered");
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-    // Called straight from a runtime thread, as spawn_runner calls the
-    // prompt hooks: the gateway must not be reached.
-    let out = rt.block_on(async { host.run_command(&ask, "x") }).unwrap();
+
+    // From the event-loop thread, as spawn_runner calls the prompt hooks: the
+    // gateway must not be reached. A thread of its own keeps the mark from
+    // leaking into other tests.
+    let (h, a) = (host.clone(), ask.clone());
+    let refused = std::thread::spawn(move || {
+        super::cljrs::isolate::mark_event_loop_thread();
+        h.run_command(&a, "x").unwrap()
+    })
+    .join()
+    .unwrap();
     assert!(
-        out.text.unwrap().contains("unavailable while dirge waits"),
+        refused
+            .text
+            .unwrap()
+            .contains("unavailable while dirge waits"),
         "refused"
     );
     assert!(mcp.0.lock().unwrap().is_empty());
+
+    // From a blocking-pool thread, the way commands and tools reach the
+    // isolate: a runtime context, but not the loop, so the call goes through.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let h = host.clone();
+    let allowed = rt
+        .block_on(async { tokio::task::spawn_blocking(move || h.run_command(&ask, "y")).await })
+        .unwrap()
+        .unwrap();
+    assert_eq!(allowed.text.as_deref(), Some("found \"y\""));
+    assert_eq!(mcp.0.lock().unwrap().len(), 1);
     host.shutdown();
 }
 

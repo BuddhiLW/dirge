@@ -72,11 +72,25 @@ enum Command {
     },
 }
 
-/// A command, and whether its caller is a thread of dirge's async runtime.
-/// dirge runs a single-threaded runtime, so such a caller stops the event
-/// loop until the answer comes: nothing the isolate does meanwhile may wait
-/// on that runtime (an MCP call does).
+/// A command, and whether its caller is the thread running dirge's event
+/// loop. dirge runs a single-threaded runtime, so that caller stops the loop
+/// until the answer comes: nothing the isolate does meanwhile may wait on it
+/// (an MCP call does).
 type Envelope = (bool, Command);
+
+thread_local! {
+    /// Set on the thread that runs dirge's event loop. A runtime context is
+    /// not the test: `spawn_blocking` threads have one too, and blocking them
+    /// is exactly how the rest of dirge reaches the isolate safely.
+    static EVENT_LOOP: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Mark the calling thread as the one that runs dirge's single-threaded
+/// event loop: while it waits on the isolate, addon code may not wait on
+/// that loop in turn.
+pub fn mark_event_loop_thread() {
+    EVENT_LOOP.with(|marked| marked.set(true));
+}
 
 /// Handle to the isolate thread. Cloning is not offered: one owner, shared
 /// behind the host's `Arc`.
@@ -110,9 +124,9 @@ impl Isolate {
 
     fn ask<T>(&self, command: impl FnOnce(Sender<T>) -> Command) -> Result<T, String> {
         let (reply, answer) = channel();
-        let on_runtime = tokio::runtime::Handle::try_current().is_ok();
+        let on_event_loop = EVENT_LOOP.with(Cell::get);
         self.tx
-            .send((on_runtime, command(reply)))
+            .send((on_event_loop, command(reply)))
             .map_err(|_| GONE.to_string())?;
         answer.recv().map_err(|_| GONE.to_string())
     }
