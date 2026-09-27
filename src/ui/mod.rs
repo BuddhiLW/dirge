@@ -24,6 +24,7 @@ pub(crate) mod memory_review;
 pub(crate) mod notifications;
 pub(crate) mod panel_data;
 mod panel_render;
+pub(crate) mod panels_ext;
 pub(crate) mod permission_ui;
 pub(crate) mod phase;
 pub(crate) mod picker;
@@ -1609,6 +1610,11 @@ pub async fn run_interactive(
     // push lines. We just take ownership of the receiver here for
     // the UI loop's `tokio::select!`. Review #1.
     let mut notify_rx = crate::ui::notifications::take_receiver();
+
+    // External panel ops (`ui::panels_ext`). The channel is created on
+    // first use, so producers that fired before this point have their
+    // ops queued and drained on the first iterations below.
+    let mut panel_rx = crate::ui::panels_ext::take_receiver();
 
     let (user_tx, mut user_rx) = mpsc::unbounded_channel::<UserEvent>();
     input_reader::spawn_input_reader(user_tx.clone());
@@ -4748,6 +4754,20 @@ pub async fn run_interactive(
                             &text,
                             color,
                         )?;
+                        renderer.request_repaint();
+                    }
+                    Some(panel_op) = async {
+                        if let Some(rx) = &mut panel_rx {
+                            rx.recv().await
+                        } else {
+                            std::future::pending().await
+                        }
+                    } => {
+                        // External panel update: fold it into the
+                        // left-panel state. The reducer sanitises and
+                        // bounds producer text; the loop-top paint
+                        // shows the result.
+                        renderer.apply_external_panel_op(panel_op);
                         renderer.request_repaint();
                     }
                     Some(lifecycle_evt) = async {
