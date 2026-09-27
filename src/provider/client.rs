@@ -36,6 +36,12 @@ enum ProviderCredential {
     },
 }
 
+#[derive(Default)]
+struct ClientRequestContext<'a> {
+    resolved_auth_headers: Option<ProviderAuthHeaders>,
+    session_id: Option<&'a str>,
+}
+
 impl fmt::Debug for ProviderCredential {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -92,12 +98,25 @@ pub(crate) fn create_client_with_auth(
     providers: &HashMap<String, ProviderEntry>,
     default_auth: Option<ProviderAuth>,
 ) -> anyhow::Result<AnyClient> {
+    create_client_with_auth_for_session(provider_name, api_key, providers, default_auth, None)
+}
+
+pub(crate) fn create_client_with_auth_for_session(
+    provider_name: &str,
+    api_key: Option<&str>,
+    providers: &HashMap<String, ProviderEntry>,
+    default_auth: Option<ProviderAuth>,
+    session_id: Option<&str>,
+) -> anyhow::Result<AnyClient> {
     create_client_with_resolved_auth(
         provider_name,
         api_key,
         providers,
         default_auth,
-        None,
+        ClientRequestContext {
+            session_id,
+            ..Default::default()
+        },
         |name| std::env::var(name).ok(),
         load_fresh_openai_oauth,
     )
@@ -272,7 +291,7 @@ where
         api_key,
         providers,
         None,
-        None,
+        ClientRequestContext::default(),
         env,
         load_openai_oauth,
     )
@@ -283,7 +302,7 @@ fn create_client_with_resolved_auth<F, G>(
     api_key: Option<&str>,
     providers: &HashMap<String, ProviderEntry>,
     default_auth: Option<ProviderAuth>,
-    resolved_auth_headers: Option<ProviderAuthHeaders>,
+    request_context: ClientRequestContext<'_>,
     env: F,
     load_openai_oauth: G,
 ) -> anyhow::Result<AnyClient>
@@ -291,6 +310,10 @@ where
     F: Fn(&str) -> Option<String>,
     G: FnOnce() -> anyhow::Result<Option<OpenAiOAuthCredential>>,
 {
+    let ClientRequestContext {
+        resolved_auth_headers,
+        session_id,
+    } = request_context;
     let info = resolve_provider_info(provider_name, providers).ok_or_else(|| {
         anyhow::anyhow!(
             "Unknown provider: {}. Supported providers: openrouter, openai, anthropic, gemini, deepseek, glm, cerebras, opencode, kimi, ollama, custom",
@@ -303,6 +326,12 @@ where
         .map(ProviderEntry::resolved_headers)
         .transpose()?
         .unwrap_or_default();
+    add_opencode_session_header(
+        &mut headers,
+        info.kind,
+        info.base_url.as_deref(),
+        session_id,
+    )?;
 
     // dirge-ro8g: for the anthropic provider, a present OAuth login — a
     // stored `dirge auth anthropic` creds file OR an exported
@@ -659,6 +688,31 @@ where
     }
 }
 
+fn add_opencode_session_header(
+    headers: &mut HeaderMap,
+    kind: ProviderKind,
+    base_url: Option<&str>,
+    session_id: Option<&str>,
+) -> anyhow::Result<()> {
+    if is_opencode_endpoint(kind, base_url)
+        && let Some(session_id) = session_id.filter(|id| !id.trim().is_empty())
+    {
+        headers.insert(
+            http::HeaderName::from_static("x-opencode-session"),
+            http::HeaderValue::from_str(session_id)?,
+        );
+    }
+    Ok(())
+}
+
+fn is_opencode_endpoint(kind: ProviderKind, base_url: Option<&str>) -> bool {
+    kind == ProviderKind::OpenCode
+        || base_url
+            .and_then(|url| url::Url::parse(url).ok())
+            .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+            .is_some_and(|host| host == "opencode.ai" || host.ends_with(".opencode.ai"))
+}
+
 #[cfg(test)]
 fn create_client_with_chatgpt_auth_headers(
     provider_name: &str,
@@ -670,7 +724,10 @@ fn create_client_with_chatgpt_auth_headers(
         None,
         providers,
         Some(ProviderAuth::ChatGpt),
-        Some(headers),
+        ClientRequestContext {
+            resolved_auth_headers: Some(headers),
+            session_id: None,
+        },
         |name| std::env::var(name).ok(),
         load_fresh_openai_oauth,
     )
@@ -687,7 +744,10 @@ fn create_client_with_anthropic_auth_headers(
         None,
         providers,
         Some(ProviderAuth::Anthropic),
-        Some(headers),
+        ClientRequestContext {
+            resolved_auth_headers: Some(headers),
+            session_id: None,
+        },
         |name| std::env::var(name).ok(),
         load_fresh_openai_oauth,
     )
@@ -1064,6 +1124,139 @@ mod tests {
 
     fn no_env(_: &str) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn opencode_session_header_is_scoped_and_stable() {
+        let mut headers = HeaderMap::new();
+        add_opencode_session_header(
+            &mut headers,
+            ProviderKind::OpenCode,
+            None,
+            Some("conversation-123"),
+        )
+        .unwrap();
+        assert_eq!(
+            headers
+                .get("x-opencode-session")
+                .and_then(|value| value.to_str().ok()),
+            Some("conversation-123"),
+        );
+
+        let mut other_provider_headers = HeaderMap::new();
+        add_opencode_session_header(
+            &mut other_provider_headers,
+            ProviderKind::OpenAI,
+            Some("https://api.openai.com/v1"),
+            Some("conversation-123"),
+        )
+        .unwrap();
+        assert!(other_provider_headers.get("x-opencode-session").is_none());
+
+        let mut opencode_go_headers = HeaderMap::new();
+        add_opencode_session_header(
+            &mut opencode_go_headers,
+            ProviderKind::OpenAI,
+            Some("https://opencode.ai/zen/go/v1"),
+            Some("conversation-123"),
+        )
+        .unwrap();
+        assert_eq!(
+            opencode_go_headers
+                .get("x-opencode-session")
+                .and_then(|value| value.to_str().ok()),
+            Some("conversation-123"),
+        );
+
+        let mut empty_session_headers = HeaderMap::new();
+        add_opencode_session_header(
+            &mut empty_session_headers,
+            ProviderKind::OpenCode,
+            None,
+            Some(" "),
+        )
+        .unwrap();
+        assert!(empty_session_headers.get("x-opencode-session").is_none());
+    }
+
+    #[tokio::test]
+    async fn openai_responses_transport_preserves_opencode_session_header() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (headers_tx, headers_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0; 1024];
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "client closed before sending request headers");
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]).to_string();
+            let content_length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find_map(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            while request.len() < header_end + content_length {
+                let mut chunk = [0; 1024];
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "client closed before sending the full body");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            headers_tx.send(headers).unwrap();
+            let body = br#"{"error":{"message":"test response"}}"#;
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.write_all(body).await.unwrap();
+        });
+
+        let providers = HashMap::from([(
+            "opencode-go".to_string(),
+            ProviderEntry {
+                provider_type: Some("openai-responses".to_string()),
+                base_url: Some(base_url),
+                api_key: Some("test-key".to_string()),
+                allow_insecure: true,
+                headers: Some(HashMap::from([(
+                    "x-opencode-session".to_string(),
+                    "conversation-123".to_string(),
+                )])),
+                ..Default::default()
+            },
+        )]);
+        let client = create_client_with_auth_for_session(
+            "opencode-go",
+            None,
+            &providers,
+            None,
+            Some("conversation-123"),
+        )
+        .unwrap();
+        let model = client.completion_model("gpt-6-luna");
+        assert!(model.btw_query("test request".to_string()).await.is_err());
+
+        let headers = headers_rx.await.unwrap();
+        assert!(
+            headers
+                .lines()
+                .any(|line| { line.eq_ignore_ascii_case("x-opencode-session: conversation-123") }),
+            "Responses request omitted its OpenCode session header: {headers}"
+        );
+        server.await.unwrap();
     }
 
     // ── dirge-ro8g: anthropic-OAuth presence implies Anthropic auth ──
@@ -2259,7 +2452,7 @@ mod tests {
             None,
             &providers,
             Some(ProviderAuth::Kimi),
-            None,
+            ClientRequestContext::default(),
             no_env,
             || Ok(None),
         ) {
@@ -2298,7 +2491,7 @@ mod tests {
                 None,
                 &providers,
                 Some(ProviderAuth::Kimi),
-                None,
+                ClientRequestContext::default(),
                 no_env,
                 || Ok(None),
             ) {
