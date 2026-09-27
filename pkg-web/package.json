@@ -5,7 +5,7 @@
     "Yogthos <yogthos@gmail.com>"
   ],
   "description": "Minimalistic coding agent written in Rust, optimized for memory footprint and performance",
-  "version": "0.25.6",
+  "version": "0.25.7",
   "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
