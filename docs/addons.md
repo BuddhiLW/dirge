@@ -135,6 +135,13 @@ Command names are 1 to 32 characters of `[a-z0-9_:-]` starting with a letter.
 Built-in commands and Janet plugin commands take precedence; between addons
 the first loaded wins. Addon commands appear in `/help` and tab completion.
 
+A handler runs off dirge's event loop, so dirge stays responsive while it
+works. Until it answers dirge is busy: a second addon command or
+`/addons reload` is refused, and a prompt typed meanwhile is queued. A
+permission prompt the handler raises (a `call-tool` of `bash`, say) appears
+and is answered as usual. Ctrl+C stops waiting for the answer; the handler
+itself still runs to its end on the interpreter thread.
+
 ## Calling dirge
 
 The `dirge.harness` namespace is available to addon code:
@@ -167,16 +174,18 @@ Faces are `normal`, `dim`, `accent`, `success`, `warn` and `error`.
 `mcp-call` answers the tool result (`{:content [...] :isError bool}`) or
 `{:error "why"}`. It blocks until the server answers. It is refused (an
 `{:error}` answer) while dirge's event loop is waiting on the addon, which is
-the case for `:dirge/system-prompt`, `:dirge/on-prompt`, loading and
-shutdown. Call it from commands, tools and tool-call hooks. Calls made this
+the case for `:dirge/system-prompt`, `:dirge/on-prompt`, loading at startup
+and shutdown at exit. Call it from commands, tools, tool-call hooks, and
+from `initialize!` and `shutdown!` during `/addons reload`. Calls made this
 way are not put through the per-tool permission prompt: an addon is code you
 installed, running inside dirge.
 
 `call-tool` goes through the tool's own permission check, so a call to
 `bash` still asks the user. It refuses addon tools and `task`, and it is
-unavailable from `:dirge/system-prompt` and `:dirge/on-prompt` hooks and
-during load and shutdown, while dirge is waiting on the addon; call it from
-a command, a tool or a tool-call hook.
+unavailable from `:dirge/system-prompt` and `:dirge/on-prompt` hooks, during
+loading at startup and during shutdown at exit, while dirge is waiting on the
+addon. Call it from a command, a tool, a tool-call hook, or from
+`initialize!` and `shutdown!` during `/addons reload`.
 
 To keep an addon portable, resolve these at call time, for example
 `(when-let [f (resolve 'dirge.harness/notify)] (f "hi"))`, so the code is a
@@ -196,10 +205,19 @@ without restarting dirge:
    (the libraries it depends on, including the protocol, are not),
 3. every manifest found now is loaded, constructed and initialized afresh.
 
-New and removed tools reach the agent at the next prompt. It also starts the
-host when dirge was started without any addon installed. Keep state that
-must survive a reload in `defonce`. A reload does not pick up a changed
-`protocol_ns`; restart for that.
+New and removed tools reach the agent at the next prompt. A tool whose name a
+built-in or another tool (a Janet plugin or MCP tool, say) already uses is not
+installed, and the reload lists it as skipped; the same rule applies when
+dirge starts. A reload also starts the host when dirge was started without
+any addon installed. Keep
+state that must survive a reload in `defonce`. A reload does not pick up a
+changed `protocol_ns`; restart for that.
+
+A reload runs off the event loop like an addon command: dirge is busy until
+it finishes, and a permission prompt raised from `initialize!` or `shutdown!`
+is answered as usual. Ctrl+C stops waiting for it; the reload still finishes
+on the interpreter thread, but its tool changes do not reach the running
+agent, so run `/addons reload` again.
 
 ## Example
 
