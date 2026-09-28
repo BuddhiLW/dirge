@@ -24,6 +24,10 @@
 //!   DIRGE_BAKEOFF_BASE_URL   for `custom` — e.g. a local llama.cpp server
 //!   DIRGE_BAKEOFF_API_KEY_ENV  for `custom` on a hosted endpoint: the NAME of
 //!                            the env var holding its key
+//!   DIRGE_BAKEOFF_PROVIDER_TYPE  provider_type for the BASE_URL entry
+//!                            (default custom); match the loop's own
+//!                            provider_type (e.g. openai) so the one-shot sends
+//!                            the same reasoning-disable params as a real fold
 //!   DIRGE_BAKEOFF_REPEATS    calls per arm (default 5)
 //!
 //!   cargo nextest run compaction_bakeoff --no-capture
@@ -69,7 +73,10 @@ pub(crate) fn bakeoff_summarizer() -> Option<(SummarizeFn, String)> {
         providers.insert(
             provider.clone(),
             crate::config::ProviderEntry {
-                provider_type: Some("custom".into()),
+                provider_type: Some(
+                    std::env::var("DIRGE_BAKEOFF_PROVIDER_TYPE")
+                        .unwrap_or_else(|_| "custom".into()),
+                ),
                 base_url: Some(base_url),
                 api_key,
                 api_key_env,
