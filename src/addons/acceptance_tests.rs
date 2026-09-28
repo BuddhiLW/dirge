@@ -651,3 +651,172 @@ fn a_source_whose_ns_form_disagrees_with_its_path_is_reported() {
     assert_eq!(report.loaded, vec!["layered".to_string()]);
     host.shutdown();
 }
+
+/// The `lifecycle` fixture addon over [`ScriptedMcp`], and the lifecycle
+/// that announces sessions to it with `fixture` connected.
+fn lifecycle_fixture() -> (
+    Arc<super::host::AddonHost>,
+    crate::agent::session_lifecycle::Lifecycle,
+    Arc<ScriptedMcp>,
+) {
+    use crate::agent::session_lifecycle::collect::McpServersFn;
+    use crate::agent::session_lifecycle::{Budgets, Lifecycle};
+
+    let mcp = Arc::new(ScriptedMcp::default());
+    let mut harness = Harness::with_sink(Arc::new(RecordingSink::default()));
+    harness.mcp = mcp.clone();
+    let host = Arc::new(
+        super::start(echo_plan(&fixtures().join("lifecycle")), harness, PROTOCOL)
+            .expect("host starts"),
+    );
+    let servers: McpServersFn = Arc::new(|_| Box::pin(async { vec!["fixture".to_string()] }));
+    let lifecycle = Lifecycle::new(
+        Arc::new(super::lifecycle::AddonLifecycle::of(host.clone())),
+        Arc::default(),
+        servers,
+        Budgets::default(),
+    );
+    (host, lifecycle, mcp)
+}
+
+fn start_facts(first_prompt: bool) -> crate::agent::session_lifecycle::domain::StartFacts {
+    crate::agent::session_lifecycle::domain::StartFacts {
+        session_id: Some("s1".into()),
+        cwd: "/w".into(),
+        first_prompt,
+    }
+}
+
+fn opening() -> crate::agent::agent_loop::hooks::RunOpening {
+    crate::agent::agent_loop::hooks::RunOpening {
+        system_prompt: "sys".into(),
+        prompt: "hi".into(),
+        reminders: Vec::new(),
+    }
+}
+
+/// Drives `work` the way dirge's event loop runs: a current-thread runtime
+/// on a thread marked as the event loop. A thread of its own keeps the mark
+/// from leaking into other tests.
+fn on_event_loop_runtime<F, Fut, T>(work: F) -> T
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = T>,
+    T: Send + 'static,
+{
+    std::thread::spawn(move || {
+        super::cljrs::isolate::mark_event_loop_thread();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(work())
+    })
+    .join()
+    .unwrap()
+}
+
+fn lookups(mcp: &ScriptedMcp) -> Vec<Value> {
+    mcp.0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, _, a)| a["q"].clone())
+        .collect()
+}
+
+#[test]
+fn session_start_reaches_mcp_from_the_event_loop_and_leads_the_first_turn() {
+    let (host, lifecycle, mcp) = lifecycle_fixture();
+    let open = lifecycle.open_run(start_facts(true));
+
+    let opened = on_event_loop_runtime(move || open(opening()));
+
+    assert_eq!(opened.system_prompt, "sys");
+    assert_eq!(opened.reminders.len(), 1, "{opened:?}");
+    assert!(
+        opened.reminders[0].contains("start found \"session\" first=true servers=fixture"),
+        "{opened:?}"
+    );
+    assert!(opened.first_turn_text().ends_with("\n\nhi"));
+    assert_eq!(lookups(&mcp), vec![json!("session")]);
+    host.shutdown();
+}
+
+#[test]
+fn prompt_hooks_reach_mcp_from_the_event_loop() {
+    use crate::agent::agent_loop::hooks::compose_open_run;
+
+    let (host, lifecycle, mcp) = lifecycle_fixture();
+    let first = compose_open_run(
+        Some(lifecycle.open_run(start_facts(true))),
+        super::loop_hooks::open_run(host.clone(), Some("s1".into()), true),
+    )
+    .expect("listened");
+
+    let opened = on_event_loop_runtime(move || first(opening()));
+
+    assert_eq!(opened.system_prompt, "sys\n\nsystem found \"system\"");
+    assert_eq!(opened.reminders.len(), 2, "{opened:?}");
+    assert!(opened.reminders[0].contains("start found"), "{opened:?}");
+    assert!(
+        opened.reminders[1].contains("prompt found \"prompt\" first=true"),
+        "{opened:?}"
+    );
+    assert_eq!(
+        lookups(&mcp),
+        vec![json!("session"), json!("system"), json!("prompt")]
+    );
+    host.shutdown();
+}
+
+#[test]
+fn a_later_run_of_the_session_does_not_start_it_again() {
+    use crate::agent::agent_loop::hooks::compose_open_run;
+
+    let (host, lifecycle, mcp) = lifecycle_fixture();
+    let first = lifecycle.clone().open_run(start_facts(true));
+    let later = compose_open_run(
+        Some(lifecycle.open_run(start_facts(false))),
+        super::loop_hooks::open_run(host.clone(), Some("s1".into()), false),
+    )
+    .expect("listened");
+
+    let opened = on_event_loop_runtime(move || async move {
+        first(opening()).await;
+        later(opening()).await
+    });
+
+    assert_eq!(opened.reminders.len(), 1, "{opened:?}");
+    assert!(opened.reminders[0].contains("first=false"), "{opened:?}");
+    let starts = lookups(&mcp).into_iter().filter(|q| q == "session").count();
+    assert_eq!(starts, 1);
+    host.shutdown();
+}
+
+#[test]
+fn session_end_reaches_mcp_before_the_teardown_closes_it() {
+    use crate::agent::session_lifecycle::EndCause;
+
+    let (host, lifecycle, mcp) = lifecycle_fixture();
+    let seen = mcp.clone();
+
+    let (at_quit, at_clear) = on_event_loop_runtime(move || async move {
+        lifecycle.clone().open_run(start_facts(true))(opening()).await;
+        lifecycle.end(EndCause::Clear).await;
+        let at_clear = lookups(&seen).last().cloned();
+        lifecycle.clone().open_run(start_facts(true))(opening()).await;
+        let at_quit = lifecycle
+            .end_then(EndCause::Quit, async { lookups(&seen).last().cloned() })
+            .await;
+        (at_quit, at_clear)
+    });
+
+    assert_eq!(at_clear, Some(json!("end swap")));
+    assert_eq!(
+        at_quit,
+        Some(json!("end exit")),
+        "the end ran before the teardown"
+    );
+    host.shutdown();
+}

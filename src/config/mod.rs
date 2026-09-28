@@ -640,6 +640,12 @@ pub struct AddonsConfig {
     /// Namespace defining the IAddon protocol functions (`addon?`,
     /// `initialize!`, `shutdown!`, `tools`, optionally `hooks` and `health`).
     pub protocol_ns: Option<String>,
+    /// Seconds a prompt's run waits for `:dirge/session-start` answers
+    /// before it opens without them. Default 30.
+    pub session_start_timeout_secs: Option<u64>,
+    /// Seconds dirge waits for `:dirge/session-end` before it goes on (and,
+    /// on exit, closes the MCP servers). Default 10.
+    pub session_end_timeout_secs: Option<u64>,
 }
 
 /// Prompt-compression engine config. Disabled → no compression. Enabled with

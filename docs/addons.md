@@ -104,19 +104,56 @@ keys and ignores the rest:
 
 | Key | Called with | Return |
 |---|---|---|
+| `:dirge/session-start` | `{:session-id :cwd :first-prompt? :mcp-servers}` | text added before the session's first prompt in this process |
+| `:dirge/session-end` | `{:session-id :cwd :reason}` | ignored |
 | `:dirge/system-prompt` | `{:cwd :session-id}` | text appended to the system prompt |
-| `:dirge/on-prompt` | `{:prompt :session-id}` | text added before the user's prompt |
+| `:dirge/on-prompt` | `{:prompt :session-id :first-prompt?}` | text added before the user's prompt |
 | `:dirge/before-tool-call` | `{:tool :args :tool-call-id}` | `nil`, `{:block "reason"}`, `{:context "text"}` or `{:args {…}}` |
 | `:dirge/after-tool-call` | `{:tool :args :result :error?}` | text appended to the tool result |
 
-Hooks run for the main session only, after Janet plugin and command hooks.
-Subagents never run addon hooks. An exception in a hook is logged and
-ignored.
+A text answer may also be given as `{:context "text"}`. Hooks run for the
+main session only, after Janet plugin and command hooks. Subagents never run
+addon hooks. An exception in a hook is logged and ignored.
 
-`:dirge/system-prompt` and `:dirge/on-prompt` are skipped, with a log line,
-while another call into the addons is still running (a command, a tool or a
-tool-call hook, including a tool left running after its turn was
-interrupted), and when they take longer than 5 seconds to answer.
+`:first-prompt?` is true when the session has no earlier conversation (a new
+session, or one `/clear` emptied), false for a resumed one.
+
+### Session start and end
+
+`:dirge/session-start` runs once per session in this process, as the first
+prompt's run opens: when dirge starts, after `/clear`, after `/sessions`
+switches, and when a compaction gives the session a new id. `:mcp-servers`
+names the MCP servers connected by then; when they are still connecting in
+the background, dirge waits up to 10 seconds for them first. The answers go
+before that prompt, as a system reminder.
+
+`:dirge/session-end` runs when the session ends, before dirge closes its MCP
+servers, so the hook can still call them. `:reason` is `:exit` when dirge
+exits (quitting the TUI, or a `--print` run finishing) and `:swap` when
+`/clear` or `/sessions` puts another session in its place. It runs only for
+a session whose start ran.
+
+### When the prompt hooks run
+
+`:dirge/session-start`, `:dirge/system-prompt` and `:dirge/on-prompt` run
+inside the prompt's run, off dirge's event loop, before the first model
+call: the TUI stays responsive meanwhile, and `mcp-call` and `call-tool`
+work from them. They wait their turn behind any other call into the addons
+still running (a command, a tool or a tool-call hook). A prompt's run opens
+without `:dirge/session-start` answers after 30 seconds, and without
+`:dirge/system-prompt` and `:dirge/on-prompt` answers after another 30. A
+session end waits at most 10 seconds. Each skip is logged, and so is each
+start and end that ran, on the `dirge::session` target.
+
+A listener that outlasts its budget keeps running on the interpreter thread,
+and hooks after it wait behind it: a slow `:dirge/session-start` can make the
+first prompt's `:dirge/system-prompt` and `:dirge/on-prompt` miss their
+budget too. When a start or end legitimately takes longer (an MCP call to a
+slow server, say), raise its budget:
+
+```json
+{ "addons": { "session_start_timeout_secs": 180, "session_end_timeout_secs": 60 } }
+```
 
 ## Slash commands
 
@@ -179,9 +216,11 @@ Faces are `normal`, `dim`, `accent`, `success`, `warn` and `error`.
 `mcp-call` answers the tool result (`{:content [...] :isError bool}`) or
 `{:error "why"}`. It blocks until the server answers. It is refused (an
 `{:error}` answer) while dirge's event loop is waiting on the addon, which is
-the case for `:dirge/system-prompt`, `:dirge/on-prompt`, loading at startup
-and shutdown at exit. Call it from commands, tools, tool-call hooks, and
-from `initialize!` and `shutdown!` during `/addons reload`.
+the case for loading at startup and shutdown at exit. Call it from hooks,
+commands and tools, and from `initialize!` and `shutdown!` during
+`/addons reload`. To reach MCP when a session starts, use
+`:dirge/session-start` rather than `initialize!`: at startup the servers
+may not be connected yet.
 
 Before the call leaves dirge, `mcp-call` applies the refusals the model's
 own MCP calls get, and it answers `{:error}` when:
@@ -201,10 +240,9 @@ call.
 
 `call-tool` goes through the tool's own permission check, so a call to
 `bash` still asks the user. It refuses addon tools and `task`, and it is
-unavailable from `:dirge/system-prompt` and `:dirge/on-prompt` hooks, during
-loading at startup and during shutdown at exit, while dirge is waiting on the
-addon. Call it from a command, a tool, a tool-call hook, or from
-`initialize!` and `shutdown!` during `/addons reload`. It runs on the Janet
+unavailable during loading at startup and during shutdown at exit, while
+dirge is waiting on the addon. Call it from a hook, a command, a tool, or
+from `initialize!` and `shutdown!` during `/addons reload`. It runs on the Janet
 plugin tool bridge, so it needs a dirge built with the `plugin` feature (in
 the default set, not in `no-plugin` or `windows-default`). Without it
 `(tools)` is empty and `call-tool` answers `{:error}` saying so.

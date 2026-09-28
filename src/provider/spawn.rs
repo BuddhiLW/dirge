@@ -220,14 +220,22 @@ impl AnyAgent {
                 prompt.text,
             );
         }
+        // The session's start and the addon prompt hooks open the run inside
+        // its task, off this thread: they may wait on addon code and MCP.
+        let first_prompt = history.is_empty();
+        let open_run = crate::agent::session_lifecycle::installed().map(|lifecycle| {
+            lifecycle.open_run(crate::agent::session_lifecycle::collect::start_facts(
+                self.session_id.as_deref(),
+                first_prompt,
+            ))
+        });
         #[cfg(feature = "addons")]
-        if let Some(host) = crate::addons::global() {
-            let session = self.session_id.as_deref();
-            system_prompt =
-                crate::addons::loop_hooks::with_system_prompt(&host, system_prompt, session);
-            prompt.text =
-                crate::addons::loop_hooks::with_prompt_context(&host, prompt.text, session);
-        }
+        let open_run = crate::agent::agent_loop::hooks::compose_open_run(
+            open_run,
+            crate::addons::global().and_then(|host| {
+                crate::addons::loop_hooks::open_run(host, self.session_id.clone(), first_prompt)
+            }),
+        );
 
         // Convert rig history → loop messages (Session-side
         // user/assistant/toolResult shapes).
@@ -341,6 +349,7 @@ impl AnyAgent {
         cfg.memory_provider = self.memory_provider.clone();
         cfg.command_hooks = command_hooks.map(crate::agent::command_hooks::HookBinding::main);
         cfg.addon_hooks = true;
+        cfg.open_run = open_run;
         #[cfg(feature = "plugin")]
         {
             cfg.plugin_mgr = crate::plugin::hook::global();

@@ -18,4 +18,5 @@ pub mod recovery;
 pub mod review;
 pub mod runner;
 pub mod session_digest;
+pub mod session_lifecycle;
 pub mod tools;

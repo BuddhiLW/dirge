@@ -12,6 +12,7 @@ pub mod discovery;
 pub mod domain;
 pub mod host;
 pub mod layout;
+pub mod lifecycle;
 pub mod loop_hooks;
 pub mod manifest;
 #[cfg(feature = "mcp")]
