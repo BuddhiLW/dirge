@@ -113,6 +113,11 @@ Hooks run for the main session only, after Janet plugin and command hooks.
 Subagents never run addon hooks. An exception in a hook is logged and
 ignored.
 
+`:dirge/system-prompt` and `:dirge/on-prompt` are skipped, with a log line,
+while another call into the addons is still running (a command, a tool or a
+tool-call hook, including a tool left running after its turn was
+interrupted), and when they take longer than 5 seconds to answer.
+
 ## Slash commands
 
 The `:dirge/commands` entry of the hooks map registers slash commands:
@@ -185,7 +190,9 @@ no-op on hosts without them.
 ## Lifecycle
 
 Addons load at startup, before the first agent run, on a dedicated
-interpreter thread. `shutdown!` runs for every addon when dirge exits.
+interpreter thread. `shutdown!` runs for every addon when dirge exits. It
+is skipped when a call into the addons is still running then, and dirge
+waits at most 5 seconds for it to finish.
 
 `/addons` lists the loaded addons with their tools, hooks, commands and
 health, and any manifest that failed. `/addons reload` picks up changes
