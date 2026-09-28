@@ -592,6 +592,9 @@ pub struct Renderer {
     /// Externally-driven panels painted in the left panel above the
     /// AGENTS box. Mutated only through `apply_external_panel_op`.
     external_panels: crate::ui::panels_ext::ExternalPanels,
+    /// Open swarm view (`/swarm`, Alt+S): the external panels painted
+    /// as a full-size grid above the input strip. `None` when closed.
+    swarm_view: Option<crate::ui::swarm::SwarmView>,
     /// DAP debug panel snapshot — updated each UI tick when a
     /// DAP session is active and panel mode is Debug.
     #[cfg(feature = "dap")]
@@ -749,6 +752,7 @@ impl Renderer {
             subagent_status: Vec::new(),
             left_panel_info: LeftPanelInfo::default(),
             external_panels: Default::default(),
+            swarm_view: None,
             #[cfg(feature = "dap")]
             debug_panel_data: None,
             alert_overlay: None,
@@ -894,6 +898,7 @@ impl Renderer {
             left_panel_info,
             subagent_status,
             external_panels,
+            swarm_view,
             alert_overlay,
             alert_scroll,
             alert_max_scroll,
@@ -1118,6 +1123,7 @@ impl Renderer {
             picker: picker_overlay.as_ref(),
             right_panel_mode: *right_panel_mode,
             tooltip,
+            swarm: swarm_view.as_ref(),
             #[cfg(feature = "dap")]
             debug_panel_data: self.debug_panel_data.as_ref(),
         };
@@ -1441,9 +1447,59 @@ impl Renderer {
         self.external_panels.apply(op);
     }
 
-    #[allow(dead_code)]
     pub fn external_panels(&self) -> &crate::ui::panels_ext::ExternalPanels {
         &self.external_panels
+    }
+
+    /// The open swarm view, `None` when closed.
+    pub fn swarm_view(&self) -> Option<&crate::ui::swarm::SwarmView> {
+        self.swarm_view.as_ref()
+    }
+
+    /// Open or close the swarm grid. Opening selects the producer's
+    /// focused panel (painted first). Returns whether it is now open.
+    pub fn set_swarm_open(&mut self, open: bool) -> bool {
+        if !open {
+            self.swarm_view = None;
+        } else if self.swarm_view.is_none() {
+            self.swarm_view = Some(crate::ui::swarm::SwarmView::new());
+        }
+        self.swarm_view.is_some()
+    }
+
+    /// Flip the swarm grid; returns whether it is now open.
+    pub fn toggle_swarm(&mut self) -> bool {
+        let open = self.swarm_view.is_none();
+        self.set_swarm_open(open)
+    }
+
+    /// Select the grid cell at `index` (paint order).
+    pub fn select_swarm_panel(&mut self, index: usize) {
+        if let Some(v) = self.swarm_view.as_mut() {
+            v.select_index(&self.external_panels, index);
+        }
+    }
+
+    /// Columns of the swarm grid at the current terminal size (the
+    /// vertical arrow keys move by one row of cells).
+    pub fn swarm_grid_columns(&self) -> usize {
+        let Some(v) = self.swarm_view.as_ref() else {
+            return 1;
+        };
+        let (cols, rows) = self.cached_tty_size;
+        let layout = crate::ui::tui::layout::Layout::with_panels(
+            cols,
+            rows,
+            self.input_rows,
+            self.left_panel_visible(),
+            self.right_panel_visible(),
+        );
+        // Header row on top; the grid body runs down to the chat's
+        // bottom frame (same region `render_frame` paints).
+        let body_h = layout.chat_bot_frame.y;
+        let n = self.external_panels.len();
+        crate::ui::swarm::grid_geometry(n, cols, body_h, v.selected_index(&self.external_panels))
+            .cols as usize
     }
 
     /// ui-redesign: set the idle-state info shown in the left panel

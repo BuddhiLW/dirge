@@ -202,6 +202,7 @@ static SUBCOMMAND_ENTRIES: &[(&str, &[&str])] = &[
         ],
     ),
     ("/plugins", &["load"]),
+    ("/swarm", &["on", "off"]),
     ("/display", &[]), // dynamic: pane spec
     ("/kill", &[]),    // dynamic: subagent ID
     ("/cd", &[]),      // dynamic: directory path
