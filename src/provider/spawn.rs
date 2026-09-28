@@ -229,12 +229,12 @@ impl AnyAgent {
                 first_prompt,
             ))
         });
-        #[cfg(feature = "addons")]
+        let addon_hooks = crate::agent::addon_hooks::installed();
         let open_run = crate::agent::agent_loop::hooks::compose_open_run(
             open_run,
-            crate::addons::global().and_then(|host| {
-                crate::addons::loop_hooks::open_run(host, self.session_id.clone(), first_prompt)
-            }),
+            addon_hooks
+                .as_ref()
+                .and_then(|addons| addons.open_run(self.session_id.clone(), first_prompt)),
         );
 
         // Convert rig history → loop messages (Session-side
@@ -348,7 +348,7 @@ impl AnyAgent {
         // (no provider attached) keep legacy no-op behavior.
         cfg.memory_provider = self.memory_provider.clone();
         cfg.command_hooks = command_hooks.map(crate::agent::command_hooks::HookBinding::main);
-        cfg.addon_hooks = true;
+        cfg.addon_hooks = addon_hooks;
         cfg.open_run = open_run;
         #[cfg(feature = "plugin")]
         {

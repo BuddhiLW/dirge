@@ -590,6 +590,12 @@ async fn main() -> anyhow::Result<()> {
     // `/addons reload` starts later.
     #[cfg(feature = "addons")]
     crate::addons::lifecycle::install(&cfg.addons.clone().unwrap_or_default());
+    // The agent reaches the addons' tools and hooks through this port, which
+    // finds the host a later `/addons reload` starts as well.
+    #[cfg(feature = "addons")]
+    crate::agent::addon_hooks::install(std::sync::Arc::new(
+        crate::addons::loop_hooks::LiveAddonHooks,
+    ));
     crate::compression::init_from_config(cfg.compression.clone().unwrap_or_default());
     crate::compression::set_cli_disabled(cli.no_compression);
     crate::prompt_cache::init_from_config(cfg.prompt_cache.as_ref().and_then(|c| c.ttl.as_deref()));
