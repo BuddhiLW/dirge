@@ -53,6 +53,15 @@ pub fn current_agent() -> Option<std::sync::Arc<AnyAgent>> {
     CURRENT_AGENT.lock_ignore_poison().clone()
 }
 
+/// Publish `agent` after its tool set changed in place: as the agent
+/// tooled subagents fork from and, with plugins, as the tool set
+/// `call-tool` reaches.
+pub fn publish_live_agent(agent: &AnyAgent) {
+    set_current_agent(std::sync::Arc::new(agent.clone()));
+    #[cfg(feature = "plugin")]
+    crate::plugin::tool_bridge::publish_registry(agent.loop_tools());
+}
+
 #[allow(unused_imports)]
 use crate::sync_util::LockExt;
 use rig::providers::{anthropic, chatgpt, gemini, ollama, openai, openrouter};
@@ -521,10 +530,12 @@ impl AnyAgent {
         names
     }
 
-    /// Replace `source`'s live tools with `tools`. A tool whose name another
-    /// source already uses is skipped (built-ins, plugins and MCP tools keep
-    /// their names), so a runtime contributor can never shadow them. When
-    /// dynamic tool search is on, the new tools join the `tool_search`
+    /// Replace `source`'s live tools with `tools`. A tool is skipped when a
+    /// built-in compiled into this build reserves its name (whether or not
+    /// this agent carries that built-in) or another source already uses it,
+    /// so a runtime contributor can never shadow built-ins, plugins or MCP
+    /// tools. The same rule filters addon tools when the agent is built.
+    /// When dynamic tool search is on, the new tools join the `tool_search`
     /// registry and stay search-gated like any other. Returns the names
     /// installed.
     #[cfg_attr(not(feature = "addons"), allow(dead_code))]
@@ -541,7 +552,10 @@ impl AnyAgent {
             .collect();
         let fresh: Vec<_> = tools
             .into_iter()
-            .filter(|t| taken.insert(t.name().to_string()))
+            .filter(|t| {
+                !crate::agent::tools::reserves_builtin_name(t.name())
+                    && taken.insert(t.name().to_string())
+            })
             .collect();
         if let Some(registry) = &self.tool_search_registry {
             let mut reg = registry.lock_ignore_poison();

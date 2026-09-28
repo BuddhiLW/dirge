@@ -283,21 +283,27 @@ pub fn hook_replies(answer: &Value) -> Vec<HookReply> {
         .unwrap_or_default()
 }
 
-/// The host's `reload-sources!` answer, `[{:file path :error msg}]`, as
-/// `(file, error)` pairs. A malformed answer reports nothing.
-pub fn source_errors(answer: &Value) -> Vec<(std::path::PathBuf, String)> {
-    answer
-        .as_array()
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| {
-                    let file = str_field(row, "file")?;
-                    let error = str_field(row, "error").unwrap_or("could not be evaluated");
-                    Some((std::path::PathBuf::from(file), error.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+/// Source files, each with what a reload made of it.
+pub type SourceNotes = Vec<(std::path::PathBuf, String)>;
+
+/// The host's `reload-sources!` answer, rows of `{:file path :error msg}`
+/// or `{:file path :skipped msg}`, as `(errors, skipped)`. A row with
+/// neither key is an error; a malformed answer reports nothing.
+pub fn source_report(answer: &Value) -> (SourceNotes, SourceNotes) {
+    let mut errors = Vec::new();
+    let mut skipped = Vec::new();
+    for row in answer.as_array().into_iter().flatten() {
+        let Some(file) = str_field(row, "file").map(std::path::PathBuf::from) else {
+            continue;
+        };
+        match (str_field(row, "error"), str_field(row, "skipped")) {
+            (None, Some(why)) => skipped.push((file, why.to_string())),
+            (error, _) => {
+                errors.push((file, error.unwrap_or("could not be evaluated").to_string()))
+            }
+        }
+    }
+    (errors, skipped)
 }
 
 /// A hook reply's text: a bare string, or a map's `context`.
@@ -544,6 +550,34 @@ mod tests {
             ]
         );
         assert!(hook_replies(&json!({"not": "a vector"})).is_empty());
+    }
+
+    #[test]
+    fn reload_rows_split_into_errors_and_skips() {
+        let (errors, skipped) = source_report(&json!([
+            {"file": "/a.cljc", "error": "eof"},
+            {"file": "/b.cljc", "skipped": "nothing has loaded b"},
+            {"file": "/c.cljc"},
+            {"error": "a row without a file is dropped"}
+        ]));
+        assert_eq!(
+            errors,
+            vec![
+                (PathBuf::from("/a.cljc"), "eof".to_string()),
+                (
+                    PathBuf::from("/c.cljc"),
+                    "could not be evaluated".to_string()
+                ),
+            ]
+        );
+        assert_eq!(
+            skipped,
+            vec![(PathBuf::from("/b.cljc"), "nothing has loaded b".to_string())]
+        );
+        assert_eq!(
+            source_report(&json!({"not": "rows"})),
+            (Vec::new(), Vec::new())
+        );
     }
 
     fn summary(id: &str, tools: &[&str]) -> AddonSummary {

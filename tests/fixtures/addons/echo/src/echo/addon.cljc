@@ -34,6 +34,10 @@
              (str "error: " error)
              (:ok answer))}))
 
+(defn- shout-command
+  [{:keys [args]}]
+  {:text (str "shout: " args)})
+
 (defrecord EchoAddon [state]
   p/IAddon
   (addon-id [_] "echo")
@@ -56,7 +60,9 @@
                            "ask"  {:description "Ask the fixture MCP server"
                                    :handler     ask-command}
                            "run"  {:description "Run a dirge tool on README.md"
-                                   :handler     run-command}}})
+                                   :handler     run-command}
+                           "/shout" {:description "Registered with a leading slash"
+                                     :handler     shout-command}}})
   (health [_]
     {:status (if @state :ok :down)}))
 

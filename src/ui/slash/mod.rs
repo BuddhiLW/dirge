@@ -57,6 +57,10 @@ pub(crate) enum SlashOutcome {
     /// `/wt-exit`: leave the worktree and return to the main repo.
     #[cfg(feature = "git-worktree")]
     DeferWtExit(cmd::wt_defer::WtExit),
+    /// An addon command or `/addons reload`: run the job off the event loop
+    /// and land its result there.
+    #[cfg(feature = "addons")]
+    DeferAddon(crate::ui::addon_phase::AddonJob),
 }
 
 #[cfg(feature = "slash-completion")]
@@ -704,7 +708,7 @@ pub async fn handle_slash(
             });
         }
         "/loop" => cmd::loop_cmd::cmd_loop(&mut ctx, &parts, text).await?,
-        "/addons" => cmd::addons::cmd_addons(&mut ctx, &parts).await?,
+        "/addons" => return cmd::addons::cmd_addons(&mut ctx, &parts),
         "/prompt" => return cmd::prompt::cmd_prompt(&mut ctx, &parts).await,
         "/agent" | "/agents" => cmd::agent::cmd_agent(&mut ctx, &parts).await?,
         "/plan" => cmd::plan::cmd_plan(&mut ctx, &parts, text).await?,
@@ -820,7 +824,7 @@ pub async fn handle_slash(
             if let Some(host) = crate::addons::global()
                 && let Some(command) = host.command(parts[0].trim_start_matches('/'))
             {
-                return cmd::addons::run_command(&mut ctx, host, command, text).await;
+                return Ok(cmd::addons::command_job(host, command, text));
             }
             ctx.renderer.write_line(
                 &format!("unknown command: {} (try /help)", parts[0]),

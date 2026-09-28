@@ -20,6 +20,7 @@ pub mod policy;
 pub mod port;
 pub mod sink;
 pub mod tool;
+#[cfg(feature = "plugin")]
 pub mod tool_calls;
 
 #[cfg(test)]
@@ -158,14 +159,32 @@ fn publish(host: Arc<AddonHost>) {
     let _ = HOST.set(host);
 }
 
-/// Tab completion for the commands `host`'s addons registered.
+/// Hand `host`'s addons the command names left to them: names a built-in
+/// or plugin command takes are withheld, the rest complete on Tab.
 fn register_commands(host: &AddonHost) {
+    host.reserve_commands(Arc::new(taken_by_dirge));
     #[cfg(feature = "slash-completion")]
     crate::ui::slash::register_addon_commands(
         host.commands().into_iter().map(|c| c.name).collect(),
     );
-    #[cfg(not(feature = "slash-completion"))]
-    let _ = host;
+}
+
+/// True when `name` (without the `/`) is a built-in or plugin slash
+/// command, which dirge dispatches before any addon command.
+fn taken_by_dirge(name: &str) -> bool {
+    if crate::ui::slash::is_known_slash_command(&format!("/{name}")) {
+        return true;
+    }
+    #[cfg(feature = "plugin")]
+    if let Some(plugins) = crate::plugin::hook::global() {
+        use crate::sync_util::LockExt;
+        return plugins
+            .lock_ignore_poison()
+            .list_commands()
+            .iter()
+            .any(|(taken, _)| taken == name);
+    }
+    false
 }
 
 /// What `dirge.harness` reaches in this process: the TUI for notifications
@@ -174,21 +193,21 @@ fn harness() -> Harness {
     let tui = Arc::new(sink::TuiSink);
     let mut harness = Harness::with_sink(tui.clone());
     harness.panels = tui;
-    if let Some(live) = tool_calls::LoopTools::live(Arc::new(addon_tool_names)) {
+    #[cfg(feature = "plugin")]
+    if let Some(live) = tool_calls::LoopTools::live() {
         harness.tools = Arc::new(live);
+    }
+    #[cfg(not(feature = "plugin"))]
+    {
+        harness.tools = Arc::new(port::ToolsUnavailable(
+            "call-tool is unavailable in this build: dirge was built without the `plugin` feature",
+        ));
     }
     #[cfg(feature = "mcp")]
     if let Some(live) = mcp::LiveMcp::current() {
         harness.mcp = Arc::new(live);
     }
     harness
-}
-
-/// Names the model sees for the running host's addon tools.
-fn addon_tool_names() -> Vec<String> {
-    global()
-        .map(|host| host.tools().into_iter().map(|t| t.exposed_name).collect())
-        .unwrap_or_default()
 }
 
 fn protocol_ns(settings: &crate::config::AddonsConfig) -> &str {

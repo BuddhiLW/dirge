@@ -1451,10 +1451,8 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(not(feature = "loop"))]
         let loop_mode = false;
         if !cli.resolve_no_tools(&cfg) && (cli.print || loop_mode) {
-            let mgr = extras::mcp::McpClientManager::connect_all(servers).await;
-            #[cfg(feature = "addons")]
-            crate::addons::mcp::publish(&mgr);
-            Some(mgr)
+            // Published to addons once the permission checker exists, below.
+            Some(extras::mcp::McpClientManager::connect_all(servers).await)
         } else {
             None
         }
@@ -1609,6 +1607,12 @@ async fn main() -> anyhow::Result<()> {
     // first opportunity to wire it into the now-existing checker
     // (the checker is built inside `build_channels`).
     crate::permission::apply_prompt_deny(&permission, &context.current_prompt_deny_tools);
+    // Addon code reaches the headless path's MCP connections through
+    // `dirge.harness/mcp-call`, refused where this checker denies.
+    #[cfg(all(feature = "addons", feature = "mcp"))]
+    if let Some(mgr) = &mcp_manager {
+        crate::addons::mcp::publish(mgr, permission.clone());
+    }
 
     // dirge-0g6i: wire optional LLM auto-approval. When `approval_provider`
     // is set, a permission prompt is judged by that model instead of the
@@ -2051,9 +2055,9 @@ async fn main() -> anyhow::Result<()> {
             tokio::spawn(async move {
                 let mgr = extras::mcp::McpClientManager::connect_all(&servers).await;
                 // Addon code reaches the same connections through
-                // `dirge.harness/mcp-call`.
+                // `dirge.harness/mcp-call`, refused where this checker denies.
                 #[cfg(feature = "addons")]
-                crate::addons::mcp::publish(&mgr);
+                crate::addons::mcp::publish(&mgr, perm.clone());
                 let mcp_tools = mgr.collect_tools(perm, ask).await;
                 let wrapped = crate::agent::builder::wrap_mcp_tools(mcp_tools).await;
                 // Deliver the payload, then nudge the UI loop to drain it.

@@ -112,6 +112,17 @@ pub fn namespace_of(root: &Path, file: &Path) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("."))
 }
 
+/// The namespace `file` holds under the most specific of `roots` that
+/// contains it, so `<repo>/src` wins over `<repo>` whatever their order.
+/// `None` when no root contains it as a portable source.
+pub fn namespace_in(roots: &[PathBuf], file: &Path) -> Option<String> {
+    roots
+        .iter()
+        .filter_map(|root| namespace_of(root, file).map(|ns| (root.components().count(), ns)))
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, ns)| ns)
+}
+
 /// Sorted, de-duplicated source roots.
 pub fn merge_roots<I: IntoIterator<Item = PathBuf>>(roots: I) -> Vec<PathBuf> {
     roots
@@ -137,6 +148,21 @@ mod tests {
         }
         assert_eq!(namespace_of(root, Path::new("/w/a/src/a/jvm.clj")), None);
         assert_eq!(namespace_of(root, Path::new("/elsewhere/a.cljc")), None);
+    }
+
+    /// `<repo>` and `<repo>/src` are both roots of a flat-layout addon.
+    #[test]
+    fn namespace_in_names_a_file_by_the_most_specific_root() {
+        let file = Path::new("/w/flat/src/flat/core.cljc");
+        let roots = [PathBuf::from("/w/flat"), PathBuf::from("/w/flat/src")];
+        assert_eq!(namespace_in(&roots, file).as_deref(), Some("flat.core"));
+        let reversed = [roots[1].clone(), roots[0].clone()];
+        assert_eq!(namespace_in(&reversed, file).as_deref(), Some("flat.core"));
+        assert_eq!(namespace_in(&roots, Path::new("/elsewhere/a.cljc")), None);
+        assert_eq!(
+            namespace_in(&roots, Path::new("/w/flat/src/flat/jvm.clj")),
+            None
+        );
     }
 
     #[test]
