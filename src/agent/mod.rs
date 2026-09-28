@@ -1,6 +1,7 @@
 pub mod agent_loop;
 pub mod builder;
 pub mod capability_cards;
+pub mod command_hooks;
 #[cfg(test)]
 mod compaction_bakeoff;
 pub mod compaction_material;

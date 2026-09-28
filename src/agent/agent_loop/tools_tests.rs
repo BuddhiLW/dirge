@@ -363,7 +363,11 @@ async fn test_before_tool_call_mutates_args() {
             if let Some(obj) = args.as_object_mut() {
                 obj.insert("value".to_string(), serde_json::json!(123));
             }
-            BeforeToolCallReturn { result: None, args }
+            BeforeToolCallReturn {
+                result: None,
+                args,
+                context: Vec::new(),
+            }
         })
     });
     let mut config = build_config();
@@ -652,6 +656,7 @@ async fn test_before_tool_call_block_with_reason() {
                     reason: Some("policy violation".to_string()),
                 }),
                 args: ctx.args,
+                context: Vec::new(),
             }
         })
     });

@@ -555,6 +555,10 @@ pub struct LoopSpawnConfig {
     /// insights every time. `None` is a no-op (no provider attached, or a
     /// non-interactive test path).
     pub memory_provider: Option<std::sync::Arc<dyn crate::extras::memory_provider::MemoryProvider>>,
+
+    /// Claude-Code-compatible command hooks for this loop (`PreToolUse`,
+    /// `PostToolUse`, and its stop event). `None` installs none.
+    pub command_hooks: Option<crate::agent::command_hooks::HookBinding>,
 }
 
 impl LoopSpawnConfig {
@@ -609,6 +613,7 @@ impl LoopSpawnConfig {
             max_tokens: None,
             bg_store: None,
             memory_provider: None,
+            command_hooks: None,
         }
     }
 }
@@ -779,11 +784,29 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         }
     }
 
+    if let Some(binding) = &cfg.command_hooks {
+        crate::agent::command_hooks::loop_hooks::install(
+            &mut loop_config,
+            binding,
+            cfg.session_id.clone(),
+        );
+    }
+
     let mut context = Context {
         system_prompt: cfg.system_prompt,
         messages: cfg.history.iter().map(loop_message_to_value).collect(),
         tools: cfg.tools,
     };
+    if let Some(store) = cfg.bg_store {
+        context
+            .tools
+            .push(Arc::new(super::run_async::RunAsyncTool::new(
+                context.tools.clone(),
+                store,
+                context.clone(),
+                loop_config.clone(),
+            )));
+    }
     // The run's tool set, for the bridge's answer-vs-call filter (dirge-n00z).
     // Captured here because `context` moves into the loop task below, and the
     // loop never adds or removes tools mid-run, so one snapshot holds.

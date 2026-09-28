@@ -6,6 +6,57 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.25.7] - 2026-09-27
+
+### Added
+- Claude-Code-compatible command hooks. A `hooks` block in config.json takes
+  the same shape as the `hooks` key of Claude Code's `settings.json` (event
+  name to matcher groups of `{ "type": "command", "command", "timeout" }`),
+  and `claude_hooks: true` additionally loads `~/.claude/settings.json` and
+  the project's `.claude/settings.json` / `.claude/settings.local.json`.
+  Supported events are PreToolUse, PostToolUse, SessionStart,
+  UserPromptSubmit, SubagentStart, Stop and SubagentStop. Tool calls are
+  restated in Claude Code's dialect before they reach a hook (Bash/Read/Edit,
+  `file_path`/`old_string`/`new_string`, `apply_patch` split per operation),
+  so hooks written for Claude Code run unchanged. They run after the Janet
+  plugin hooks and fail open on error or timeout. (#859)
+- `run_async` for background tool calls. `bash(background=true)` and
+  `task(background=true)` already detached shells and subagents, but there
+  was no way to push an arbitrary long tool call off the model's turn.
+  `run_async` prepares the call through the normal pipeline, then detaches
+  its execution into the session's background store; the result arrives as
+  the usual `<system-reminder>` and can be polled with `task_status`. Only
+  tools that opt in and never prompt for approval mid-execution are eligible
+  (currently `bash_output`), deferred calls share the subagent in-flight cap,
+  and late-attached handles are aborted when the session is cancelled. (#860)
+- Requesty as a built-in provider. Set `REQUESTY_API_KEY` and select it with
+  `--provider requesty` (or a `providers.requesty` entry); defaults to
+  `openai/gpt-4o-mini` against `https://router.requesty.ai/v1`. Reasoning effort
+  goes out as a top-level `reasoning_effort` clamped to `low`/`medium`/`high`.
+  It is not part of key autodetection. (#853)
+- OpenCode requests now carry an `x-opencode-session` header, including Zen
+  endpoints configured with `provider_type: "openai"` or `"openai-responses"`
+  (e.g. `https://opencode.ai/zen/go/v1` for OpenCode Go). The header uses the
+  conversation's origin id, so it stays stable across compaction and resume,
+  and routed and auxiliary clients forward the same identity. (#857)
+- The library core now builds for `wasm32-unknown-unknown`. dirge exposes a
+  `[lib]` crate (cdylib + rlib) with native-only dependencies (TUI, SQLite,
+  tokio process/fs/signal, rustls) gated out of the wasm graph, and
+  wasm-bindgen exports `token_count` (the llmtrim estimator) and `chat`, a
+  bring-your-own-key DeepSeek completion over the fetch transport. Sessions
+  gained a `SessionStore` seam with JSON-file and in-memory backends as the
+  groundwork for a browser backend. `demo/` has a browser page driving the
+  `pkg-web/` build. (#856)
+
+### Changed
+- Default models moved forward: Anthropic now defaults to `claude-opus-5-5`
+  (was `claude-sonnet-4-6`) and OpenAI to `gpt-6` (was `gpt-4o`). Opus 5.5
+  rejects the `thinking` budget and disable fields, so reasoning effort for
+  it goes out as `output_config.effort` (low through max) and `off` omits the
+  parameter. A ChatGPT OAuth login still defaults to `gpt-5.5`, and a config
+  that merely pins the provider's default id now counts as defaulted, so a
+  ChatGPT account no longer gets sent an API-only model id. (#858)
+
 ## [0.25.6] - 2026-09-23
 
 ### Fixed
