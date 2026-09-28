@@ -132,7 +132,7 @@ fn addon_commands_reach_the_panel_and_mcp_through_the_harness() {
         super::start(echo_plan(&fixtures().join("echo")), harness, PROTOCOL).expect("host starts");
 
     let names: Vec<String> = host.commands().into_iter().map(|c| c.name).collect();
-    assert_eq!(names, vec!["ask", "echo", "run"]);
+    assert_eq!(names, vec!["ask", "echo", "run", "shout"]);
 
     let echo = host.command("echo").expect("echo registered");
     let out = host.run_command(&echo, "hello there").expect("echo runs");
@@ -238,6 +238,21 @@ fn addon_commands_call_dirge_tools_through_the_harness() {
         "refused on the event-loop thread"
     );
     assert_eq!(tools.0.lock().unwrap().len(), 2, "gateway not reached");
+    host.shutdown();
+}
+
+#[test]
+fn a_command_registered_with_a_leading_slash_runs_by_its_bare_name() {
+    let host = super::start(
+        echo_plan(&fixtures().join("echo")),
+        Harness::with_sink(Arc::new(RecordingSink::default())),
+        PROTOCOL,
+    )
+    .expect("host starts");
+
+    let shout = host.command("shout").expect("listed without the slash");
+    let out = host.run_command(&shout, "hi").expect("shout runs");
+    assert_eq!(out.text.as_deref(), Some("shout: hi"));
     host.shutdown();
 }
 

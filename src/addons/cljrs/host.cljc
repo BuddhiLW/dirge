@@ -58,16 +58,22 @@
   [tools]
   (into {} (map (juxt :name identity)) tools))
 
+(defn command-name
+  "The name typed after `/` for a :dirge/commands key: its name without
+   leading slashes."
+  [k]
+  (or (re-find #"[^/].*" (name k)) ""))
+
 (defn command-index
-  "The slash commands in a hooks map's :dirge/commands entry, keyed by name:
-   {\"name\" {:description d :handler f}}. Entries without a handler are
-   dropped."
+  "The slash commands in a hooks map's :dirge/commands entry, keyed by
+   command-name: {\"name\" {:description d :handler f}}. Entries without a
+   handler are dropped."
   [hooks]
   (into {}
         (for [[k spec] (get hooks :dirge/commands)
               :when (some? (:handler spec))]
-          [(name k) {:description (or (:description spec) "")
-                     :handler     (:handler spec)}])))
+          [(command-name k) {:description (or (:description spec) "")
+                             :handler     (:handler spec)}])))
 
 (defn command-views
   "What dirge needs of indexed commands: names and descriptions, sorted."
