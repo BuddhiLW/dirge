@@ -121,9 +121,9 @@ pub fn read_json_answer(event: HookEvent, answer: &Value) -> HookOutcome {
                 .clone()
                 .unwrap_or_else(|| format!("{event} hook denied this action")),
         ),
-        Some("ask") => decision_reason
-            .map(HookOutcome::with_context)
-            .unwrap_or_default(),
+        Some("ask") => HookOutcome::asked(
+            decision_reason.unwrap_or_else(|| format!("{event} hook asks to confirm this action")),
+        ),
         _ => HookOutcome::default(),
     };
     if let Some(ctx) = str_field(specific, "additionalContext") {

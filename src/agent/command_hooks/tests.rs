@@ -9,8 +9,9 @@ use super::domain::{
 };
 use super::loop_hooks;
 use super::{CommandHooks, HookBinding, dialect, policy};
-use crate::agent::agent_loop::hooks::BeforeToolCallContext;
+use crate::agent::agent_loop::hooks::{BeforeToolCallContext, BeforeToolCallFn};
 use crate::agent::agent_loop::message::{AssistantMessage, StopReason};
+use crate::permission::ask::UserDecision;
 
 // ---------------------------------------------------------------- stubs
 
@@ -415,6 +416,92 @@ async fn pre_tool_hook_warning_rides_as_context() {
     assert!(ret.result.is_none());
     assert_eq!(ret.context.len(), 1);
     assert!(ret.context[0].contains("prefer rg"));
+}
+
+fn ask_json(reason: &str) -> String {
+    json!({ "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "ask",
+        "permissionDecisionReason": reason,
+    }})
+    .to_string()
+}
+
+type SeenAsk = (String, String, Option<String>);
+
+/// A permission prompt that gives every ask the same answer, recording
+/// the tool, input and reason it was shown.
+fn prompt_answering(
+    decision: UserDecision,
+) -> (crate::permission::ask::AskSender, Arc<Mutex<Vec<SeenAsk>>>) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::permission::ask::AskRequest>(4);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        while let Some(req) = rx.recv().await {
+            log.lock()
+                .unwrap()
+                .push((req.tool.clone(), req.input.clone(), req.reason.clone()));
+            let _ = req.reply.send(decision.clone());
+        }
+    });
+    (tx, seen)
+}
+
+fn asking_hook(ask: Option<crate::permission::ask::AskSender>) -> BeforeToolCallFn {
+    let runner = ScriptedRunner::answering(vec![("guard", Ok(exit(0, &ask_json("risky"), "")))]);
+    let hooks = registry(config(&[(HookEvent::PreToolUse, None, &["guard"])]), runner);
+    loop_hooks::pre_tool_hook(HookBinding::main(hooks).with_ask(ask), None)
+}
+
+#[test]
+fn ask_decision_asks_with_its_reason() {
+    let out = policy::interpret(HookEvent::PreToolUse, exit(0, &ask_json("risky"), "")).unwrap();
+    assert_eq!(out.ask.as_deref(), Some("risky"));
+    assert_eq!(out.block, None);
+    assert!(out.context.is_empty());
+}
+
+#[test]
+fn a_block_outranks_an_ask_and_the_first_ask_wins() {
+    let asked = HookOutcome::asked("first").combine(HookOutcome::asked("second"));
+    assert_eq!(asked.pending_ask(), Some("first"));
+    let blocked = asked.combine(HookOutcome::blocked("no"));
+    assert_eq!(blocked.pending_ask(), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_tool_ask_allowed_at_the_prompt_runs_the_call() {
+    let (tx, seen) = prompt_answering(UserDecision::AllowOnce);
+    let ret = asking_hook(Some(tx))(before_ctx("bash", json!({ "command": "rm -rf build" }))).await;
+    assert!(ret.result.is_none());
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "Bash");
+    assert_eq!(seen[0].1, "rm -rf build");
+    assert!(seen[0].2.as_deref().unwrap().contains("risky"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_tool_ask_denied_at_the_prompt_blocks_with_the_note() {
+    let (tx, _) = prompt_answering(UserDecision::Deny {
+        note: Some("use make clean".into()),
+    });
+    let ret = asking_hook(Some(tx))(before_ctx("bash", json!({ "command": "rm -rf build" }))).await;
+    let result = ret.result.expect("blocked");
+    assert_eq!(result.block, Some(true));
+    assert_eq!(
+        result.reason.as_deref(),
+        Some("PreToolUse:Bash hook error: risky; the user denied it: use make clean")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_tool_ask_without_a_prompt_blocks() {
+    let ret = asking_hook(None)(before_ctx("bash", json!({ "command": "ls" }))).await;
+    let reason = ret.result.expect("blocked").reason.unwrap();
+    assert!(reason.contains("risky"));
+    assert!(reason.contains("no permission prompt"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

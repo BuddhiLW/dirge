@@ -347,7 +347,9 @@ impl AnyAgent {
         // auto-compaction can fire on_pre_compress. `None` paths
         // (no provider attached) keep legacy no-op behavior.
         cfg.memory_provider = self.memory_provider.clone();
-        cfg.command_hooks = command_hooks.map(crate::agent::command_hooks::HookBinding::main);
+        cfg.command_hooks = command_hooks.map(|h| {
+            crate::agent::command_hooks::HookBinding::main(h).with_ask(self.hook_ask_tx.clone())
+        });
         cfg.addon_hooks = addon_hooks;
         cfg.open_run = open_run;
         #[cfg(feature = "plugin")]
@@ -607,7 +609,9 @@ impl AnyAgent {
             prompt,
         );
         cfg.system_prompt = system_prompt;
-        cfg.command_hooks = command_hooks.map(crate::agent::command_hooks::HookBinding::subagent);
+        cfg.command_hooks = command_hooks.map(|h| {
+            crate::agent::command_hooks::HookBinding::subagent(h).with_ask(self.hook_ask_tx.clone())
+        });
         cfg.tools = tools;
         cfg.provider_name = Some(provider);
         cfg.reasoning = self.reasoning;
