@@ -1,13 +1,24 @@
-//! /addons handler: list the Clojure addons, reload them in place, and run
-//! the slash commands they register.
+//! /addons handler: list the Clojure addons, and hand `/addons reload` and
+//! the slash commands addons register to the event loop as jobs
+//! ([`crate::ui::addon_phase`]).
 
-use crate::ui::slash::{SlashCtx, c_error};
 #[cfg(feature = "addons")]
-use crate::ui::slash::{SlashOutcome, c_agent, c_result};
+use std::sync::Arc;
+
+#[cfg(feature = "addons")]
+use crate::addons::domain::CommandSpec;
+#[cfg(feature = "addons")]
+use crate::addons::host::AddonHost;
+#[cfg(feature = "addons")]
+use crate::ui::addon_phase::AddonJob;
+use crate::ui::slash::{SlashCtx, SlashOutcome, c_error};
+#[cfg(feature = "addons")]
+use crate::ui::slash::{c_agent, c_result};
 #[cfg(feature = "addons")]
 use crate::ui::theme;
 
-pub(crate) async fn cmd_addons(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow::Result<()> {
+/// `/addons [list|reload]`. `reload` answers a job for the event loop.
+pub(crate) fn cmd_addons(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow::Result<SlashOutcome> {
     #[cfg(not(feature = "addons"))]
     {
         let _ = parts;
@@ -15,19 +26,21 @@ pub(crate) async fn cmd_addons(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow
             "addons are disabled in this build (enable the 'addons' feature)",
             c_error(),
         )?;
-        Ok(())
+        Ok(SlashOutcome::Handled)
     }
 
     #[cfg(feature = "addons")]
     match parts.get(1).copied() {
-        None | Some("list") => list(ctx),
-        Some("reload") => reload(ctx).await,
+        None | Some("list") => list(ctx).map(|()| SlashOutcome::Handled),
+        Some("reload") => Ok(SlashOutcome::DeferAddon(AddonJob::Reload {
+            settings: ctx.cfg.addons.clone().unwrap_or_default(),
+        })),
         Some(other) => {
             ctx.renderer
                 .write_line(&format!("unknown /addons subcommand: {other}"), c_error())?;
             ctx.renderer
                 .write_line("usage: /addons [list|reload]", c_agent())?;
-            Ok(())
+            Ok(SlashOutcome::Handled)
         }
     }
 }
@@ -97,110 +110,54 @@ fn list(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Reload every addon, then swap the live agent's addon tools so the next
-/// prompt sees them.
+/// `/name args` for a command an addon registered, as a job for the event
+/// loop. `text` is the whole typed line; the handler gets what follows the
+/// command's name.
 #[cfg(feature = "addons")]
-async fn reload(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
-    use std::sync::Arc;
-
-    let settings = ctx.cfg.addons.clone().unwrap_or_default();
-    let outcome = tokio::task::spawn_blocking(move || crate::addons::reload(&settings))
-        .await
-        .map_err(|e| format!("reload task failed: {e}"))
-        .and_then(|r| r);
-    let (host, report) = match outcome {
-        Ok(done) => done,
-        Err(error) => {
-            ctx.renderer
-                .write_line(&format!("addon reload failed: {error}"), c_error())?;
-            return Ok(());
-        }
-    };
-    let tools: Vec<Arc<dyn crate::agent::agent_loop::LoopTool>> =
-        crate::addons::tool::loop_tools(&host, ctx.permission.clone(), ctx.ask_tx.clone())
-            .into_iter()
-            .map(|t| Arc::new(t) as Arc<dyn crate::agent::agent_loop::LoopTool>)
-            .collect();
-    ctx.agent
-        .upsert_loop_tools(crate::addons::tool::SOURCE, tools);
-    crate::provider::set_current_agent(Arc::new(ctx.agent.clone()));
-    #[cfg(feature = "plugin")]
-    crate::plugin::tool_bridge::publish_registry(ctx.agent.loop_tools());
-    #[cfg(feature = "slash-completion")]
-    crate::ui::slash::register_addon_commands(
-        host.commands().into_iter().map(|c| c.name).collect(),
-    );
-
-    let renderer = &mut *ctx.renderer;
-    renderer.write_line(
-        &format!(
-            "reloaded {} addon(s): {}",
-            report.loaded.len(),
-            report.loaded.join(", ")
-        ),
-        c_agent(),
-    )?;
-    if !report.tools_added.is_empty() {
-        renderer.write_line(
-            &format!("  + tools: {}", report.tools_added.join(", ")),
-            c_result(),
-        )?;
-    }
-    if !report.tools_removed.is_empty() {
-        renderer.write_line(
-            &format!("  - tools: {}", report.tools_removed.join(", ")),
-            c_result(),
-        )?;
-    }
-    for failure in report.failures.iter().chain(&report.source_errors) {
-        renderer.write_line(
-            &format!("  {}: {}", failure.manifest.display(), failure.error),
-            c_error(),
-        )?;
-    }
-    renderer.write_line(
-        "  tools and hooks take effect at the next prompt",
-        theme::dim(),
-    )?;
-    Ok(())
+pub(crate) fn command_job(host: Arc<AddonHost>, command: CommandSpec, text: &str) -> SlashOutcome {
+    SlashOutcome::DeferAddon(AddonJob::Command {
+        host,
+        command,
+        args: command_args(text).to_string(),
+    })
 }
 
-/// `/name args` for a command an addon registered. An answer with a
-/// `prompt` starts a turn on it.
+/// The text typed after a command's name.
 #[cfg(feature = "addons")]
-pub(crate) async fn run_command(
-    ctx: &mut SlashCtx<'_>,
-    host: std::sync::Arc<crate::addons::host::AddonHost>,
-    command: crate::addons::domain::CommandSpec,
-    text: &str,
-) -> anyhow::Result<SlashOutcome> {
-    let args = text
-        .trim_start()
+fn command_args(text: &str) -> &str {
+    text.trim_start()
         .split_once(char::is_whitespace)
         .map_or("", |(_, rest)| rest)
-        .to_string();
-    let name = command.name.clone();
-    let outcome = tokio::task::spawn_blocking(move || host.run_command(&command, &args))
-        .await
-        .map_err(|e| format!("command task failed: {e}"))
-        .and_then(|r| r);
-    let output = match outcome {
-        Ok(output) => output,
-        Err(error) => {
-            ctx.renderer
-                .write_line(&format!("[addon] /{name} failed: {error}"), c_error())?;
-            return Ok(SlashOutcome::Handled);
-        }
-    };
-    if let Some(text) = output.text {
-        let safe =
-            crate::ui::ansi::strip_escapes(&text, crate::ui::ansi::StripPolicy::KEEP_NEWLINE);
-        for line in safe.lines() {
-            ctx.renderer.write_line(line, c_agent())?;
-        }
+}
+
+#[cfg(all(test, feature = "addons"))]
+mod tests {
+    use super::*;
+    use crate::addons::host::tests::ScriptedRuntime;
+
+    #[test]
+    fn a_command_hands_the_loop_a_job_with_the_text_after_its_name() {
+        let runtime = Arc::new(ScriptedRuntime::default());
+        let host = Arc::new(AddonHost::new(runtime.clone(), Vec::new(), Vec::new()));
+        let command = CommandSpec {
+            addon_id: "a".into(),
+            name: "rows".into(),
+            description: String::new(),
+        };
+        let outcome = command_job(host, command, "/rows 1 2  3");
+        let SlashOutcome::DeferAddon(AddonJob::Command { command, args, .. }) = outcome else {
+            panic!("a command job, got {outcome:?}");
+        };
+        assert_eq!((command.name.as_str(), args.as_str()), ("rows", "1 2  3"));
+        assert!(
+            runtime.calls.lock().unwrap().is_empty(),
+            "the handler has not run"
+        );
     }
-    Ok(match output.prompt {
-        Some(prompt) => SlashOutcome::DeferPromptRun { prompt },
-        None => SlashOutcome::Handled,
-    })
+
+    #[test]
+    fn command_args_are_empty_for_a_bare_command() {
+        assert_eq!(command_args("/rows"), "");
+        assert_eq!(command_args("  /rows x"), "x");
+    }
 }

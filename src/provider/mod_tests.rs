@@ -1951,6 +1951,25 @@ fn upsert_never_shadows_another_sources_tool() {
     );
 }
 
+/// A compiled-in built-in's name stays reserved even when this agent does
+/// not carry that built-in, as it is at boot.
+#[test]
+fn upsert_never_takes_a_reserved_builtin_name() {
+    use std::sync::Arc;
+
+    let mut agent = build_openai_any_agent();
+    agent.loop_tools = vec![Arc::new(SourcedTool("read", None))];
+    let installed = agent.upsert_loop_tools(
+        "addon",
+        vec![
+            Arc::new(SourcedTool("bash", Some("addon"))),
+            Arc::new(SourcedTool("count_rows", Some("addon"))),
+        ],
+    );
+    assert_eq!(installed, vec!["count_rows"]);
+    assert_eq!(names(&agent), vec!["read", "count_rows"]);
+}
+
 /// Under dynamic tool search, replaced tools leave the searchable registry
 /// and new ones join it, still search-gated.
 #[test]
