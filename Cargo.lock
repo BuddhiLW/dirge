@@ -836,7 +836,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 [[package]]
 name = "cljrs-export-macro"
 version = "0.1.0"
-source = "git+https://github.com/BuddhiLW/clojurust?rev=da66198642bed6247b0768355cbf56ab5cc20ac1#da66198642bed6247b0768355cbf56ab5cc20ac1"
+source = "git+https://github.com/BuddhiLW/clojurust?rev=c40c04040b6832a0ffa440083aa79d8af585ffe0#c40c04040b6832a0ffa440083aa79d8af585ffe0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -846,7 +846,7 @@ dependencies = [
 [[package]]
 name = "cljrs-gc"
 version = "0.1.0"
-source = "git+https://github.com/BuddhiLW/clojurust?rev=da66198642bed6247b0768355cbf56ab5cc20ac1#da66198642bed6247b0768355cbf56ab5cc20ac1"
+source = "git+https://github.com/BuddhiLW/clojurust?rev=c40c04040b6832a0ffa440083aa79d8af585ffe0#c40c04040b6832a0ffa440083aa79d8af585ffe0"
 dependencies = [
  "bigdecimal",
  "num-bigint",
@@ -858,7 +858,7 @@ dependencies = [
 [[package]]
 name = "cljrs-interop"
 version = "0.1.0"
-source = "git+https://github.com/BuddhiLW/clojurust?rev=da66198642bed6247b0768355cbf56ab5cc20ac1#da66198642bed6247b0768355cbf56ab5cc20ac1"
+source = "git+https://github.com/BuddhiLW/clojurust?rev=c40c04040b6832a0ffa440083aa79d8af585ffe0#c40c04040b6832a0ffa440083aa79d8af585ffe0"
 dependencies = [
  "cljrs-export-macro",
  "cljrs-gc",
@@ -872,7 +872,7 @@ dependencies = [
 [[package]]
 name = "cljrs-ir"
 version = "0.1.0"
-source = "git+https://github.com/BuddhiLW/clojurust?rev=da66198642bed6247b0768355cbf56ab5cc20ac1#da66198642bed6247b0768355cbf56ab5cc20ac1"
+source = "git+https://github.com/BuddhiLW/clojurust?rev=c40c04040b6832a0ffa440083aa79d8af585ffe0#c40c04040b6832a0ffa440083aa79d8af585ffe0"
 dependencies = [
  "cljrs-reader",
  "cljrs-types",
@@ -883,7 +883,7 @@ dependencies = [
 [[package]]
 name = "cljrs-nrepl"
 version = "0.1.0"
-source = "git+https://github.com/BuddhiLW/clojurust?rev=da66198642bed6247b0768355cbf56ab5cc20ac1#da66198642bed6247b0768355cbf56ab5cc20ac1"
+source = "git+https://github.com/BuddhiLW/clojurust?rev=c40c04040b6832a0ffa440083aa79d8af585ffe0#c40c04040b6832a0ffa440083aa79d8af585ffe0"
 dependencies = [
  "cljrs-gc",
  "cljrs-reader",
@@ -897,7 +897,7 @@ dependencies = [
 [[package]]
 name = "cljrs-project"
 version = "0.1.0"
-source = "git+https://github.com/BuddhiLW/clojurust?rev=da66198642bed6247b0768355cbf56ab5cc20ac1#da66198642bed6247b0768355cbf56ab5cc20ac1"
+source = "git+https://github.com/BuddhiLW/clojurust?rev=c40c04040b6832a0ffa440083aa79d8af585ffe0#c40c04040b6832a0ffa440083aa79d8af585ffe0"
 dependencies = [
  "cljrs-gc",
  "cljrs-reader",
@@ -908,7 +908,7 @@ dependencies = [
 [[package]]
 name = "cljrs-reader"
 version = "0.1.0"
-source = "git+https://github.com/BuddhiLW/clojurust?rev=da66198642bed6247b0768355cbf56ab5cc20ac1#da66198642bed6247b0768355cbf56ab5cc20ac1"
+source = "git+https://github.com/BuddhiLW/clojurust?rev=c40c04040b6832a0ffa440083aa79d8af585ffe0#c40c04040b6832a0ffa440083aa79d8af585ffe0"
 dependencies = [
  "cljrs-types",
  "miette",
@@ -917,7 +917,7 @@ dependencies = [
 [[package]]
 name = "cljrs-runtime"
 version = "0.1.0"
-source = "git+https://github.com/BuddhiLW/clojurust?rev=da66198642bed6247b0768355cbf56ab5cc20ac1#da66198642bed6247b0768355cbf56ab5cc20ac1"
+source = "git+https://github.com/BuddhiLW/clojurust?rev=c40c04040b6832a0ffa440083aa79d8af585ffe0#c40c04040b6832a0ffa440083aa79d8af585ffe0"
 dependencies = [
  "bigdecimal",
  "cljrs-gc",
@@ -940,7 +940,7 @@ dependencies = [
 [[package]]
 name = "cljrs-stdlib"
 version = "0.1.0"
-source = "git+https://github.com/BuddhiLW/clojurust?rev=da66198642bed6247b0768355cbf56ab5cc20ac1#da66198642bed6247b0768355cbf56ab5cc20ac1"
+source = "git+https://github.com/BuddhiLW/clojurust?rev=c40c04040b6832a0ffa440083aa79d8af585ffe0#c40c04040b6832a0ffa440083aa79d8af585ffe0"
 dependencies = [
  "cljrs-gc",
  "cljrs-ir",
@@ -952,7 +952,7 @@ dependencies = [
 [[package]]
 name = "cljrs-types"
 version = "0.1.0"
-source = "git+https://github.com/BuddhiLW/clojurust?rev=da66198642bed6247b0768355cbf56ab5cc20ac1#da66198642bed6247b0768355cbf56ab5cc20ac1"
+source = "git+https://github.com/BuddhiLW/clojurust?rev=c40c04040b6832a0ffa440083aa79d8af585ffe0#c40c04040b6832a0ffa440083aa79d8af585ffe0"
 dependencies = [
  "miette",
  "serde",
@@ -962,7 +962,7 @@ dependencies = [
 [[package]]
 name = "cljrs-value"
 version = "0.1.0"
-source = "git+https://github.com/BuddhiLW/clojurust?rev=da66198642bed6247b0768355cbf56ab5cc20ac1#da66198642bed6247b0768355cbf56ab5cc20ac1"
+source = "git+https://github.com/BuddhiLW/clojurust?rev=c40c04040b6832a0ffa440083aa79d8af585ffe0#c40c04040b6832a0ffa440083aa79d8af585ffe0"
 dependencies = [
  "arc-swap",
  "bigdecimal",
