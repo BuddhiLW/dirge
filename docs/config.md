@@ -80,6 +80,7 @@ Accepted top-level keys:
 | `escalation_provider`     | string  | Provider alias for the one-shot retry after repair-exhaustion / pre-write syntax failure. Falls back to `provider` (no-op when equal). |
 | `summarization_provider`  | string  | Provider alias for context compaction. Falls back to `provider`; with Anthropic OAuth, configure a non-Anthropic-OAuth summarization provider for LLM compaction side calls. Reactive overflow can still use a local prune-only emergency fallback, but high-fidelity LLM summaries require this route. |
 | `subagent_provider`       | string  | Provider alias for `task` tool subagents. Falls back to `provider`. |
+| `subagent_digest_provider` | string | Provider alias for a cheap model that digests a subagent's final answer when it exceeds the `task` inline budget. The parent gets the digest plus the path to the full text instead of a head/tail excerpt; the user still sees the full answer in the subagent's tab. Unset = off. Anthropic OAuth is refused. |
 | `subagent_dispatch_strategy` | string | Coordinated background dispatch mode: `off` (default), `optional`, or `full`. Coordination requires eligible `readonly` and `readwrite` agent profiles and runs only in the interactive TUI. See [Coordinated Subagents](subagent-dispatch-strategy.md). |
 | `subagent_write_isolation` | string | Where coordinated read-write subagents run: `auto` (default), `worktree`, or `serialize`. Worktree isolation requires a confining Linux sandbox; `auto` otherwise falls back to one serialized writer in a clean parent checkout. See [Coordinated Subagents](subagent-dispatch-strategy.md#read-write-subagents-and-worktrees). |
 | `critic_provider`         | string  | Provider alias for the F6 in-loop critic (tier 3). When set, the verifier escalates to a bounded LLM critique at finalization on substantive runs (one call per run); it also judges the **goal gate** (`--goal`) and powers the diff-aware **code reviewer** (reviews the run's uncommitted diff, blocks on high/critical findings, advises on medium/low — also runnable on demand via `/code-review`). **No fallback** — unset means no critic, no reviewer, no goal gate, and no cost. |
@@ -732,6 +733,7 @@ runtime.
 | `escalation_provider` | One-shot retry after repair-exhaustion / pre-write syntax failure | `provider` (no-op when equal) |
 | `summarization_provider` | Context compaction side calls (required for LLM compaction when `provider` uses Anthropic OAuth) | `provider` when safe |
 | `subagent_provider` | `task` tool subagents | `provider` |
+| `subagent_digest_provider` | Digest of a subagent result too large to hand the parent inline (use a cheap model, e.g. DeepSeek) | none (off: head/tail excerpt) |
 | `critic_provider` | F6 in-loop critic (tier 3) + diff-aware code reviewer (`/code-review`) + goal-gate judge (`--goal`) | none (off) |
 
 When a role's provider equals `provider` (either explicitly or by fallback), no

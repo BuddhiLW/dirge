@@ -1340,7 +1340,14 @@ impl TaskTool {
                 let outer = tokio::time::timeout(route_timeout, drained).await;
                 let aborted = abort_for_task.is_cancelled();
                 let (state, chat_event) = match outer {
-                    Ok(Ok(text)) => (TaskState::Completed(text), None),
+                    Ok(Ok(text)) => {
+                        // A cheap-model digest replaces the head/tail excerpt
+                        // the store would otherwise relay for a large result.
+                        let delivered = crate::agent::tools::subagent_digest::try_digest(&text)
+                            .await
+                            .unwrap_or(text);
+                        (TaskState::Completed(delivered), None)
+                    }
                     Ok(Err(e)) => {
                         let aborted_msg = "aborted by user".to_string();
                         if aborted {
@@ -1449,6 +1456,11 @@ impl TaskTool {
             let aborted = abort.is_cancelled();
             match result {
                 Ok(Ok(text)) => {
+                    if let Some(digest) =
+                        crate::agent::tools::subagent_digest::try_digest(&text).await
+                    {
+                        return Ok(digest);
+                    }
                     let outcome =
                         crate::agent::tools::output_relay::relay_if_large("task", text, "");
                     Ok(outcome.text)
@@ -1780,7 +1792,11 @@ impl PortableTool for TaskTool {
                 let outer = tokio::time::timeout(route_timeout, raced).await;
                 let (state, chat_event) = match outer {
                     Ok(Ok(Ok(text))) => (
-                        TaskState::Completed(text.clone()),
+                        TaskState::Completed(
+                            crate::agent::tools::subagent_digest::try_digest(&text)
+                                .await
+                                .unwrap_or_else(|| text.clone()),
+                        ),
                         SubagentChatEvent::Token {
                             id: tid_for_task.clone(),
                             text: text.clone(),
@@ -1915,6 +1931,11 @@ impl PortableTool for TaskTool {
                         id: task_id,
                         result: text.clone(),
                     });
+                    if let Some(digest) =
+                        crate::agent::tools::subagent_digest::try_digest(&text).await
+                    {
+                        return Ok(digest);
+                    }
                     let outcome =
                         crate::agent::tools::output_relay::relay_if_large("task", text, "");
                     Ok(outcome.text)
@@ -2802,6 +2823,42 @@ mod tests {
         LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
             .lock()
             .await
+    }
+
+    /// `/msg` and focused-tab input: a unique prefix queues onto that
+    /// subagent's steering queue; an ambiguous or unknown prefix, or a
+    /// finished subagent, queues nothing.
+    #[test]
+    fn message_subagent_resolves_prefix_and_queues() {
+        let a = register_subagent_steering("msgtest-aaa-1");
+        let b = register_subagent_steering("msgtest-aab-2");
+        assert_eq!(
+            message_subagent("msgtest-aaa", "look at foo.rs"),
+            MessageOutcome::Queued("msgtest-aaa-1".into())
+        );
+        assert_eq!(
+            a.lock_ignore_poison().drain(..).collect::<Vec<_>>(),
+            vec!["look at foo.rs".to_string()]
+        );
+        assert!(matches!(
+            message_subagent("msgtest-aa", "x"),
+            MessageOutcome::Ambiguous(ids) if ids.len() == 2
+        ));
+        assert_eq!(
+            message_subagent("msgtest-zzz", "x"),
+            MessageOutcome::NotFound
+        );
+        assert_eq!(
+            message_subagent("msgtest-aab", "  "),
+            MessageOutcome::NotFound
+        );
+        assert!(b.lock_ignore_poison().is_empty());
+        unregister_subagent_steering("msgtest-aaa-1");
+        unregister_subagent_steering("msgtest-aab-2");
+        assert_eq!(
+            message_subagent("msgtest-aaa-1", "x"),
+            MessageOutcome::NotFound
+        );
     }
 
     /// `/kill` against an empty registry or a never-spawned prefix

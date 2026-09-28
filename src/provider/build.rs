@@ -203,6 +203,10 @@ pub async fn build_agent(
     // `TaskTool` in `build_loop_tools` consumes `parent_model`, so routing
     // here is sufficient. A `task(agent=…)` profile model still overrides.
     let subagent_model = resolve_subagent_model(cfg, session_id.as_deref());
+    crate::agent::tools::subagent_digest::set_digest_model(resolve_subagent_digest_model(
+        cfg,
+        session_id.as_deref(),
+    ));
     let loop_task_model = subagent_model.unwrap_or_else(|| parent_model.clone());
 
     macro_rules! build_inner {
@@ -1108,6 +1112,39 @@ fn resolve_subagent_model(cfg: &Config, session_id: Option<&str>) -> Option<AnyM
             eprintln!(
                 "warning: subagent_provider '{alias}' failed to build ({e}); \
                  falling back to the main model for subagents"
+            );
+            None
+        }
+    }
+}
+
+/// Resolve the cheap model that digests large subagent results, from
+/// `subagent_digest_provider`. Opt-in: `None` unless the key is set and its
+/// client builds. Any alias is accepted, including the default route; only
+/// Anthropic OAuth is refused, as for the compaction summarizer.
+fn resolve_subagent_digest_model(cfg: &Config, session_id: Option<&str>) -> Option<AnyModel> {
+    let (alias, entry) = cfg.resolve_role(crate::config::ConfigRole::SubagentDigest)?;
+    match create_role_client(&alias, &cfg.providers_map(), cfg.auth, session_id) {
+        Ok(AnyClient::AnthropicOauth(_)) => {
+            eprintln!(
+                "warning: subagent_digest_provider '{alias}' uses Anthropic OAuth, which is \
+                 not allowed for side requests; subagent results stay undigested"
+            );
+            None
+        }
+        Ok(client) => {
+            let model_name = resolve_entry_model_name(&client, &alias, &entry);
+            tracing::info!(
+                target: "dirge::provider",
+                alias = %alias,
+                "subagent_digest_provider active for large subagent results",
+            );
+            Some(client.completion_model(model_name))
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: subagent_digest_provider '{alias}' failed to build ({e}); \
+                 subagent results stay undigested"
             );
             None
         }

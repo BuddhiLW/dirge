@@ -479,6 +479,7 @@ pub enum ConfigRole {
     Subagent,
     Critic,
     Approval,
+    SubagentDigest,
 }
 
 /// One VSCode-style key binding: bind a key chord (or chord sequence like
@@ -1099,6 +1100,11 @@ pub struct Config {
     pub escalation_provider: Option<String>,
     /// Optional provider for context summarization / compaction.
     pub summarization_provider: Option<String>,
+    /// Optional cheap provider (e.g. a DeepSeek alias) that digests a
+    /// subagent's final answer when it is too large to hand the parent
+    /// inline. The parent gets the digest plus the path to the full text,
+    /// instead of a head/tail excerpt. Unset keeps the excerpt.
+    pub subagent_digest_provider: Option<String>,
     /// Early-fold threshold as a fraction of the model's context window
     /// (e.g. `0.5`). Lowers the point at which history folds into a
     /// summary — and thus when the durable session checkpoint is written
@@ -1512,6 +1518,9 @@ impl Config {
             // Likewise opt-in: auto-approval resolves only when
             // `approval_provider` is explicitly set (no default fallback).
             ConfigRole::Approval => self.approval_provider.as_deref(),
+            // Opt-in: subagent results are digested only when
+            // `subagent_digest_provider` is explicitly set.
+            ConfigRole::SubagentDigest => self.subagent_digest_provider.as_deref(),
         };
         let alias = role_name?.to_string();
         if let Some(map) = providers

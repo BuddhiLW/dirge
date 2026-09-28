@@ -569,6 +569,7 @@ impl AnyAgent {
     }
 
     /// Fork a subagent using a freshly built, isolated tool registry.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_subagent_runner_with_tools(
         &self,
         prompt: String,
