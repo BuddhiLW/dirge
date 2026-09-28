@@ -42,7 +42,7 @@ A command runs as `sh -c <command>` (so `~` expands) with `CLAUDE_PROJECT_DIR`,
 | `PreToolUse` | before every tool call (main agent and subagents) | Claude tool name, and dirge's | block refuses the call; context rides on the result; `updatedInput` rewrites the args |
 | `PostToolUse` | after every tool call | Claude tool name, and dirge's | block reason and context are appended to the result |
 | `SessionStart` | first run of a session (`source`: `startup` / `resume`) | `source` | context is appended to the system prompt |
-| `UserPromptSubmit` | each user prompt | (all groups) | context is prepended to the prompt; a block replaces the prompt with a refusal notice |
+| `UserPromptSubmit` | each user prompt | (all groups) | context is prepended to the prompt; a block ends the run with the hook's reason and the model is not called |
 | `SubagentStart` | a `task` subagent is forked (`agent_type`: `task`) | `agent_type` | context is appended to the child's system prompt |
 | `Stop` / `SubagentStop` | the main agent / a subagent is about to finish | (all groups) | a block feeds its reason back and the agent continues (`stop_hook_active` is set on the next check; at most 8 in a row) |
 

@@ -2,7 +2,10 @@
 
 use serde_json::{Map, Value, json};
 
-use super::domain::{Exited, HookError, HookEvent, HookMatcher, HookOutcome, HooksConfig};
+use super::domain::{
+    Exited, HookError, HookEvent, HookMatcher, HookOutcome, HooksConfig, Submission,
+    system_reminder,
+};
 
 /// Claude Code matcher semantics: absent, empty or `*` accepts all;
 /// otherwise a regex that must match the whole target, falling back to
@@ -96,6 +99,19 @@ pub fn interpret(event: HookEvent, exited: Exited) -> Result<HookOutcome, HookEr
             code,
             stderr: exited.stderr,
         }),
+    }
+}
+
+/// A `UserPromptSubmit` outcome applied to `prompt`. A block wins over
+/// context: as in Claude Code, a blocked prompt never reaches the model.
+pub fn submission(outcome: HookOutcome, prompt: String) -> Submission {
+    let event = HookEvent::UserPromptSubmit;
+    if let Some(reason) = outcome.block {
+        return Submission::Blocked(format!("{event} hook blocked this prompt: {reason}"));
+    }
+    match outcome.context_text() {
+        Some(text) => Submission::Proceed(format!("{}\n\n{prompt}", system_reminder(event, &text))),
+        None => Submission::Proceed(prompt),
     }
 }
 

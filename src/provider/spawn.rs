@@ -214,11 +214,15 @@ impl AnyAgent {
                 self.session_id.as_deref(),
                 !history.is_empty(),
             );
-            prompt.text = crate::agent::command_hooks::loop_hooks::submitted_prompt(
+            use crate::agent::command_hooks::domain::Submission;
+            match crate::agent::command_hooks::loop_hooks::submitted_prompt(
                 hooks,
                 self.session_id.as_deref(),
                 prompt.text,
-            );
+            ) {
+                Submission::Proceed(text) => prompt.text = text,
+                Submission::Blocked(message) => return AgentRunner::refused(message),
+            }
         }
 
         // Convert rig history → loop messages (Session-side
