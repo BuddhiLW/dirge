@@ -44,7 +44,8 @@ use super::build_session_search_tool;
 ///
 /// Single source of truth for the collision policy, previously inlined
 /// verbatim at three sites (MCP eager + MCP background + plugin) [dirge-p99h].
-#[cfg(any(feature = "mcp", feature = "plugin"))]
+/// Addon tools answer to it too.
+#[cfg(any(feature = "mcp", feature = "plugin", feature = "addons"))]
 fn shadows_builtin(name: &str, source: &str) -> bool {
     if tools::reserves_builtin_name(name) {
         eprintln!(
