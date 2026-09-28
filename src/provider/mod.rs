@@ -53,6 +53,15 @@ pub fn current_agent() -> Option<std::sync::Arc<AnyAgent>> {
     CURRENT_AGENT.lock_ignore_poison().clone()
 }
 
+/// Publish `agent` after its tool set changed in place: as the agent
+/// tooled subagents fork from and, with plugins, as the tool set
+/// `call-tool` reaches.
+pub fn publish_live_agent(agent: &AnyAgent) {
+    set_current_agent(std::sync::Arc::new(agent.clone()));
+    #[cfg(feature = "plugin")]
+    crate::plugin::tool_bridge::publish_registry(agent.loop_tools());
+}
+
 #[allow(unused_imports)]
 use crate::sync_util::LockExt;
 use rig::providers::{anthropic, chatgpt, gemini, ollama, openai, openrouter};

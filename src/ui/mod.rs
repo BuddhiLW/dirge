@@ -4857,12 +4857,13 @@ pub async fn run_interactive(
                             agent.extend_loop_tools(tools);
                             // #701: re-publish the live agent so `current_agent()`
                             // (what a tooled `task(agent=…)` subagent forks off)
-                            // reflects the just-injected MCP tools + their names.
+                            // and the `call-tool` registry (plugins and addons)
+                            // reflect the just-injected MCP tools + their names.
                             // Without this the background-loaded MCP tools reach
                             // the main loop (via `agent.clone()` per prompt) but
-                            // NOT subagents, whose snapshot would stay pre-MCP
-                            // until the next rebuild (/model, /agent, /cd, …).
-                            crate::provider::set_current_agent(std::sync::Arc::new(agent.clone()));
+                            // NOT subagents or `call-tool`, whose snapshots would
+                            // stay pre-MCP until the next rebuild (/model, /cd, …).
+                            crate::provider::publish_live_agent(&agent);
                             mcp_manager = Some(mgr);
                             mcp_ready_rx = None;
                             tracing::info!("MCP ready: injected {n} tool(s) into the live agent");
