@@ -205,3 +205,34 @@ same without leaving the prompt (rebindable as `panel_next_tab`,
 `panel_prev_tab` and `panel_refresh`). A reply that fails (no feed
 running, the producer unreachable or answering non-2xx) is shown as a
 notification in the chat area.
+
+## Swarm grid
+
+The left side panel shows external panels as compact boxes. `/swarm`
+(or Alt+S, rebindable as `toggle_swarm`) opens the swarm grid instead:
+every external panel painted at full size, one cell per panel, over
+the chat and both side panels. The input strip and status line stay
+below it. `/swarm on` and `/swarm off` open or close it explicitly.
+
+The grid repaints the latest state the producer sent; it keeps no
+history of earlier frames. A panel the producer focused (`FocusTab`) is
+painted first and marked `●`; an accumulating panel (`AppendTab`) shows
+its newest lines. Each cell's title carries its number (`2/5`), and the
+selected cell is marked `▸` and drawn in the accent colour. When not all
+cells fit, the grid shows the page that holds the selected cell.
+
+While the grid is open, keys drive it rather than the prompt:
+
+| Key | Action |
+|-----|--------|
+| Tab / Shift+Tab | reply `next-tab` / `prev-tab` |
+| r | reply `refresh` |
+| Enter | reply `focus` with the selected panel's id as `target` |
+| u | reply `unfocus` |
+| Arrows, h/j/k/l, 1-9, Home/End | move the selection (local, no reply) |
+| Esc, q, Alt+S | close the grid |
+
+These are the same replies `/panel` sends, over the same channel. Other
+global keys (scrolling, Ctrl+L, Alt+. / Alt+, / Alt+/) keep working,
+and Ctrl+C still interrupts a running agent. A permission prompt or
+question from the agent takes the keys while it is shown.
