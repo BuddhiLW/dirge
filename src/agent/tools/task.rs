@@ -247,6 +247,80 @@ pub fn unregister_subagent_abort(id: &str) {
     map.remove(id);
 }
 
+/// Queue a tooled subagent polls at each turn boundary for steering text.
+/// Same shape as the main agent's interjection queue, so the loop's
+/// `steering_from_queue` drains it unchanged.
+pub type SubagentSteeringQueue =
+    std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
+
+/// Process-global map from in-flight tooled subagent id to its steering
+/// queue. Keyed like [`SUBAGENT_ABORT_REGISTRY`], so the UI can resolve a
+/// focused tab (or a `/msg` prefix) to the same id it kills with. Tool-less
+/// subagents are a single completion call and never register here.
+static SUBAGENT_STEERING_REGISTRY: std::sync::OnceLock<
+    Mutex<HashMap<String, SubagentSteeringQueue>>,
+> = std::sync::OnceLock::new();
+
+fn steering_registry() -> &'static Mutex<HashMap<String, SubagentSteeringQueue>> {
+    SUBAGENT_STEERING_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Create and register a steering queue for subagent `id`, returning it for
+/// the runner's `LoopSpawnConfig::steering_queue`.
+pub fn register_subagent_steering(id: &str) -> SubagentSteeringQueue {
+    let queue: SubagentSteeringQueue = Default::default();
+    steering_registry()
+        .lock_ignore_poison()
+        .insert(id.to_string(), queue.clone());
+    queue
+}
+
+/// Drop subagent `id`'s steering queue. Text still queued is discarded: the
+/// subagent reached a terminal state and will never poll it again.
+pub fn unregister_subagent_steering(id: &str) {
+    steering_registry().lock_ignore_poison().remove(id);
+}
+
+/// Result of [`message_subagent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageOutcome {
+    /// Queued for the subagent's next turn boundary. Carries the full id.
+    Queued(String),
+    /// No steerable subagent matches: it finished, or it is tool-less.
+    NotFound,
+    /// The prefix matches several subagents.
+    Ambiguous(Vec<String>),
+}
+
+/// Queue `text` for the in-flight subagent whose id matches `id_prefix`,
+/// using the same resolution rules as [`kill_subagent`]. The subagent sees
+/// it as a user message at its next turn boundary.
+pub fn message_subagent(id_prefix: &str, text: &str) -> MessageOutcome {
+    let trimmed = id_prefix.trim();
+    if trimmed.is_empty() || text.trim().is_empty() {
+        return MessageOutcome::NotFound;
+    }
+    let map = steering_registry().lock_ignore_poison();
+    let id = if map.contains_key(trimmed) {
+        trimmed.to_string()
+    } else {
+        let matches: Vec<String> = map
+            .keys()
+            .filter(|k| k.starts_with(trimmed))
+            .cloned()
+            .collect();
+        match matches.len() {
+            0 => return MessageOutcome::NotFound,
+            1 => matches.into_iter().next().unwrap(),
+            _ => return MessageOutcome::Ambiguous(matches),
+        }
+    };
+    if let Some(queue) = map.get(&id) {
+        queue.lock_ignore_poison().push_back(text.to_string());
+    }
+    MessageOutcome::Queued(id)
+}
+
 /// Bridge a registered `AbortSignal` (driven by `/kill` / Ctrl+K) to a tooled
 /// subagent's `AgentRunner`. The tool-less path polls the signal inline
 /// (`tokio::select!` around `btw_query`); the tooled path drives a real
@@ -319,6 +393,7 @@ impl Drop for SubagentCleanup {
             watcher.abort();
         }
         unregister_subagent_abort(&self.id);
+        unregister_subagent_steering(&self.id);
         if let Some(store) = &self.store {
             store.notify_if_running(
                 &self.id,
@@ -1229,6 +1304,7 @@ impl TaskTool {
                         &child_sid,
                         max_turns,
                         model_for_task.as_ref(),
+                        Some(register_subagent_steering(&tid_for_task)),
                     )
                 } else {
                     agent.spawn_subagent_runner(
@@ -1239,6 +1315,7 @@ impl TaskTool {
                         &child_sid,
                         max_turns,
                         model_for_task.as_ref(),
+                        Some(register_subagent_steering(&tid_for_task)),
                     )
                 };
                 let abort_watcher = spawn_abort_watcher(
@@ -1354,6 +1431,7 @@ impl TaskTool {
                 &child_sid,
                 max_turns,
                 route_model.as_ref(),
+                Some(register_subagent_steering(&task_id)),
             );
             let abort_watcher = spawn_abort_watcher(
                 abort.clone(),

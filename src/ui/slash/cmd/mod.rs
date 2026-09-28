@@ -33,6 +33,7 @@ pub(crate) mod mcp;
 pub(crate) mod memory;
 pub(crate) mod mode;
 pub(crate) mod model;
+pub(crate) mod msg;
 pub(crate) mod panel;
 pub(crate) mod plan;
 pub(crate) mod plugins;

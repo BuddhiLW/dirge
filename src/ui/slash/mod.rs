@@ -748,6 +748,7 @@ pub async fn handle_slash(
         "/issues" => cmd::issues::cmd_issues(&mut ctx, &parts).await?,
         "/memory" => cmd::memory::cmd_memory(&mut ctx, &parts).await?,
         "/kill" => cmd::kill::cmd_kill(&mut ctx, &parts).await?,
+        "/msg" => cmd::msg::cmd_msg(&mut ctx, &parts, text).await?,
         #[cfg(unix)]
         "/sandbox" => cmd::sandbox::cmd_sandbox(&mut ctx, &parts).await?,
         #[cfg(feature = "dap")]
@@ -894,6 +895,7 @@ fn slash_commands() -> Vec<(&'static str, &'static str)> {
         ("/help", "show this help"),
         ("/issues", "view the native issue board"),
         ("/kill", "kill a running subagent"),
+        ("/msg", "send a message to a running subagent"),
         (
             "/code-review",
             "review the working-tree diff for issues (needs critic_provider)",

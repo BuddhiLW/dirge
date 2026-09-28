@@ -2919,6 +2919,30 @@ pub async fn run_interactive(
                                     ui.expand_target = crate::ui::state::ExpandTarget::None;
                                     ui.expansion_anchor = None;
                                     ui.live_thinking_expanded = false;
+                                    // Input typed on a subagent's tab goes to that
+                                    // subagent, not the main agent: it is queued as
+                                    // steering for its next turn boundary. Slash
+                                    // commands still run normally.
+                                    if !text.starts_with('/') {
+                                        let active = renderer.active_chat();
+                                        if let Some(sub_id) = ui.chat_idx_to_subagent.get(&active).cloned() {
+                                            use crate::agent::tools::task::{MessageOutcome, message_subagent};
+                                            let note = match message_subagent(&sub_id, &text) {
+                                                MessageOutcome::Queued(_) => {
+                                                    let _ = renderer.write_line_to_chat(
+                                                        active,
+                                                        &format!("<you> {text}"),
+                                                        c_agent(),
+                                                    );
+                                                    "(queued — delivered at the subagent's next turn boundary)"
+                                                }
+                                                _ => "(subagent is not running or has no tools — message not delivered)",
+                                            };
+                                            let _ = renderer.write_line_to_chat(active, note, theme::dim());
+                                            renderer.request_repaint();
+                                            continue;
+                                        }
+                                    }
                                     #[cfg(feature = "loop")]
                                     if loop_state.as_ref().is_some_and(|ls| ls.active) && !text.starts_with('/') {
                                         // Queue the message instead of dropping it.
@@ -5177,10 +5201,7 @@ pub async fn run_interactive(
                         let panel_rows: Vec<crate::ui::renderer::SubagentStatusRow> =
                             ui.subagent_panel_rows
                                 .iter()
-                                .map(|(id, agent)| crate::ui::renderer::SubagentStatusRow {
-                                    id_short: id.chars().take(6).collect(),
-                                    agent: agent.clone(),
-                                })
+                                .map(|(id, live)| live.status_row(id))
                                 .collect();
                         renderer.set_subagent_status(panel_rows);
                         renderer.request_repaint();
