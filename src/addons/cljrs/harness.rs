@@ -50,7 +50,8 @@ const BLOCKED_CALL_TOOL: &str = "call-tool is unavailable while dirge waits on t
 ///   built-in or an MCP tool) with the `args` map. Answers `{:ok text}` or
 ///   `{:error msg}`. Blocks until the tool answers. Addon tools and `task`
 ///   are refused, and so is any call while dirge's event loop waits on the
-///   addon, as for `mcp-call`.
+///   addon, as for `mcp-call`. In a build without the `plugin` feature
+///   `(tools)` is empty and every call answers `{:error}` saying so.
 pub fn install(globals: &Arc<GlobalEnv>, harness: Harness, caller_on_runtime: Rc<Cell<bool>>) {
     let Harness {
         sink,

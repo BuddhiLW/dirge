@@ -102,6 +102,21 @@ impl ToolGateway for NoTools {
     }
 }
 
+/// A host whose build cannot run tools: no names, and every call answers
+/// the reason it holds.
+#[cfg_attr(feature = "plugin", allow(dead_code))]
+pub struct ToolsUnavailable(pub &'static str);
+
+impl ToolGateway for ToolsUnavailable {
+    fn names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn call(&self, _tool: &str, _args: &Value) -> Result<String, String> {
+        Err(self.0.to_string())
+    }
+}
+
 /// A host without a side panel.
 pub struct NoPanels;
 
@@ -150,7 +165,17 @@ pub trait HarnessSink: Send + Sync + 'static {
 
 #[cfg(test)]
 mod tests {
-    use super::Level;
+    use super::{Level, ToolGateway, ToolsUnavailable};
+
+    #[test]
+    fn unavailable_tools_offer_nothing_and_answer_why() {
+        let gateway = ToolsUnavailable("not in this build");
+        assert!(gateway.names().is_empty());
+        assert_eq!(
+            gateway.call("read", &serde_json::json!({})),
+            Err("not in this build".to_string())
+        );
+    }
 
     #[test]
     fn levels_parse_with_or_without_colon_and_default_to_info() {

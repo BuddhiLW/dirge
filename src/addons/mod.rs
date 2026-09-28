@@ -20,6 +20,7 @@ pub mod policy;
 pub mod port;
 pub mod sink;
 pub mod tool;
+#[cfg(feature = "plugin")]
 pub mod tool_calls;
 
 #[cfg(test)]
@@ -174,21 +175,21 @@ fn harness() -> Harness {
     let tui = Arc::new(sink::TuiSink);
     let mut harness = Harness::with_sink(tui.clone());
     harness.panels = tui;
-    if let Some(live) = tool_calls::LoopTools::live(Arc::new(addon_tool_names)) {
+    #[cfg(feature = "plugin")]
+    if let Some(live) = tool_calls::LoopTools::live() {
         harness.tools = Arc::new(live);
+    }
+    #[cfg(not(feature = "plugin"))]
+    {
+        harness.tools = Arc::new(port::ToolsUnavailable(
+            "call-tool is unavailable in this build: dirge was built without the `plugin` feature",
+        ));
     }
     #[cfg(feature = "mcp")]
     if let Some(live) = mcp::LiveMcp::current() {
         harness.mcp = Arc::new(live);
     }
     harness
-}
-
-/// Names the model sees for the running host's addon tools.
-fn addon_tool_names() -> Vec<String> {
-    global()
-        .map(|host| host.tools().into_iter().map(|t| t.exposed_name).collect())
-        .unwrap_or_default()
 }
 
 fn protocol_ns(settings: &crate::config::AddonsConfig) -> &str {
