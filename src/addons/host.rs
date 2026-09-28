@@ -79,6 +79,8 @@ pub struct AddonHost {
     runtime: Arc<dyn AddonRuntime>,
     host_config: Value,
     loaded: Mutex<Loaded>,
+    /// Sessions whose `:dirge/session-start` already ran in this process.
+    started: Mutex<std::collections::HashSet<String>>,
 }
 
 impl std::fmt::Debug for AddonHost {
@@ -104,6 +106,7 @@ impl AddonHost {
             runtime,
             host_config: Value::Object(Default::default()),
             loaded: Mutex::new(Loaded::new(addons, failures)),
+            started: Mutex::default(),
         }
     }
 
@@ -114,6 +117,7 @@ impl AddonHost {
             runtime,
             host_config,
             loaded: Mutex::new(loaded),
+            started: Mutex::default(),
         }
     }
 
@@ -226,6 +230,29 @@ impl AddonHost {
         let replies = self.runtime.run_hook(HookPoint::BeforeToolCall, ctx);
         log_failures(HookPoint::BeforeToolCall, &replies);
         policy::fold_before(&replies)
+    }
+
+    /// `:dirge/session-start` texts for `session_id` the first time this
+    /// process runs a turn of that session; empty on every later call.
+    pub fn session_start(&self, session_id: &str, ctx: &Value) -> Vec<String> {
+        if !self
+            .started
+            .lock_ignore_poison()
+            .insert(session_id.to_string())
+        {
+            return Vec::new();
+        }
+        self.texts(HookPoint::SessionStart, ctx)
+    }
+
+    /// Run `:dirge/session-end` for `session_id`; answers are ignored and
+    /// failures logged. A later turn of the same session starts it again.
+    pub fn session_end(&self, session_id: &str, ctx: &Value) {
+        self.started.lock_ignore_poison().remove(session_id);
+        if self.listens(HookPoint::SessionEnd) {
+            let replies = self.runtime.run_hook(HookPoint::SessionEnd, ctx);
+            log_failures(HookPoint::SessionEnd, &replies);
+        }
     }
 
     pub fn shutdown(&self) {

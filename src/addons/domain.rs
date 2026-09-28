@@ -13,7 +13,7 @@ pub enum HookPoint {
     /// system prompt. `ctx` = `{:cwd :session-id}`.
     SystemPrompt,
     /// `(fn [ctx] -> string|nil)`, text prepended to each submitted prompt as
-    /// a system reminder. `ctx` = `{:prompt :session-id}`.
+    /// a system reminder. `ctx` = `{:prompt :session-id :first-prompt?}`.
     OnPrompt,
     /// `(fn [ctx] -> nil|{:block reason}|{:context text}|{:args map})` before
     /// every tool call. `ctx` = `{:tool :args :tool-call-id}`.
@@ -21,14 +21,25 @@ pub enum HookPoint {
     /// `(fn [ctx] -> nil|{:context text})` after every tool call.
     /// `ctx` = `{:tool :args :result :error?}`.
     AfterToolCall,
+    /// `(fn [ctx] -> string|{:context text}|nil)` once per session, before its
+    /// first turn in this process, once the MCP servers have connected. The
+    /// text reaches that turn as a system reminder.
+    /// `ctx` = `{:session-id :cwd :first-prompt? :mcp-servers}`.
+    SessionStart,
+    /// `(fn [ctx] -> any)` when a session ends, before the MCP servers close;
+    /// bounded by a timeout, answer ignored.
+    /// `ctx` = `{:session-id :cwd :reason}`, `:reason` is `exit` or `swap`.
+    SessionEnd,
 }
 
 impl HookPoint {
-    pub const ALL: [HookPoint; 4] = [
+    pub const ALL: [HookPoint; 6] = [
         HookPoint::SystemPrompt,
         HookPoint::OnPrompt,
         HookPoint::BeforeToolCall,
         HookPoint::AfterToolCall,
+        HookPoint::SessionStart,
+        HookPoint::SessionEnd,
     ];
 
     /// The keyword (without the colon) an addon uses as its `hooks` key.
@@ -38,12 +49,32 @@ impl HookPoint {
             HookPoint::OnPrompt => "dirge/on-prompt",
             HookPoint::BeforeToolCall => "dirge/before-tool-call",
             HookPoint::AfterToolCall => "dirge/after-tool-call",
+            HookPoint::SessionStart => "dirge/session-start",
+            HookPoint::SessionEnd => "dirge/session-end",
         }
     }
 
     pub fn from_key(key: &str) -> Option<HookPoint> {
         let key = key.strip_prefix(':').unwrap_or(key);
         HookPoint::ALL.into_iter().find(|p| p.key() == key)
+    }
+}
+
+/// Why a session ended, as `:dirge/session-end` hears it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEndReason {
+    /// dirge is exiting.
+    Exit,
+    /// The user switched to or started another session.
+    Swap,
+}
+
+impl SessionEndReason {
+    pub fn key(self) -> &'static str {
+        match self {
+            SessionEndReason::Exit => "exit",
+            SessionEndReason::Swap => "swap",
+        }
     }
 }
 
