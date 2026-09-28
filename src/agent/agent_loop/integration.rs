@@ -559,6 +559,10 @@ pub struct LoopSpawnConfig {
     /// Claude-Code-compatible command hooks for this loop (`PreToolUse`,
     /// `PostToolUse`, and its stop event). `None` installs none.
     pub command_hooks: Option<crate::agent::command_hooks::HookBinding>,
+
+    /// Install the Clojure addon host's tool-call hooks (feature `addons`).
+    /// Set for the main session only.
+    pub addon_hooks: bool,
 }
 
 impl LoopSpawnConfig {
@@ -614,6 +618,7 @@ impl LoopSpawnConfig {
             bg_store: None,
             memory_provider: None,
             command_hooks: None,
+            addon_hooks: false,
         }
     }
 }
@@ -790,6 +795,13 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
             binding,
             cfg.session_id.clone(),
         );
+    }
+
+    #[cfg(feature = "addons")]
+    if cfg.addon_hooks
+        && let Some(host) = crate::addons::global()
+    {
+        crate::addons::loop_hooks::install(&mut loop_config, &host);
     }
 
     let mut context = Context {

@@ -1,3 +1,5 @@
+#[cfg(feature = "addons")]
+mod addons;
 mod agent;
 mod auth;
 /// Shared spawn hardening (setsid + process-group SIGKILL guard) for the
@@ -580,6 +582,10 @@ async fn main() -> anyhow::Result<()> {
     let cfg = config::load();
 
     crate::agent::command_hooks::install_from_config(&cfg);
+    // Clojure IAddons: discovered and loaded before the agent is built, so
+    // their tools and hooks are part of the first run.
+    #[cfg(feature = "addons")]
+    crate::addons::install_from_config(&cfg);
     crate::compression::init_from_config(cfg.compression.clone().unwrap_or_default());
     crate::compression::set_cli_disabled(cli.no_compression);
     crate::prompt_cache::init_from_config(cfg.prompt_cache.as_ref().and_then(|c| c.ttl.as_deref()));
@@ -1445,7 +1451,10 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(not(feature = "loop"))]
         let loop_mode = false;
         if !cli.resolve_no_tools(&cfg) && (cli.print || loop_mode) {
-            Some(extras::mcp::McpClientManager::connect_all(servers).await)
+            let mgr = extras::mcp::McpClientManager::connect_all(servers).await;
+            #[cfg(feature = "addons")]
+            crate::addons::mcp::publish(&mgr);
+            Some(mgr)
         } else {
             None
         }
@@ -2041,6 +2050,10 @@ async fn main() -> anyhow::Result<()> {
             let ask = ask_tx.clone();
             tokio::spawn(async move {
                 let mgr = extras::mcp::McpClientManager::connect_all(&servers).await;
+                // Addon code reaches the same connections through
+                // `dirge.harness/mcp-call`.
+                #[cfg(feature = "addons")]
+                crate::addons::mcp::publish(&mgr);
                 let mcp_tools = mgr.collect_tools(perm, ask).await;
                 let wrapped = crate::agent::builder::wrap_mcp_tools(mcp_tools).await;
                 // Deliver the payload, then nudge the UI loop to drain it.
@@ -2126,6 +2139,9 @@ async fn main() -> anyhow::Result<()> {
         // adapter + debuggee can be orphaned in their own process group.
         #[cfg(feature = "dap")]
         crate::dap::session::shutdown_active_session().await;
+        // IAddon `shutdown!` for every loaded addon, newest first.
+        #[cfg(feature = "addons")]
+        crate::addons::shutdown();
         // dirge-x949: MCP shutdown moved INTO run_interactive — for the
         // interactive path the connected manager is now owned there
         // (delivered by the background loader), so it shuts the servers

@@ -220,6 +220,14 @@ impl AnyAgent {
                 prompt.text,
             );
         }
+        #[cfg(feature = "addons")]
+        if let Some(host) = crate::addons::global() {
+            let session = self.session_id.as_deref();
+            system_prompt =
+                crate::addons::loop_hooks::with_system_prompt(&host, system_prompt, session);
+            prompt.text =
+                crate::addons::loop_hooks::with_prompt_context(&host, prompt.text, session);
+        }
 
         // Convert rig history → loop messages (Session-side
         // user/assistant/toolResult shapes).
@@ -332,6 +340,7 @@ impl AnyAgent {
         // (no provider attached) keep legacy no-op behavior.
         cfg.memory_provider = self.memory_provider.clone();
         cfg.command_hooks = command_hooks.map(crate::agent::command_hooks::HookBinding::main);
+        cfg.addon_hooks = true;
         #[cfg(feature = "plugin")]
         {
             cfg.plugin_mgr = crate::plugin::hook::global();
