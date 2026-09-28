@@ -194,6 +194,8 @@ mod tests {
     #[test]
     fn reads_from_file() {
         let dir = std::env::temp_dir().join(format!("dirge-addon-manifest-{}", std::process::id()));
+        // Clear first: a recycled pid would otherwise inherit a previous run's files.
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("addon.edn");
         std::fs::write(

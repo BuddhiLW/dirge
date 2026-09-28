@@ -940,6 +940,33 @@ would reflect the last plugin loaded.
 
 Reference: [hooks.md](hooks.md).
 
+### Clojure addons (`addons`)
+
+Only read by builds with the `addons` cargo feature. Absent = load every
+addon whose manifest is found in `.dirge/addons/` or `~/.config/dirge/addons/`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `addons.enabled` | `true` | `false` loads no addons. |
+| `addons.paths` | `[]` | Extra directories searched for `META-INF/addons/*.edn`. |
+| `addons.source_paths` | `[]` | Extra source roots on the addon classpath, before `DIRGE_ADDON_PATH`. |
+| `addons.protocol_ns` | `hive-addon.protocol` | Namespace defining the IAddon protocol functions. |
+
+Reference: [addons.md](addons.md).
+
+### External panel feed (`panel_feed`)
+
+Absent or empty = off.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `panel_feed.enabled` | on when a source is set | Explicit kill switch. |
+| `panel_feed.discovery_dir` | absent | Directory holding `dirge.json`; relative paths resolve under `$XDG_RUNTIME_DIR`. |
+| `panel_feed.url` | absent | Explicit feed base URL; takes precedence over discovery. |
+| `panel_feed.token_file` | absent | File holding the token for `url`. |
+
+Reference: [panel-feed.md](panel-feed.md).
+
 ## Sandbox configuration
 
 The `sandbox` key accepts three forms:
