@@ -173,15 +173,32 @@ Faces are `normal`, `dim`, `accent`, `success`, `warn` and `error`.
 `{:error "why"}`. It blocks until the server answers. It is refused (an
 `{:error}` answer) while dirge's event loop is waiting on the addon, which is
 the case for `:dirge/system-prompt`, `:dirge/on-prompt`, loading and
-shutdown. Call it from commands, tools and tool-call hooks. Calls made this
-way are not put through the per-tool permission prompt: an addon is code you
-installed, running inside dirge.
+shutdown. Call it from commands, tools and tool-call hooks.
+
+Before the call leaves dirge, `mcp-call` applies the refusals the model's
+own MCP calls get, and it answers `{:error}` when:
+
+- a `deny` permission rule matches `mcp_tool:<server>:<tool>`,
+- the active prompt's `deny_tools` names the tool, `mcp_tool:<server>:<tool>`
+  or `mcp_tool`, or
+- an argument names a path outside the working directory and the server's
+  config does not set `allow_external_paths: true`.
+
+It never asks the user. A call that would prompt if the model made it (the
+default for MCP tools, or an `ask` rule) runs without asking: an addon is
+code you installed, running inside dirge. The answer is the server's
+result as sent, without the size cap and injection scan applied to MCP
+results the model sees, and a dropped connection is not reconnected by the
+call.
 
 `call-tool` goes through the tool's own permission check, so a call to
 `bash` still asks the user. It refuses addon tools and `task`, and it is
 unavailable from `:dirge/system-prompt` and `:dirge/on-prompt` hooks and
 during load and shutdown, while dirge is waiting on the addon; call it from
-a command, a tool or a tool-call hook.
+a command, a tool or a tool-call hook. It runs on the Janet plugin tool
+bridge, so it needs a dirge built with the `plugin` feature (in the default
+set, not in `no-plugin` or `windows-default`). Without it `(tools)` is empty
+and `call-tool` answers `{:error}` saying so.
 
 To keep an addon portable, resolve these at call time, for example
 `(when-let [f (resolve 'dirge.harness/notify)] (f "hi"))`, so the code is a

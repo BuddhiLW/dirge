@@ -1,6 +1,7 @@
 //! `dirge.harness/call-tool`: addon code calling dirge's own loop tools,
 //! built-ins and MCP tools alike, the way Janet plugins do through
-//! `harness/call-tool`. Permission checks stay inside each tool.
+//! `harness/call-tool`. Permission checks stay inside each tool. Built only
+//! with the `plugin` feature, whose tool bridge runs the calls.
 
 use std::sync::Arc;
 
@@ -14,17 +15,17 @@ use crate::plugin::tool_bridge;
 /// The tools a call may reach, read when the call is made.
 pub type ToolSource = Arc<dyn Fn() -> Vec<Arc<dyn LoopTool>> + Send + Sync>;
 
-/// Names of the tools addons registered, read when the call is made.
-pub type AddonToolNames = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
-
-/// Why `name` may not be called from addon code, or `None` if it may.
-pub fn refusal(name: &str, addon_tools: &[String]) -> Option<String> {
+/// Why `tool` may not be called from addon code, or `None` if it may.
+/// Decided by the registered tool itself: subagents are refused by name,
+/// addon tools by their [`LoopTool::source`].
+pub fn refusal(tool: &dyn LoopTool) -> Option<String> {
+    let name = tool.name();
     if tool_bridge::NEVER_CALLABLE.contains(&name) {
         return Some(format!(
             "'{name}' cannot be called from an addon: subagents run isolated from addon code"
         ));
     }
-    if addon_tools.iter().any(|n| n == name) {
+    if tool.source() == Some(super::tool::SOURCE) {
         return Some(format!(
             "'{name}' is an addon tool and cannot be called from an addon: its handler \
              needs the addon isolate, which is blocked awaiting this call"
@@ -37,35 +38,29 @@ pub fn refusal(name: &str, addon_tools: &[String]) -> Option<String> {
 pub struct LoopTools {
     handle: Handle,
     tools: ToolSource,
-    addon_tools: AddonToolNames,
 }
 
 impl LoopTools {
-    pub fn new(handle: Handle, tools: ToolSource, addon_tools: AddonToolNames) -> Self {
-        Self {
-            handle,
-            tools,
-            addon_tools,
-        }
+    pub fn new(handle: Handle, tools: ToolSource) -> Self {
+        Self { handle, tools }
     }
 
     /// The agent's published tool set on the current runtime; `None`
     /// outside one.
-    pub fn live(addon_tools: AddonToolNames) -> Option<Self> {
+    pub fn live() -> Option<Self> {
         let tools: ToolSource = Arc::new(tool_bridge::live_tools);
         Handle::try_current()
             .ok()
-            .map(|handle| Self::new(handle, tools, addon_tools))
+            .map(|handle| Self::new(handle, tools))
     }
 }
 
 impl ToolGateway for LoopTools {
     fn names(&self) -> Vec<String> {
-        let refused = (self.addon_tools)();
         (self.tools)()
             .iter()
+            .filter(|t| refusal(t.as_ref()).is_none())
             .map(|t| t.name().to_string())
-            .filter(|name| refusal(name, &refused).is_none())
             .collect()
     }
 
@@ -75,10 +70,14 @@ impl ToolGateway for LoopTools {
         if Handle::try_current().is_ok() {
             return Err("call-tool must not run on an async runtime thread".to_string());
         }
-        if let Some(reason) = refusal(name, &(self.addon_tools)()) {
+        let tools = (self.tools)();
+        let refused = tools
+            .iter()
+            .find(|t| t.name() == name)
+            .and_then(|t| refusal(t.as_ref()));
+        if let Some(reason) = refused {
             return Err(reason);
         }
-        let tools = (self.tools)();
         self.handle.block_on(tool_bridge::execute_in(
             &tools,
             name,
@@ -99,12 +98,27 @@ mod tests {
     use crate::agent::agent_loop::LoopToolResult;
     use crate::agent::agent_loop::tool::{AbortSignal, LoopToolUpdate};
 
+    /// A tool echoing its `text` argument, contributed by `source`.
     #[derive(Debug)]
-    struct Echo(&'static str);
+    struct Echo {
+        name: &'static str,
+        source: Option<&'static str>,
+    }
+
+    fn built_in(name: &'static str) -> Arc<dyn LoopTool> {
+        Arc::new(Echo { name, source: None })
+    }
+
+    fn addon(name: &'static str) -> Arc<dyn LoopTool> {
+        Arc::new(Echo {
+            name,
+            source: Some(crate::addons::tool::SOURCE),
+        })
+    }
 
     impl LoopTool for Echo {
         fn name(&self) -> &str {
-            self.0
+            self.name
         }
         fn description(&self) -> &str {
             "echo"
@@ -115,6 +129,9 @@ mod tests {
         fn parameters(&self) -> &Value {
             static P: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
             P.get_or_init(|| json!({"type": "object"}))
+        }
+        fn source(&self) -> Option<&str> {
+            self.source
         }
         fn execute<'a>(
             &'a self,
@@ -135,18 +152,17 @@ mod tests {
         }
     }
 
+    fn gateway_over(
+        rt: &tokio::runtime::Runtime,
+        tools: fn() -> Vec<Arc<dyn LoopTool>>,
+    ) -> LoopTools {
+        LoopTools::new(rt.handle().clone(), Arc::new(tools))
+    }
+
     fn gateway(rt: &tokio::runtime::Runtime) -> LoopTools {
-        LoopTools::new(
-            rt.handle().clone(),
-            Arc::new(|| -> Vec<Arc<dyn LoopTool>> {
-                vec![
-                    Arc::new(Echo("read")),
-                    Arc::new(Echo("count-rows")),
-                    Arc::new(Echo("task")),
-                ]
-            }),
-            Arc::new(|| vec!["count-rows".to_string()]),
-        )
+        gateway_over(rt, || {
+            vec![built_in("read"), addon("count-rows"), built_in("task")]
+        })
     }
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -158,11 +174,31 @@ mod tests {
     }
 
     #[test]
+    fn a_built_in_named_like_a_skipped_addon_tool_stays_callable() {
+        // An addon's `read`, skipped at build for colliding with the
+        // built-in, leaves only the built-in in the registry.
+        let rt = runtime();
+        let gw = gateway_over(&rt, || vec![built_in("read")]);
+        assert_eq!(gw.names(), vec!["read".to_string()]);
+        let answer = std::thread::spawn(move || gw.call("read", &json!({"text": "hi"})))
+            .join()
+            .unwrap();
+        assert_eq!(answer, Ok("echo \"hi\"".to_string()));
+    }
+
+    #[test]
+    fn the_registered_tool_decides_not_its_name() {
+        assert!(refusal(built_in("read").as_ref()).is_none());
+        let reason = refusal(addon("read").as_ref()).expect("refused");
+        assert!(reason.contains("addon isolate"), "{reason}");
+    }
+
+    #[test]
     fn built_in_tools_are_callable_addon_tools_and_subagents_are_not() {
-        assert!(refusal("read", &["count-rows".into()]).is_none());
-        let addon = refusal("count-rows", &["count-rows".into()]).expect("refused");
-        assert!(addon.contains("addon isolate"), "{addon}");
-        let task = refusal("task", &[]).expect("refused");
+        assert!(refusal(built_in("read").as_ref()).is_none());
+        let own = refusal(addon("count-rows").as_ref()).expect("refused");
+        assert!(own.contains("addon isolate"), "{own}");
+        let task = refusal(built_in("task").as_ref()).expect("refused");
         assert!(task.contains("isolated"), "{task}");
     }
 
@@ -189,6 +225,7 @@ mod tests {
         let answers = std::thread::spawn(move || {
             [
                 gw.call("count-rows", &json!({})),
+                gw.call("task", &json!({})),
                 gw.call("nowhere", &json!({})),
                 gw.call("read", &json!("not an object")),
             ]
@@ -196,8 +233,9 @@ mod tests {
         .join()
         .unwrap();
         assert!(answers[0].as_ref().unwrap_err().contains("addon tool"));
-        assert!(answers[1].as_ref().unwrap_err().contains("no tool named"));
-        assert!(answers[2].as_ref().unwrap_err().contains("JSON object"));
+        assert!(answers[1].as_ref().unwrap_err().contains("isolated"));
+        assert!(answers[2].as_ref().unwrap_err().contains("no tool named"));
+        assert!(answers[3].as_ref().unwrap_err().contains("JSON object"));
     }
 
     #[test]
