@@ -158,14 +158,32 @@ fn publish(host: Arc<AddonHost>) {
     let _ = HOST.set(host);
 }
 
-/// Tab completion for the commands `host`'s addons registered.
+/// Hand `host`'s addons the command names left to them: names a built-in
+/// or plugin command takes are withheld, the rest complete on Tab.
 fn register_commands(host: &AddonHost) {
+    host.reserve_commands(Arc::new(taken_by_dirge));
     #[cfg(feature = "slash-completion")]
     crate::ui::slash::register_addon_commands(
         host.commands().into_iter().map(|c| c.name).collect(),
     );
-    #[cfg(not(feature = "slash-completion"))]
-    let _ = host;
+}
+
+/// True when `name` (without the `/`) is a built-in or plugin slash
+/// command, which dirge dispatches before any addon command.
+fn taken_by_dirge(name: &str) -> bool {
+    if crate::ui::slash::is_known_slash_command(&format!("/{name}")) {
+        return true;
+    }
+    #[cfg(feature = "plugin")]
+    if let Some(plugins) = crate::plugin::hook::global() {
+        use crate::sync_util::LockExt;
+        return plugins
+            .lock_ignore_poison()
+            .list_commands()
+            .iter()
+            .any(|(taken, _)| taken == name);
+    }
+    false
 }
 
 /// What `dirge.harness` reaches in this process: the TUI for notifications

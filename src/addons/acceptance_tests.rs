@@ -256,6 +256,16 @@ fn a_command_registered_with_a_leading_slash_runs_by_its_bare_name() {
     host.shutdown();
 }
 
+#[test]
+fn slash_command_names_dirge_dispatches_first_are_reserved() {
+    for taken in ["memory", "plan", "tasks", "addons", "help"] {
+        assert!(super::taken_by_dirge(taken), "{taken}");
+    }
+    for free in ["shout", "echo", "swarm"] {
+        assert!(!super::taken_by_dirge(free), "{free}");
+    }
+}
+
 /// A copy of one fixture addon the test may rewrite.
 struct Scratch(PathBuf);
 

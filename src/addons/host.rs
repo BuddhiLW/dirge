@@ -75,10 +75,19 @@ fn load_all(runtime: &dyn AddonRuntime, set: &LoadSet, host_config: &Value) -> L
     Loaded::new(addons, failures)
 }
 
+/// True for a slash command name that dirge dispatches before any addon
+/// command, which no addon command may therefore take.
+pub type Reserved = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+fn nothing_reserved() -> Mutex<Reserved> {
+    Mutex::new(Arc::new(|_: &str| false))
+}
+
 pub struct AddonHost {
     runtime: Arc<dyn AddonRuntime>,
     host_config: Value,
     loaded: Mutex<Loaded>,
+    reserved: Mutex<Reserved>,
 }
 
 impl std::fmt::Debug for AddonHost {
@@ -104,6 +113,7 @@ impl AddonHost {
             runtime,
             host_config: Value::Object(Default::default()),
             loaded: Mutex::new(Loaded::new(addons, failures)),
+            reserved: nothing_reserved(),
         }
     }
 
@@ -114,6 +124,7 @@ impl AddonHost {
             runtime,
             host_config,
             loaded: Mutex::new(loaded),
+            reserved: nothing_reserved(),
         }
     }
 
@@ -148,8 +159,14 @@ impl AddonHost {
         report
     }
 
+    /// Every addon loaded, each listing only the commands that run.
     pub fn addons(&self) -> Vec<AddonSummary> {
-        self.loaded.lock_ignore_poison().addons.clone()
+        let commands = self.commands();
+        let mut addons = self.loaded.lock_ignore_poison().addons.clone();
+        for addon in &mut addons {
+            addon.commands.retain(|c| commands.contains(c));
+        }
+        addons
     }
 
     pub fn failures(&self) -> Vec<LoadFailure> {
@@ -161,13 +178,39 @@ impl AddonHost {
         self.loaded.lock_ignore_poison().tools.clone()
     }
 
-    /// The slash commands addons registered, collisions already resolved.
-    pub fn commands(&self) -> Vec<CommandSpec> {
-        self.loaded.lock_ignore_poison().commands.clone()
+    /// Withhold every addon command whose name `reserved` holds, now and
+    /// after every reload, warning about each one withheld now.
+    pub fn reserve_commands(&self, reserved: Reserved) {
+        let commands = self.loaded.lock_ignore_poison().commands.clone();
+        for command in commands.iter().filter(|c| reserved(&c.name)) {
+            tracing::warn!(
+                target: "dirge::addon",
+                addon = %command.addon_id,
+                command = %command.name,
+                "addon command dropped: a built-in or plugin command already has that name"
+            );
+        }
+        *self.reserved.lock_ignore_poison() = reserved;
     }
 
-    /// The command typed as `/name`, if an addon registered it.
+    /// The slash commands addons registered, collisions resolved and
+    /// reserved names withheld.
+    pub fn commands(&self) -> Vec<CommandSpec> {
+        let reserved = self.reserved.lock_ignore_poison().clone();
+        let commands = self.loaded.lock_ignore_poison().commands.clone();
+        commands
+            .into_iter()
+            .filter(|c| !reserved(&c.name))
+            .collect()
+    }
+
+    /// The command typed as `/name`, if an addon registered it and the name
+    /// is not reserved.
     pub fn command(&self, name: &str) -> Option<CommandSpec> {
+        let reserved = self.reserved.lock_ignore_poison().clone();
+        if reserved(name) {
+            return None;
+        }
         self.loaded
             .lock_ignore_poison()
             .commands
@@ -498,5 +541,47 @@ pub(crate) mod tests {
             vec![r#"command a/go "fast please""#.to_string()]
         );
         assert!(host.command("missing").is_none());
+    }
+
+    fn names(commands: Vec<CommandSpec>) -> Vec<String> {
+        commands.into_iter().map(|c| c.name).collect()
+    }
+
+    #[test]
+    fn reserved_command_names_are_withheld_from_every_listing() {
+        let mut a = summary("a", &[], &[]);
+        a.commands = ["memory", "go"]
+            .iter()
+            .map(|n| CommandSpec {
+                addon_id: "a".into(),
+                name: n.to_string(),
+                description: String::new(),
+            })
+            .collect();
+        let (host, _) = host(ScriptedRuntime::default(), vec![a]);
+        assert!(host.command("memory").is_some(), "nothing reserved yet");
+
+        host.reserve_commands(Arc::new(|name: &str| name == "memory"));
+
+        assert_eq!(names(host.commands()), vec!["go"]);
+        assert_eq!(names(host.addons()[0].commands.clone()), vec!["go"]);
+        assert!(host.command("memory").is_none());
+        assert!(host.command("go").is_some());
+    }
+
+    #[test]
+    fn a_reservation_holds_across_reloads() {
+        let rt = ScriptedRuntime::default();
+        rt.load_answers.lock().unwrap().push_back(json!({
+            "id": "a",
+            "commands": [{"name": "plan"}, {"name": "go"}]
+        }));
+        let (host, _) = host(rt, vec![summary("a", &[], &[])]);
+        host.reserve_commands(Arc::new(|name: &str| name == "plan"));
+
+        host.reload(load_set(&["a.edn"]));
+
+        assert_eq!(names(host.commands()), vec!["go"]);
+        assert!(host.command("plan").is_none());
     }
 }
