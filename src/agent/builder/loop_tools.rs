@@ -1080,15 +1080,24 @@ pub async fn build_loop_tools(
         }
     }
 
-    // Clojure IAddon tools, after Janet plugin tools and under the same
-    // rule: a built-in name always wins.
+    // Clojure IAddon tools, after Janet plugin tools, under the rule
+    // `AnyAgent::upsert_loop_tools` applies on `/addons reload`: a built-in
+    // name always wins, and so does any tool registered above.
     #[cfg(feature = "addons")]
     if let Some(host) = crate::addons::global() {
+        let mut taken: std::collections::HashSet<String> =
+            tools.iter().map(|t| t.name().to_string()).collect();
         for tool in crate::addons::tool::loop_tools(&host, permission.clone(), ask_tx.clone()) {
-            if shadows_builtin(
-                crate::agent::agent_loop::tool::LoopTool::name(&tool),
-                "addon",
-            ) {
+            let name = crate::agent::agent_loop::tool::LoopTool::name(&tool).to_string();
+            if shadows_builtin(&name, "addon") {
+                continue;
+            }
+            if !taken.insert(name.clone()) {
+                tracing::warn!(
+                    target: "dirge::addon",
+                    tool = %name,
+                    "addon tool skipped: another tool already uses that name"
+                );
                 continue;
             }
             tools.push(Arc::new(tool));
