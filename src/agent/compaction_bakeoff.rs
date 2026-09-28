@@ -22,6 +22,8 @@
 //!   DIRGE_BAKEOFF_PROVIDER   deepseek | glm | custom | ...  (default deepseek)
 //!   DIRGE_BAKEOFF_MODEL      model id for that provider
 //!   DIRGE_BAKEOFF_BASE_URL   for `custom` — e.g. a local llama.cpp server
+//!   DIRGE_BAKEOFF_API_KEY_ENV  for `custom` on a hosted endpoint: the NAME of
+//!                            the env var holding its key
 //!   DIRGE_BAKEOFF_REPEATS    calls per arm (default 5)
 //!
 //!   cargo nextest run compaction_bakeoff --no-capture
@@ -55,12 +57,22 @@ pub(crate) fn bakeoff_summarizer() -> Option<(SummarizeFn, String)> {
     // without allow_insecure, which a local server needs.
     let mut providers: HashMap<String, crate::config::ProviderEntry> = HashMap::new();
     if let Ok(base_url) = std::env::var("DIRGE_BAKEOFF_BASE_URL") {
+        // A hosted OpenAI-compatible endpoint needs a real key; a local
+        // server ignores it. DIRGE_BAKEOFF_API_KEY_ENV names the variable
+        // holding the key, so the key itself never passes through here.
+        let api_key_env = std::env::var("DIRGE_BAKEOFF_API_KEY_ENV").ok();
+        let api_key = if api_key_env.is_some() {
+            None
+        } else {
+            Some("not-used".into())
+        };
         providers.insert(
             provider.clone(),
             crate::config::ProviderEntry {
                 provider_type: Some("custom".into()),
                 base_url: Some(base_url),
-                api_key: Some("not-used".into()),
+                api_key,
+                api_key_env,
                 allow_insecure: true,
                 ..Default::default()
             },
