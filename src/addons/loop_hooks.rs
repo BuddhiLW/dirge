@@ -7,6 +7,7 @@
 //! earlier hook short-circuits, args flow forward, contexts concatenate.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -15,11 +16,12 @@ use super::host::AddonHost;
 use super::policy;
 use crate::agent::agent_loop::hooks::{
     AfterToolCallContext, AfterToolCallFn, BeforeToolCallContext, BeforeToolCallFn,
-    BeforeToolCallReturn,
+    BeforeToolCallReturn, OpenRunFn, RunOpening,
 };
 use crate::agent::agent_loop::result::{AfterToolCallResult, BeforeToolCallResult, LoopToolResult};
 use crate::agent::agent_loop::types::LoopConfig;
 use crate::agent::command_hooks::loop_hooks::{compose_after, compose_before};
+use crate::runtime::blocking_within;
 
 /// `:dirge/before-tool-call`, adapted onto the loop's slot.
 pub fn before_hook(host: Arc<AddonHost>) -> BeforeToolCallFn {
@@ -123,19 +125,63 @@ pub fn with_system_prompt(
     )
 }
 
-/// `prompt` with `:dirge/on-prompt` contributions prepended as reminders.
-pub fn with_prompt_context(host: &AddonHost, prompt: String, session_id: Option<&str>) -> String {
-    let ctx = json!({ "prompt": prompt, "session-id": session_id });
-    let notes: Vec<String> = host
-        .texts(HookPoint::OnPrompt, &ctx)
+/// `:dirge/on-prompt` contributions for `prompt`, as reminders.
+pub fn prompt_reminders(
+    host: &AddonHost,
+    prompt: &str,
+    session_id: Option<&str>,
+    first_prompt: bool,
+) -> Vec<String> {
+    let ctx = json!({ "prompt": prompt, "session-id": session_id, "first-prompt?": first_prompt });
+    host.texts(HookPoint::OnPrompt, &ctx)
         .iter()
         .map(|t| policy::reminder(HookPoint::OnPrompt, t))
-        .collect();
-    if notes.is_empty() {
-        prompt
-    } else {
-        format!("{}\n\n{prompt}", notes.join("\n"))
+        .collect()
+}
+
+/// Longest `:dirge/system-prompt` and `:dirge/on-prompt` may take, together,
+/// before a run opens without them.
+pub const PROMPT_HOOKS_BUDGET: Duration = Duration::from_secs(30);
+
+/// The step that runs `:dirge/system-prompt` and `:dirge/on-prompt` as a run
+/// of `session_id` opens, on a blocking thread of the agent runtime, where
+/// addon code may reach MCP. `None` when no addon listens on either.
+pub fn open_run(
+    host: Arc<AddonHost>,
+    session_id: Option<String>,
+    first_prompt: bool,
+) -> Option<OpenRunFn> {
+    if !host.listens(HookPoint::SystemPrompt) && !host.listens(HookPoint::OnPrompt) {
+        return None;
     }
+    Some(Arc::new(move |opening: RunOpening| {
+        let (host, session_id) = (host.clone(), session_id.clone());
+        Box::pin(async move {
+            let unchanged = opening.clone();
+            let amended = blocking_within(PROMPT_HOOKS_BUDGET, move || {
+                amend_opening(&host, opening, session_id.as_deref(), first_prompt)
+            })
+            .await;
+            amended.unwrap_or_else(|why| {
+                tracing::warn!(target: "dirge::addon", %why, "addon prompt hooks skipped");
+                unchanged
+            })
+        })
+    }))
+}
+
+/// `opening` with the system-prompt texts appended and the on-prompt
+/// reminders added.
+fn amend_opening(
+    host: &AddonHost,
+    mut opening: RunOpening,
+    session_id: Option<&str>,
+    first_prompt: bool,
+) -> RunOpening {
+    opening.system_prompt = with_system_prompt(host, opening.system_prompt, session_id);
+    let reminders = prompt_reminders(host, &opening.prompt, session_id, first_prompt);
+    opening.reminders.extend(reminders);
+    opening
 }
 
 fn append(base: String, texts: Vec<String>, sep: &str) -> String {
@@ -244,14 +290,39 @@ mod tests {
     }
 
     #[test]
-    fn prompt_context_is_prepended_as_a_reminder() {
+    fn prompt_context_becomes_a_reminder() {
         let host = host_with(
             &[HookPoint::OnPrompt],
             vec![reply(json!({"context": "3 lings running"}))],
         );
-        let out = with_prompt_context(&host, "do it".into(), Some("s1"));
-        assert!(out.starts_with("<system-reminder>"));
-        assert!(out.contains("3 lings running"));
-        assert!(out.ends_with("\n\ndo it"));
+        let notes = prompt_reminders(&host, "do it", Some("s1"), true);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].starts_with("<system-reminder>"));
+        assert!(notes[0].contains("3 lings running"));
+    }
+
+    #[tokio::test]
+    async fn the_open_run_step_amends_the_opening() {
+        let host = host_with(
+            &[HookPoint::SystemPrompt, HookPoint::OnPrompt],
+            vec![reply(json!("addon text"))],
+        );
+        let open = open_run(host, Some("s1".into()), true).expect("listened");
+        let opening = open(RunOpening {
+            system_prompt: "base".into(),
+            prompt: "do it".into(),
+            reminders: Vec::new(),
+        })
+        .await;
+        assert_eq!(opening.system_prompt, "base\n\naddon text");
+        assert_eq!(opening.prompt, "do it");
+        assert_eq!(opening.reminders.len(), 1);
+        assert!(opening.reminders[0].contains("addon text"));
+    }
+
+    #[test]
+    fn no_step_when_no_addon_listens_on_the_prompt() {
+        let deaf = host_with(&[HookPoint::BeforeToolCall], vec![reply(json!("never"))]);
+        assert!(open_run(deaf, None, true).is_none());
     }
 }

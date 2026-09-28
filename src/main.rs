@@ -586,6 +586,10 @@ async fn main() -> anyhow::Result<()> {
     // their tools and hooks are part of the first run.
     #[cfg(feature = "addons")]
     crate::addons::install_from_config(&cfg);
+    // The addons hear each session start and end, including through a host
+    // `/addons reload` starts later.
+    #[cfg(feature = "addons")]
+    crate::addons::lifecycle::install(&cfg.addons.clone().unwrap_or_default());
     crate::compression::init_from_config(cfg.compression.clone().unwrap_or_default());
     crate::compression::set_cli_disabled(cli.no_compression);
     crate::prompt_cache::init_from_config(cfg.prompt_cache.as_ref().and_then(|c| c.ttl.as_deref()));
@@ -1748,11 +1752,18 @@ async fn main() -> anyhow::Result<()> {
         // it down here. The interactive path instead hands its manager to
         // run_interactive, which owns the shutdown; the old shared
         // post-run shutdown is gone because `mcp_manager` is conditionally
-        // moved into run_interactive and can't be named afterward.
-        #[cfg(feature = "mcp")]
-        if let Some(mgr) = mcp_manager {
-            mgr.shutdown().await;
-        }
+        // moved into run_interactive and can't be named afterward. The
+        // session ends first, while its listeners can still reach MCP.
+        crate::agent::session_lifecycle::end_then(
+            crate::agent::session_lifecycle::EndCause::Print,
+            async {
+                #[cfg(feature = "mcp")]
+                if let Some(mgr) = mcp_manager {
+                    mgr.shutdown().await;
+                }
+            },
+        )
+        .await;
     } else {
         #[cfg(feature = "loop")]
         if cli.loop_mode {
@@ -2052,6 +2063,10 @@ async fn main() -> anyhow::Result<()> {
             let (wake_tx, wake_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
             let perm = permission.clone();
             let ask = ask_tx.clone();
+            // A session starting before the servers connect waits for them,
+            // within a bound, so its addon listeners can reach them.
+            #[cfg(feature = "addons")]
+            crate::addons::mcp::expect();
             tokio::spawn(async move {
                 let mgr = extras::mcp::McpClientManager::connect_all(&servers).await;
                 // Addon code reaches the same connections through

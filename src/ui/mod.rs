@@ -5406,11 +5406,18 @@ pub async fn run_interactive(
     // path the connected manager is owned here (delivered by the
     // background loader), so we close its child processes on the way out
     // rather than relying on drop. `None` when MCP never finished
-    // connecting (or there were no servers) — nothing to do.
-    #[cfg(feature = "mcp")]
-    if let Some(mgr) = mcp_manager.take() {
-        mgr.shutdown().await;
-    }
+    // connecting (or there were no servers), nothing to do. The session
+    // ends first, while its listeners can still reach MCP.
+    crate::agent::session_lifecycle::end_then(
+        crate::agent::session_lifecycle::EndCause::Quit,
+        async {
+            #[cfg(feature = "mcp")]
+            if let Some(mgr) = mcp_manager.take() {
+                mgr.shutdown().await;
+            }
+        },
+    )
+    .await;
 
     Ok(())
 }

@@ -201,11 +201,25 @@
     (catch #?(:clj Throwable :default :default) t
       (failure t))))
 
+(def hook-keyword-fields
+  "Context fields a hook reads as keywords, by hook key. They reach the host
+   as strings."
+  {:dirge/session-end [:reason]})
+
+(defn hook-ctx
+  "`ctx` as the hook keyed `k` reads it."
+  [k ctx]
+  (reduce (fn [c field]
+            (cond-> c (string? (get c field)) (update field keyword)))
+          ctx
+          (get hook-keyword-fields k)))
+
 (defn run-hook
   "Call every loaded addon's `hook-key` hook with `ctx`, in load order:
    a vector of {:addon id :ok result} / {:addon id :error msg}."
   [hook-key ctx]
-  (let [k (keyword hook-key)]
+  (let [k   (keyword hook-key)
+        ctx (hook-ctx k ctx)]
     (vec
      (for [id @!order
            :let [f (get-in @!addons [id :hooks k])]
