@@ -1086,6 +1086,21 @@ pub async fn build_loop_tools(
         }
     }
 
+    // Clojure IAddon tools, after Janet plugin tools and under the same
+    // rule: a built-in name always wins.
+    #[cfg(feature = "addons")]
+    if let Some(host) = crate::addons::global() {
+        for tool in crate::addons::tool::loop_tools(&host, permission.clone(), ask_tx.clone()) {
+            if shadows_builtin(
+                crate::agent::agent_loop::tool::LoopTool::name(&tool),
+                "addon",
+            ) {
+                continue;
+            }
+            tools.push(Arc::new(tool));
+        }
+    }
+
     // Phase-3: dynamic-tool-search opt-in. When enabled, take a
     // metadata snapshot of EVERY tool registered above (registry
     // includes plugin + MCP + semantic + built-ins), allocate the
