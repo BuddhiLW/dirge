@@ -4,8 +4,10 @@
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use cljrs_gc::GcPtr;
 use cljrs_runtime::env::env::GlobalEnv;
@@ -18,6 +20,7 @@ use super::{bridge, harness};
 use crate::addons::domain::{HookPoint, HookReply};
 use crate::addons::port::{AddonRuntime, Harness};
 use crate::addons::{layout, policy};
+use crate::sync_util::LockExt;
 
 /// Stack for the isolate thread. The tree-walking evaluator recurses deeply;
 /// the cljrs CLI runs with the same 64 MiB.
@@ -31,6 +34,15 @@ const HOST_SRC: &str = include_str!("host.cljc");
 const BRIDGE_NS: &str = "dirge.bridge";
 
 const GONE: &str = "the addon isolate has stopped";
+
+/// What a caller on the event-loop thread gets, instead of waiting, while a
+/// command from another thread is unanswered; the prefix of what it gets
+/// when its own answer does not come within [`EVENT_LOOP_WAIT`].
+pub const BUSY: &str = "addon isolate busy";
+
+/// Longest a caller on the event-loop thread waits for an answer, loads
+/// excepted.
+const EVENT_LOOP_WAIT: Duration = Duration::from_secs(5);
 
 enum Command {
     Load {
@@ -72,6 +84,18 @@ enum Command {
     },
 }
 
+impl Command {
+    /// How long a caller on the event-loop thread waits for the answer.
+    /// `None` for a load: its answer is what dirge registers for the addon,
+    /// so it is always awaited.
+    fn event_loop_wait(&self) -> Option<Duration> {
+        match self {
+            Command::Load { .. } => None,
+            _ => Some(EVENT_LOOP_WAIT),
+        }
+    }
+}
+
 /// A command, and whether its caller is the thread running dirge's event
 /// loop. dirge runs a single-threaded runtime, so that caller stops the loop
 /// until the answer comes: nothing the isolate does meanwhile may wait on it
@@ -95,7 +119,11 @@ pub fn mark_event_loop_thread() {
 /// Handle to the isolate thread. Cloning is not offered: one owner, shared
 /// behind the host's `Arc`.
 pub struct Isolate {
-    tx: Sender<Envelope>,
+    /// Held across each busy check and the send it clears.
+    tx: Mutex<Sender<Envelope>>,
+    /// Commands sent from threads other than the event loop and not yet
+    /// answered.
+    off_loop: AtomicUsize,
 }
 
 impl Isolate {
@@ -119,16 +147,70 @@ impl Isolate {
         ready_rx
             .recv()
             .map_err(|_| "the addon isolate died while booting".to_string())??;
-        Ok(Self { tx })
+        Ok(Self {
+            tx: Mutex::new(tx),
+            off_loop: AtomicUsize::new(0),
+        })
     }
 
+    /// Send a command and wait for its answer. On the event-loop thread:
+    /// [`BUSY`] at once while a command from another thread is unanswered,
+    /// and an error starting with [`BUSY`] when the answer takes longer than
+    /// the command's [`Command::event_loop_wait`].
     fn ask<T>(&self, command: impl FnOnce(Sender<T>) -> Command) -> Result<T, String> {
         let (reply, answer) = channel();
         let on_event_loop = EVENT_LOOP.with(Cell::get);
-        self.tx
-            .send((on_event_loop, command(reply)))
+        let command = command(reply);
+        let bound = command.event_loop_wait().filter(|_| on_event_loop);
+        let _unanswered = self.send(on_event_loop, command)?;
+        match bound {
+            Some(bound) => answer.recv_timeout(bound).map_err(|e| match e {
+                RecvTimeoutError::Timeout => {
+                    format!("{BUSY}: no answer within {}s", bound.as_secs())
+                }
+                RecvTimeoutError::Disconnected => GONE.to_string(),
+            }),
+            None => answer.recv().map_err(|_| GONE.to_string()),
+        }
+    }
+
+    /// Queue `command`. From the event-loop thread it is refused with
+    /// [`BUSY`] while a command from another thread is unanswered; from any
+    /// other thread it counts as unanswered until the returned guard drops.
+    fn send(
+        &self,
+        on_event_loop: bool,
+        command: Command,
+    ) -> Result<Option<Unanswered<'_>>, String> {
+        let tx = self.tx.lock_ignore_poison();
+        let unanswered = if on_event_loop {
+            if self.off_loop.load(Ordering::SeqCst) > 0 {
+                return Err(BUSY.to_string());
+            }
+            None
+        } else {
+            Some(Unanswered::count(&self.off_loop))
+        };
+        tx.send((on_event_loop, command))
             .map_err(|_| GONE.to_string())?;
-        answer.recv().map_err(|_| GONE.to_string())
+        Ok(unanswered)
+    }
+}
+
+/// One command from off the event loop, counted in `Isolate::off_loop`
+/// until dropped.
+struct Unanswered<'a>(&'a AtomicUsize);
+
+impl<'a> Unanswered<'a> {
+    fn count(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
+impl Drop for Unanswered<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -188,11 +270,18 @@ impl AddonRuntime for Isolate {
             ctx: ctx.clone(),
             reply,
         })
-        .unwrap_or_default()
+        .unwrap_or_else(|error| {
+            tracing::warn!(target: "dirge::addon", hook = point.key(), %error, "addon hooks skipped");
+            Vec::new()
+        })
     }
 
     fn shutdown(&self) {
-        let _ = self.ask(|reply| Command::Shutdown { reply });
+        if let Err(error) = self.ask(|reply| Command::Shutdown { reply })
+            && error != GONE
+        {
+            tracing::warn!(target: "dirge::addon", %error, "addon shutdown skipped");
+        }
     }
 }
 
