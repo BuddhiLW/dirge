@@ -293,6 +293,7 @@ Reciprocal Rank Fusion. It needs an OpenAI-compatible embeddings endpoint.
 | `embed_api_key_env` | string  | Name of the env var holding the API key (the key itself is never stored in config). Omit for a keyless local endpoint. |
 | `verbatim_pre_recall` | boolean | Each turn, auto-search memory on the verbatim user message and inject the hits as a supplemental context note (separate from the frozen system-prompt snapshot — it never changes the cached prefix). Surfaces relevant memory the agent wouldn't think to look up. Works with BM25 or hybrid. Default `false`. |
 | `confirm_writes`    | boolean | Require human confirmation before any memory `add` is stored. See [Confirming memory writes](#confirming-memory-writes). Default `false`. |
+| `provider`          | string  | Which backend serves memory. Default `sqlite`, the builtin per-project and global stores. `mcp` and `addon` are reserved: selecting one today leaves the session without memory and prints a warning, rather than falling back to `sqlite`. |
 
 ### Confirming memory writes
 

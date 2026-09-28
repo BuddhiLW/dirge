@@ -521,6 +521,32 @@ pub struct MemoryConfig {
     /// review and memory curator forks as well as the agent's own writes.
     /// Default off — it changes long-standing behavior.
     pub confirm_writes: Option<bool>,
+    /// Which backend serves memory. Default `sqlite`, the builtin
+    /// per-project and global stores. `mcp` and `addon` are reserved:
+    /// selecting one today leaves the session without memory, with a
+    /// warning, rather than silently falling back to `sqlite`.
+    pub provider: Option<MemoryBackend>,
+}
+
+/// The `memory.provider` backends.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryBackend {
+    #[default]
+    Sqlite,
+    Mcp,
+    Addon,
+}
+
+impl MemoryBackend {
+    /// The name as written in config.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MemoryBackend::Sqlite => "sqlite",
+            MemoryBackend::Mcp => "mcp",
+            MemoryBackend::Addon => "addon",
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
