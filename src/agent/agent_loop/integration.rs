@@ -563,6 +563,12 @@ pub struct LoopSpawnConfig {
     /// Install the Clojure addon host's tool-call hooks (feature `addons`).
     /// Set for the main session only.
     pub addon_hooks: bool,
+
+    /// Amends the run's system prompt and first turn inside the run's task,
+    /// before the first model call, so slow work there (addon hooks
+    /// reaching MCP) never runs on the caller's thread. `None` opens the
+    /// run as configured.
+    pub open_run: Option<super::hooks::OpenRunFn>,
 }
 
 impl LoopSpawnConfig {
@@ -619,6 +625,7 @@ impl LoopSpawnConfig {
             memory_provider: None,
             command_hooks: None,
             addon_hooks: false,
+            open_run: None,
         }
     }
 }
@@ -814,26 +821,9 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
     // loop never adds or removes tools mid-run, so one snapshot holds.
     let bridge_tools: std::collections::HashSet<String> =
         context.tools.iter().map(|t| t.name().to_string()).collect();
-    // Seed the active-turn user message from `initial_prompt`, appending
-    // a `UserPart::Image` per fresh-paste image (the resume path carries
-    // its images through history as `dirge-asset:` sentinels instead).
-    let initial_content = {
-        // Drop an empty caption when images are present — a bare
-        // `text("")` ahead of an image serializes to an empty text
-        // content block the provider rejects. Keep it when there are no
-        // images so a genuinely empty turn still has one (text) part.
-        let mut parts = Vec::new();
-        if !cfg.initial_prompt.is_empty() || cfg.initial_prompt_images.is_empty() {
-            parts.push(super::message::UserPart::text(cfg.initial_prompt.clone()));
-        }
-        for img in &cfg.initial_prompt_images {
-            parts.push(super::message::UserPart::image(img.clone()));
-        }
-        parts
-    };
-    let prompts = vec![LoopMessage::User(UserMessage {
-        content: initial_content,
-    })];
+    let initial_prompt = cfg.initial_prompt;
+    let initial_prompt_images = cfg.initial_prompt_images;
+    let open_run = cfg.open_run;
     let stream_fn = cfg.stream_fn;
     let summarize_fn = cfg.summarize_fn.clone();
     // dirge-h5tv: capture the provider before the move-closure so
@@ -865,6 +855,24 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         let (loop_tx, mut loop_rx) = mpsc::channel(256);
         let event_tx_inner = event_tx.clone();
         let signal_inner = signal_for_task.clone();
+
+        // Open the run here, on the agent runtime: what amends the opening
+        // may wait on addon code and MCP servers, which the caller's thread
+        // must not.
+        let initial_text = match open_run {
+            Some(open) => {
+                let opening = open(super::hooks::RunOpening {
+                    system_prompt: std::mem::take(&mut context.system_prompt),
+                    prompt: initial_prompt,
+                    reminders: Vec::new(),
+                })
+                .await;
+                context.system_prompt = opening.system_prompt.clone();
+                opening.first_turn_text()
+            }
+            None => initial_prompt,
+        };
+        let prompts = vec![initial_user_message(initial_text, &initial_prompt_images)];
 
         // Heal messages loaded from disk before the first LLM call.
         // Shrinks oversized tool results and drops unpaired tool
@@ -949,6 +957,24 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         task,
         signal,
     }
+}
+
+/// The active-turn user message: `text`, then a `UserPart::Image` per
+/// fresh-paste image (the resume path carries its images through history as
+/// `dirge-asset:` sentinels instead).
+fn initial_user_message(text: String, images: &[super::message::ImageRef]) -> LoopMessage {
+    // Drop an empty caption when images are present: a bare `text("")`
+    // ahead of an image serializes to an empty text content block the
+    // provider rejects. Keep it when there are no images so a genuinely
+    // empty turn still has one (text) part.
+    let mut content = Vec::new();
+    if !text.is_empty() || images.is_empty() {
+        content.push(super::message::UserPart::text(text));
+    }
+    for img in images {
+        content.push(super::message::UserPart::image(img.clone()));
+    }
+    LoopMessage::User(UserMessage { content })
 }
 
 /// Pass-through `convert_to_llm`. Phase 4.5f-2 will substitute a

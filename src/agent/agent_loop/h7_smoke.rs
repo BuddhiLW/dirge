@@ -338,6 +338,7 @@ async fn h7_scenario_1_simple_text() {
         memory_provider: None,
         command_hooks: None,
         addon_hooks: false,
+        open_run: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, response) = drain_to_done(runner).await;
@@ -443,6 +444,7 @@ async fn h7_scenario_2_turn_boundaries() {
         memory_provider: None,
         command_hooks: None,
         addon_hooks: false,
+        open_run: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, response) = drain_to_done(runner).await;
@@ -582,6 +584,7 @@ async fn h7_scenario_5_auth_error_surfaces() {
         memory_provider: None,
         command_hooks: None,
         addon_hooks: false,
+        open_run: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, _) = drain_to_done(runner).await;
@@ -774,6 +777,7 @@ async fn h7_scenario_3_tool_dispatch() {
         memory_provider: None,
         command_hooks: None,
         addon_hooks: false,
+        open_run: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, response) = drain_to_done(runner).await;
@@ -927,6 +931,7 @@ async fn h7_glm_scenario_1_simple_text() {
         memory_provider: None,
         command_hooks: None,
         addon_hooks: false,
+        open_run: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, response) = drain_to_done(runner).await;
@@ -1088,6 +1093,7 @@ async fn h7_glm_scenario_3_tool_dispatch() {
         memory_provider: None,
         command_hooks: None,
         addon_hooks: false,
+        open_run: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, response) = drain_to_done(runner).await;
@@ -1201,6 +1207,7 @@ fn cerebras_spawn_config(
         memory_provider: None,
         command_hooks: None,
         addon_hooks: false,
+        open_run: None,
     }
 }
 
