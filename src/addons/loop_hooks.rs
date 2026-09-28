@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 use super::domain::{BeforeOutcome, HookPoint};
 use super::host::AddonHost;
 use super::policy;
+use crate::agent::addon_hooks::AddonHooks;
+use crate::agent::agent_loop::LoopTool;
 use crate::agent::agent_loop::hooks::{
     AfterToolCallContext, AfterToolCallFn, BeforeToolCallContext, BeforeToolCallFn,
     BeforeToolCallReturn, OpenRunFn, RunOpening,
@@ -21,6 +23,8 @@ use crate::agent::agent_loop::hooks::{
 use crate::agent::agent_loop::result::{AfterToolCallResult, BeforeToolCallResult, LoopToolResult};
 use crate::agent::agent_loop::types::LoopConfig;
 use crate::agent::command_hooks::loop_hooks::{compose_after, compose_before};
+use crate::permission::ask::AskSender;
+use crate::permission::checker::PermCheck;
 use crate::runtime::blocking_within;
 
 /// `:dirge/before-tool-call`, adapted onto the loop's slot.
@@ -196,6 +200,37 @@ fn cwd() -> Value {
     std::env::current_dir()
         .map(|p| Value::String(p.display().to_string()))
         .unwrap_or(Value::Null)
+}
+
+/// The process-wide addon host as the agent's [`AddonHooks`], looked up on
+/// every call: `/addons reload` may start it after boot.
+pub struct LiveAddonHooks;
+
+impl AddonHooks for LiveAddonHooks {
+    fn loop_tools(
+        &self,
+        permission: Option<PermCheck>,
+        ask_tx: Option<AskSender>,
+    ) -> Vec<Arc<dyn LoopTool>> {
+        super::global()
+            .map(|host| {
+                super::tool::loop_tools(&host, permission, ask_tx)
+                    .into_iter()
+                    .map(|tool| Arc::new(tool) as Arc<dyn LoopTool>)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn install_tool_hooks(&self, config: &mut LoopConfig) {
+        if let Some(host) = super::global() {
+            install(config, &host);
+        }
+    }
+
+    fn open_run(&self, session_id: Option<String>, first_prompt: bool) -> Option<OpenRunFn> {
+        super::global().and_then(|host| open_run(host, session_id, first_prompt))
+    }
 }
 
 #[cfg(test)]

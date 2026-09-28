@@ -560,9 +560,9 @@ pub struct LoopSpawnConfig {
     /// `PostToolUse`, and its stop event). `None` installs none.
     pub command_hooks: Option<crate::agent::command_hooks::HookBinding>,
 
-    /// Install the Clojure addon host's tool-call hooks (feature `addons`).
-    /// Set for the main session only.
-    pub addon_hooks: bool,
+    /// Addons whose tool-call hooks this loop installs. `None` installs
+    /// none; set for the main session only.
+    pub addon_hooks: Option<std::sync::Arc<dyn crate::agent::addon_hooks::AddonHooks>>,
 
     /// Amends the run's system prompt and first turn inside the run's task,
     /// before the first model call, so slow work there (addon hooks
@@ -624,7 +624,7 @@ impl LoopSpawnConfig {
             bg_store: None,
             memory_provider: None,
             command_hooks: None,
-            addon_hooks: false,
+            addon_hooks: None,
             open_run: None,
         }
     }
@@ -804,11 +804,8 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         );
     }
 
-    #[cfg(feature = "addons")]
-    if cfg.addon_hooks
-        && let Some(host) = crate::addons::global()
-    {
-        crate::addons::loop_hooks::install(&mut loop_config, &host);
+    if let Some(addons) = &cfg.addon_hooks {
+        addons.install_tool_hooks(&mut loop_config);
     }
 
     let mut context = Context {
@@ -1715,6 +1712,41 @@ mod tests {
             .filter(|e| matches!(e, AgentEvent::TurnEnd { .. }))
             .count();
         assert_eq!(turn_ends, 1, "expected single turn; got {turn_ends}");
+    }
+
+    /// The loop installs the tool-call hooks of the addons it is handed.
+    #[tokio::test]
+    async fn the_loop_installs_the_tool_hooks_of_the_addons_it_is_handed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingAddons(AtomicUsize);
+        impl crate::agent::addon_hooks::AddonHooks for CountingAddons {
+            fn loop_tools(
+                &self,
+                _: Option<crate::permission::checker::PermCheck>,
+                _: Option<crate::permission::ask::AskSender>,
+            ) -> Vec<Arc<dyn crate::agent::agent_loop::LoopTool>> {
+                Vec::new()
+            }
+            fn install_tool_hooks(&self, _: &mut crate::agent::agent_loop::types::LoopConfig) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn open_run(
+                &self,
+                _: Option<String>,
+                _: bool,
+            ) -> Option<crate::agent::agent_loop::hooks::OpenRunFn> {
+                None
+            }
+        }
+
+        let addons = Arc::new(CountingAddons(AtomicUsize::new(0)));
+        let mut cfg = LoopSpawnConfig::minimal(canned_factory(vec![text_response("done")]), "hi");
+        cfg.addon_hooks = Some(addons.clone());
+        let runner = spawn_loop_runner(cfg);
+        let _ = drain(runner.event_rx).await;
+        let _ = runner.task.await;
+        assert_eq!(addons.0.load(Ordering::SeqCst), 1);
     }
 
     fn agent_event_kind(e: &AgentEvent) -> &'static str {

@@ -204,7 +204,6 @@ pub type OpenRunFn =
     Arc<dyn Fn(RunOpening) -> Pin<Box<dyn Future<Output = RunOpening> + Send>> + Send + Sync>;
 
 /// `first`, then `second` on what `first` answered.
-#[cfg_attr(not(feature = "addons"), allow(dead_code))]
 pub fn compose_open_run(first: Option<OpenRunFn>, second: Option<OpenRunFn>) -> Option<OpenRunFn> {
     match (first, second) {
         (Some(first), Some(second)) => Some(Arc::new(move |opening: RunOpening| {
