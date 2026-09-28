@@ -177,40 +177,115 @@ DIRGE_BAKEOFF=1 DIRGE_BAKEOFF_PROVIDER=venice \
   cargo test compaction_bakeoff -- --nocapture --test-threads=1
 ```
 
-Record the provider balance before and after each batch for measured spend.
+For measured spend, poll the provider balance every 20 s during each batch and
+sum the drops between consecutive samples. Do not subtract the last sample from
+the first: a top-up during the batch would then read as negative spend.
 
 ## Baseline results
 
-**Status: partial.** The first collection stopped at n = 7 of the planned 20
-runs, so the A/A split-half noise floor is not yet established and nothing
-below may be used as a decision threshold. Re-run the I2 commands above to
-n = 20 before judging any candidate.
+**Status: partial, n = 15 of 20.** I2 has 15 valid runs (an A/A split of 10
+control and 5 treatment, both arms the unmodified builtin). The last 5
+treatment runs and the I1 live recall probe are still open; see "What is still
+open" below. Treat the A/A comparison as a rough noise floor only: one half has
+five runs.
 
-I2, fold-chain, builtin arm, deepseek-v4-flash via Venice, `context_target=26000`
-(measured; `scripts/fold-report.py` over the kept run directories of two
-concurrent batches, pooled):
+### I2, fold-chain, builtin arm
+
+deepseek-v4-flash via Venice, `context_target=26000`, debug build of
+`economy-p0` @ 914b09de, base config as in "Running it", `-n 5 -s fold-chain
+-t 60`, two concurrent batches (measured; `scripts/fold-report.py
+/tmp/loop-ab.yjdCaH /tmp/loop-ab.cO6a0U --price-in 0.138 --price-cached 0.028
+--price-out 0.275 --pool builtin --compare control treatment`):
 
 | Metric | Value |
 |---|---|
-| runs | 7 (every run folded: 7/7) |
-| pass | 4/7 = 0.57, Wilson 95% [0.25, 0.84] |
-| passes without a bypass | 1/7 |
-| runs that bypassed (re-traversed the chain outside the reads under test) | 4/7 |
-| halted by the ladder | 2/7 (other failures 1) |
-| folds per run | 2.86 [2.02, 3.69] |
-| re-reads per run | 18.9 [4.6, 33.2] |
-| turns | 29.4 [22.9, 36.0] |
-| input tokens per run | 509k [392k, 627k] (cached 456k) |
-| output tokens per run | 7.7k [3.0k, 12.4k] |
-| cost per run (token-priced) | $0.0223 [0.0161, 0.0285] |
-| cost per pass (token-priced) | $0.039 |
+| runs | 15 (every run folded: 15/15) |
+| pass | 13/15 = 0.87, Wilson 95% [0.62, 0.96] |
+| passes without a bypass | 6/15 = 0.40, Wilson 95% [0.20, 0.64] |
+| runs that bypassed (shell, grep or find outside the reads under test) | 7/15 |
+| halted by the ladder | 0/15 (other failures 2) |
+| folds per run | 3.53 [3.03, 4.04] |
+| re-reads per run | 24.7 [17.4, 32.0] |
+| turns | 30.0 [27.4, 32.6] |
+| input tokens per run | 520k [474k, 565k] (cached 410k) |
+| output tokens per run | 8.4k [7.1k, 9.7k] |
+| cost per run (token-priced) | $0.0290 [0.0258, 0.0322] |
+| cost per run (balance-measured) | at most $0.0367 |
+| cost per pass (token-priced) | $0.0334 |
+| cost per pass (balance-measured) | at most $0.0423 |
 
-Measured spend was not recorded for this collection; per the note above,
-token-priced cost undercounts a folding session by roughly half.
+**Measured spend.** The Venice balance was polled every 20 s during the
+batches (`GET /api/v1/api_keys/rate_limits`, `data.balances.USD`). Spend is the
+sum of the drops between consecutive samples, never the first sample minus the
+last: the account was topped up by about $100 at 13:57, mid-batch, and a
+start-minus-end delta would have read that as negative spend. The two batches
+spent $0.5502 between 13:41 and 15:18. That figure also covers two runs that
+were killed mid-flight when the session was interrupted (see below), so
+$0.5502 / 15 = $0.0367 per completed run is an upper bound. The session
+counters price the same 15 runs at $0.4347, so they undercount a folding
+session by at most 1.27x here (earlier smokes said 1.4x to 2x; the
+summarizer's side calls are the part the counters miss).
 
-Observation (measured, n = 7): after a fold the model re-reads pages it had
-already read and often escapes to a shell traversal of the chain; only one run
-in seven passed without that escape. This is the execution-state loss a fold
-replacement should reduce, and re-reads per run is the metric that shows it.
+### A/A noise floor (control vs treatment, identical configuration)
 
-I1 recall: not yet run for the baseline.
+| Metric | control (n = 10) | treatment (n = 5) | difference |
+|---|---|---|---|
+| pass | 8/10 [0.49, 0.94] | 5/5 [0.57, 1.00] | 0.20 |
+| passes without a bypass | 4/10 | 2/5 | 0.00 |
+| re-reads per run | 27.4 [16.5, 38.3] | 19.2 [13.0, 25.4] | 8.2 |
+| folds per run | 3.50 | 3.60 | 0.10 |
+| turns | 29.9 | 30.2 | 0.3 |
+| input tokens per run | 520k | 518k | 2k |
+| cost per run (token-priced) | $0.0288 | $0.0294 | $0.0006 |
+
+Paired by (batch, repeat): 5 pairs, discordant 0 control-only vs 1
+treatment-only pass, exact sign test p = 1.0; paired input-token delta +1.5k
+[-195k, +198k]. Two identical arms differ by 0.20 in pass rate and by 8 re-reads
+per run at this sample size, so a candidate must beat those gaps before either
+metric can be read as an effect. Token means agree to within 0.5%, but the
+per-run spread is wide (the paired CI spans about +-200k), so a token claim
+needs many more pairs than five.
+
+Observation (measured, n = 15): every run folded 3 to 4 times, and after a fold
+the model goes back for pages it had already read (about 25 re-reads per run on
+a 24-file chain). Nearly half the runs (7/15) also escaped to a shell or grep
+traversal of the chain; only 6/15 passed while relying on the fold alone. The
+raw pass rate (0.87) is inflated by those escapes. Pass-without-bypass and
+re-reads per run are the numbers a fold replacement has to move.
+
+### How this collection ran, and why it stopped at 15
+
+- Two concurrent batches (`/tmp/loop-ab.yjdCaH`, `/tmp/loop-ab.cO6a0U`) were
+  started at 13:41. The session running them was killed at about 15:18, after
+  batch 1 had finished control 5/5 and treatment 3/5, and batch 2 control 5/5
+  and treatment 2/5. The two runs in flight (batch 1 treatment 4, batch 2
+  treatment 3) were discarded; their spend is inside the $0.5502 above.
+- A resume attempt ran a third batch (`/tmp/loop-ab.Ll5qUA`) to supply the
+  missing 5 treatment runs. `loop-ab.sh` cannot run one arm alone, so the
+  control arm was disabled on purpose with
+  `-A providers.venice.base_url=http://127.0.0.1:9/v1`: dirge rejects the
+  insecure URL at config load and exits before any request, so those five
+  control rows read turns=0, no gates line, no session file and cost nothing.
+  They are not runs and are excluded. The resume was then stopped by request
+  while its first treatment run was in flight; that run was discarded too. The
+  balance fell $0.0054 while no batch was running (15:18 to 15:32, most likely
+  late billing of the killed runs) and $0.0072 during the resume, so total
+  measured spend for the whole collection is $0.5628.
+- Earlier partial collections (n = 7, then n = 4, on earlier builds of this
+  protocol) are superseded by this one and are not pooled into it.
+
+### I1 recall
+
+Offline layer (`cargo test compaction_recall`): 12/12 pass (measured).
+
+Live layer: not run. At REPEATS=10 the `compaction_bakeoff` filter runs three
+tests (coverage probe over three schema arms, tool-call probe over one, hard
+recall over three), about 70 summarizer calls.
+
+### What is still open
+
+- the last 5 treatment runs, to bring I2 to n = 20 (10 vs 10);
+- the I1 live bakeoff (`DIRGE_BAKEOFF=1 ... DIRGE_BAKEOFF_REPEATS=10`, the
+  command under "Running it").
+
+When they are run, record the balance every 20 s and sum the drops, as above.
