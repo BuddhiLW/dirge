@@ -211,8 +211,16 @@ notification in the chat area.
 The left side panel shows external panels as compact boxes. `/swarm`
 (or Alt+S, rebindable as `toggle_swarm`) opens the swarm grid instead:
 every external panel painted at full size, one cell per panel, over
-the chat and both side panels. The input strip and status line stay
-below it. `/swarm on` and `/swarm off` open or close it explicitly.
+the chat and both side panels, followed by one cell per in-flight
+subagent. The input strip and status line stay below it. `/swarm on`
+and `/swarm off` open or close it explicitly.
+
+A subagent cell is titled with its agent profile (or `subagent`) and
+its short id. Its body is the `[AGENTS]` preview line (`↳ elapsed · N tools ·
+<last tool call>`) followed by the newest lines of the
+subagent's chat tab, so the grid shows what every subagent is doing
+without switching tabs. The cell disappears when the subagent
+finishes; its chat tab keeps the transcript.
 
 The grid repaints the latest state the producer sent; it keeps no
 history of earlier frames. A panel the producer focused (`FocusTab`) is
@@ -227,7 +235,8 @@ While the grid is open, keys drive it rather than the prompt:
 |-----|--------|
 | Tab / Shift+Tab | reply `next-tab` / `prev-tab` |
 | r | reply `refresh` |
-| Enter | reply `focus` with the selected panel's id as `target` |
+| Enter | panel: reply `focus` with the selected panel's id as `target`; subagent: close the grid and switch to its chat tab |
+| m | subagent: close the grid and start `/msg <id> ` in the editor |
 | u | reply `unfocus` |
 | Arrows, h/j/k/l, 1-9, Home/End | move the selection (local, no reply) |
 | Esc, q, Alt+S | close the grid |

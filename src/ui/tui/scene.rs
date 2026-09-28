@@ -94,6 +94,9 @@ pub struct Scene<'a> {
     /// full-size grid over everything above the input strip (chat and
     /// both side panels), instead of the compact left-panel boxes.
     pub swarm: Option<&'a crate::ui::swarm::SwarmView>,
+    /// In-flight subagents painted as grid cells after the external
+    /// panels while the swarm view is open.
+    pub swarm_agents: &'a [crate::ui::swarm::SwarmAgent],
 }
 
 /// Paint the entire UI into `f`. Computes layout from the frame's
@@ -125,7 +128,9 @@ pub fn render_frame(scene: &Scene, f: &mut Frame<'_>) {
         // (top frame through the chat's bottom frame).
         let grid_h = layout.chat_bot_frame.y.saturating_add(1).min(area.height);
         f.render_widget(
-            super::swarm::SwarmGrid::new(scene.external_panels, view).border_style(frame_style),
+            super::swarm::SwarmGrid::new(scene.external_panels, view)
+                .agents(scene.swarm_agents)
+                .border_style(frame_style),
             ratatui::layout::Rect::new(area.x, area.y, area.width, grid_h),
         );
     } else {
@@ -432,6 +437,7 @@ pub fn empty_scene<'a>(
         picker: None,
         tooltip: "",
         swarm: None,
+        swarm_agents: &[],
     }
 }
 
@@ -736,6 +742,7 @@ mod tests {
             picker: None,
             tooltip: "",
             swarm: None,
+            swarm_agents: &[],
         };
 
         let mut backend = TestBackend::new(160, 30);
@@ -1109,6 +1116,7 @@ mod tests {
             picker: None,
             tooltip: "",
             swarm: None,
+            swarm_agents: &[],
         };
         terminal.draw(|f| render_frame(&s1, f)).unwrap();
 
@@ -1145,6 +1153,7 @@ mod tests {
             picker: None,
             tooltip: "",
             swarm: None,
+            swarm_agents: &[],
         };
         terminal.draw(|f| render_frame(&s2, f)).unwrap();
         backend = terminal.backend().clone();
