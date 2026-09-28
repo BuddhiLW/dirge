@@ -131,13 +131,17 @@ impl fmt::Display for HookError {
 }
 
 /// The folded answer of every command that ran for one event. Combines
-/// as a monoid: the first block wins, contexts concatenate, the last
-/// input rewrite wins.
+/// as a monoid: the first block wins, then the first ask, contexts
+/// concatenate, the last input rewrite wins.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HookOutcome {
     /// Blocking reason (exit 2, `permissionDecision: "deny"`, or
     /// `decision: "block"`).
     pub block: Option<String>,
+    /// `permissionDecision: "ask"`: the action waits for the user to
+    /// confirm it, with this reason shown at the prompt. A block
+    /// outranks it.
+    pub ask: Option<String>,
     /// `additionalContext` strings, plus plain stdout for the events whose
     /// stdout is context.
     pub context: Vec<String>,
@@ -153,6 +157,13 @@ impl HookOutcome {
         }
     }
 
+    pub fn asked(reason: impl Into<String>) -> Self {
+        Self {
+            ask: Some(reason.into()),
+            ..Self::default()
+        }
+    }
+
     pub fn with_context(text: impl Into<String>) -> Self {
         Self {
             context: vec![text.into()],
@@ -164,11 +175,22 @@ impl HookOutcome {
         if self.block.is_none() {
             self.block = other.block;
         }
+        if self.ask.is_none() {
+            self.ask = other.ask;
+        }
         self.context.extend(other.context);
         if other.updated_input.is_some() {
             self.updated_input = other.updated_input;
         }
         self
+    }
+
+    /// The ask still pending: `None` once a block decides the action.
+    pub fn pending_ask(&self) -> Option<&str> {
+        match self.block {
+            Some(_) => None,
+            None => self.ask.as_deref(),
+        }
     }
 
     /// Context joined into one block, `None` when there is none.

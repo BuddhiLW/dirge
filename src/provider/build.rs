@@ -685,6 +685,9 @@ pub async fn build_agent(
     agent = agent.with_source_gate_mode(cfg.resolve_source_gate_mode());
     agent = agent.with_safe_state_abort_mode(cfg.resolve_safe_state_abort_mode());
     agent = agent.with_session_id(session_id.clone());
+    // A command hook's PreToolUse "ask" goes to the same prompt the
+    // tools' own permission asks use.
+    agent = agent.with_hook_ask_tx(ask_tx.clone());
 
     // dirge-9tfq — install the BackgroundStore on the agent so
     // `spawn_runner` can thread it into `LoopSpawnConfig.bg_store`,

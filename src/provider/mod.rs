@@ -289,6 +289,9 @@ pub struct AnyAgent {
     /// switching this request to API-key billing.
     openai_api_key_fallback_model: Option<AnyModel>,
     api_billing_ask_tx: Option<crate::permission::ask::AskSender>,
+    /// Where a command hook's `PreToolUse` "ask" is put to the user; see
+    /// [`Self::with_hook_ask_tx`].
+    hook_ask_tx: Option<crate::permission::ask::AskSender>,
     /// dirge-ygm3: a memory tool with the background-review actions
     /// (`mark`/`supersede`) enabled, kept OUT of `loop_tools` so the
     /// interactive agent never sees them. The review runner swaps this in
@@ -443,6 +446,7 @@ impl AnyAgent {
             memory_provider: None,
             openai_api_key_fallback_model: None,
             api_billing_ask_tx: None,
+            hook_ask_tx: None,
             review_memory_tool: None,
             mcp_tool_names: std::collections::HashSet::new(),
         }
@@ -622,6 +626,16 @@ impl AnyAgent {
     ) -> Self {
         self.openai_api_key_fallback_model = Some(model);
         self.api_billing_ask_tx = ask_tx;
+        self
+    }
+
+    /// The permission prompt a command hook's `PreToolUse` "ask" is put
+    /// to. `None` (headless, tests) makes such an ask refuse the call.
+    pub(crate) fn with_hook_ask_tx(
+        mut self,
+        ask_tx: Option<crate::permission::ask::AskSender>,
+    ) -> Self {
+        self.hook_ask_tx = ask_tx;
         self
     }
 
