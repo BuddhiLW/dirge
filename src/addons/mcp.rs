@@ -69,6 +69,58 @@ pub fn publish(manager: &McpClientManager, permission: Option<PermCheck>) {
         servers,
         permission,
     };
+    readiness().send_replace(Readiness::Published);
+}
+
+/// Where the MCP servers addon code reaches stand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Readiness {
+    /// Nothing is connecting: whatever is published is all there will be.
+    Idle,
+    /// A connect is under way and will [`publish`] when it finishes.
+    Connecting,
+    /// [`publish`] ran.
+    Published,
+}
+
+static READINESS: OnceLock<tokio::sync::watch::Sender<Readiness>> = OnceLock::new();
+
+fn readiness() -> &'static tokio::sync::watch::Sender<Readiness> {
+    READINESS.get_or_init(|| tokio::sync::watch::channel(Readiness::Idle).0)
+}
+
+/// Record that the configured servers are connecting in the background, so
+/// [`connected`] waits for them to be published.
+pub fn expect() {
+    readiness().send_if_modified(|state| {
+        let idle = *state == Readiness::Idle;
+        if idle {
+            *state = Readiness::Connecting;
+        }
+        idle
+    });
+}
+
+/// The names of the servers addon code reaches, once a connect under way
+/// has published them or `wait` has passed, whichever comes first.
+pub async fn connected(wait: Duration) -> Vec<String> {
+    settled(readiness(), wait).await;
+    published_names(&live())
+}
+
+/// Returns once `state` is not [`Readiness::Connecting`], or after `wait`.
+async fn settled(state: &tokio::sync::watch::Sender<Readiness>, wait: Duration) {
+    let mut state = state.subscribe();
+    let _ = tokio::time::timeout(wait, state.wait_for(|s| *s != Readiness::Connecting)).await;
+}
+
+fn published_names(published: &Shared) -> Vec<String> {
+    published
+        .lock_ignore_poison()
+        .servers
+        .iter()
+        .map(|s| s.name.clone())
+        .collect()
 }
 
 /// Why the rules refuse `tool` on `server` outright, or `None`. Reads deny
@@ -128,11 +180,7 @@ impl LiveMcp {
 
 impl McpGateway for LiveMcp {
     fn servers(&self) -> Vec<String> {
-        self.snapshot()
-            .servers
-            .into_iter()
-            .map(|s| s.name)
-            .collect()
+        published_names(&self.published)
     }
 
     fn call(&self, server: &str, tool: &str, args: &Value) -> Result<Value, String> {
@@ -163,18 +211,32 @@ impl McpGateway for LiveMcp {
             params = params.with_arguments(object.clone());
         }
         let conn = target.connection;
+        let began = std::time::Instant::now();
         let answer = self.handle.block_on(async move {
             let peer = conn.current_peer().await;
             tokio::time::timeout(CALL_TIMEOUT, peer.call_tool(params)).await
         });
-        match answer {
+        let answer = match answer {
             Ok(Ok(result)) => serde_json::to_value(result).map_err(|e| e.to_string()),
             Ok(Err(e)) => Err(format!("MCP tool error ({server}::{tool}): {e}")),
             Err(_) => Err(format!(
                 "MCP tool {server}::{tool} timed out after {}s",
                 CALL_TIMEOUT.as_secs()
             )),
-        }
+        };
+        let tool_error = answer
+            .as_ref()
+            .is_ok_and(|v| v.get("isError") == Some(&Value::Bool(true)));
+        tracing::debug!(
+            target: "dirge::addon",
+            server,
+            tool,
+            took_ms = began.elapsed().as_millis() as u64,
+            error = answer.as_ref().err().map(String::as_str),
+            tool_error,
+            "mcp-call answered"
+        );
+        answer
     }
 }
 
@@ -300,6 +362,38 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(err.contains("nowhere"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn nothing_connecting_is_not_waited_for() {
+        let (state, _) = tokio::sync::watch::channel(Readiness::Idle);
+        let started = std::time::Instant::now();
+        settled(&state, Duration::from_secs(5)).await;
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn a_connect_under_way_is_waited_for_until_it_publishes() {
+        let (state, _) = tokio::sync::watch::channel(Readiness::Connecting);
+        let state = Arc::new(state);
+        let publisher = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            publisher.send_replace(Readiness::Published);
+        });
+        let started = std::time::Instant::now();
+        settled(&state, Duration::from_secs(5)).await;
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(40), "{took:?}");
+        assert!(took < Duration::from_secs(2), "{took:?}");
+    }
+
+    #[tokio::test]
+    async fn a_connect_that_never_publishes_is_waited_for_at_most_the_budget() {
+        let (state, _) = tokio::sync::watch::channel(Readiness::Connecting);
+        let started = std::time::Instant::now();
+        settled(&state, Duration::from_millis(50)).await;
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

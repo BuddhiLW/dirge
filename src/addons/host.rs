@@ -271,6 +271,19 @@ impl AddonHost {
         policy::fold_before(&replies)
     }
 
+    /// Texts every addon answered `:dirge/session-start` with.
+    pub fn session_start(&self, ctx: &Value) -> Vec<String> {
+        self.texts(HookPoint::SessionStart, ctx)
+    }
+
+    /// Run `:dirge/session-end`; answers are ignored and failures logged.
+    pub fn session_end(&self, ctx: &Value) {
+        if self.listens(HookPoint::SessionEnd) {
+            let replies = self.runtime.run_hook(HookPoint::SessionEnd, ctx);
+            log_failures(HookPoint::SessionEnd, &replies);
+        }
+    }
+
     pub fn shutdown(&self) {
         self.runtime.shutdown();
     }
