@@ -2,10 +2,12 @@
 //! `tests/fixtures/addons`.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use super::cljrs::isolate::BUSY;
 use super::discovery;
 use super::domain::{HookPoint, PanelRequest};
 use super::port::{Harness, HarnessSink, Level, McpGateway, NoTools, PanelSink, ToolGateway};
@@ -62,6 +64,57 @@ impl ToolGateway for ScriptedTools {
             "read" => Ok(format!("contents of {}", args["path"])),
             other => Err(format!("no tool named '{other}'")),
         }
+    }
+}
+
+/// Parks every caller until the test releases it, after reporting that one
+/// arrived.
+struct Gate {
+    arrived: Mutex<mpsc::Sender<()>>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl Gate {
+    /// The gate, the arrivals, and the sender whose every message releases
+    /// one parked caller. Dropping the sender releases them all.
+    fn new() -> (Self, mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (arrived, arrivals) = mpsc::channel();
+        let (release, releases) = mpsc::channel();
+        let gate = Self {
+            arrived: Mutex::new(arrived),
+            release: Mutex::new(releases),
+        };
+        (gate, arrivals, release)
+    }
+
+    fn park(&self) {
+        let _ = self.arrived.lock().unwrap().send(());
+        let _ = self.release.lock().unwrap().recv();
+    }
+}
+
+/// [`ScriptedMcp`]'s `fixture` server, answering once the gate lets the
+/// call through.
+struct ParkingMcp(Gate);
+
+impl McpGateway for ParkingMcp {
+    fn servers(&self) -> Vec<String> {
+        vec!["fixture".to_string()]
+    }
+
+    fn call(&self, _server: &str, _tool: &str, args: &Value) -> Result<Value, String> {
+        self.0.park();
+        Ok(json!({"content": [{"type": "text", "text": format!("found {}", args["q"])}]}))
+    }
+}
+
+/// A side panel that takes each change once the gate lets it through.
+struct ParkingPanels(Gate);
+
+impl PanelSink for ParkingPanels {
+    fn panel(&self, _request: PanelRequest) -> bool {
+        self.0.park();
+        true
     }
 }
 
@@ -238,6 +291,96 @@ fn addon_commands_call_dirge_tools_through_the_harness() {
         "refused on the event-loop thread"
     );
     assert_eq!(tools.0.lock().unwrap().len(), 2, "gateway not reached");
+    host.shutdown();
+}
+
+/// Runs `f` on a thread marked as dirge's event loop. Answers what `f`
+/// returned and how long it took, or `None` when it has not returned within
+/// `within`.
+fn on_event_loop<T: Send + 'static>(
+    within: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<(T, Duration)> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        super::cljrs::isolate::mark_event_loop_thread();
+        let started = Instant::now();
+        let out = f();
+        let _ = tx.send((out, started.elapsed()));
+    });
+    rx.recv_timeout(within).ok()
+}
+
+#[test]
+fn event_loop_callers_do_not_queue_behind_a_call_parked_in_the_isolate() {
+    let (gate, arrived, release) = Gate::new();
+    let mut harness = Harness::with_sink(Arc::new(RecordingSink::default()));
+    harness.mcp = Arc::new(ParkingMcp(gate));
+    let host = Arc::new(
+        super::start(echo_plan(&fixtures().join("echo")), harness, PROTOCOL).expect("host starts"),
+    );
+
+    // An mcp-call parked inside the isolate, as an addon tool's call stays
+    // after its turn is aborted.
+    let (h, ask) = (host.clone(), host.command("ask").expect("ask registered"));
+    let parked = std::thread::spawn(move || h.run_command(&ask, "kanban"));
+    arrived
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the call reaches the gateway");
+
+    // The next prompt's hooks, a command and the quit, from the event loop.
+    let h = host.clone();
+    let answered = on_event_loop(Duration::from_secs(3), move || {
+        let texts = h.texts(HookPoint::SystemPrompt, &json!({}));
+        let echo = h.command("echo").expect("echo registered");
+        let command = h.run_command(&echo, "hi").map(|out| out.text);
+        h.shutdown();
+        (texts, command)
+    });
+    release.send(()).unwrap();
+    let ((texts, command), took) =
+        answered.expect("the event-loop thread waited behind the parked call");
+    assert!(texts.is_empty(), "{texts:?}");
+    assert_eq!(command, Err(BUSY.to_string()));
+    assert!(took < Duration::from_secs(1), "{took:?}");
+
+    let out = parked.join().unwrap().expect("the parked call completes");
+    assert_eq!(out.text.as_deref(), Some("found \"kanban\""));
+    let h = host.clone();
+    let (texts, _) = on_event_loop(Duration::from_secs(30), move || {
+        h.texts(HookPoint::SystemPrompt, &json!({}))
+    })
+    .expect("the isolate answers the event loop again");
+    assert_eq!(texts, vec!["echo addon active".to_string()]);
+    host.shutdown();
+}
+
+#[test]
+fn an_event_loop_caller_stops_waiting_on_an_isolate_that_does_not_answer() {
+    let (gate, arrived, release) = Gate::new();
+    let mut harness = Harness::with_sink(Arc::new(RecordingSink::default()));
+    harness.panels = Arc::new(ParkingPanels(gate));
+    let host = Arc::new(
+        super::start(echo_plan(&fixtures().join("echo")), harness, PROTOCOL).expect("host starts"),
+    );
+
+    let h = host.clone();
+    let answered = on_event_loop(Duration::from_secs(20), move || {
+        let echo = h.command("echo").expect("echo registered");
+        h.run_command(&echo, "hi").map(|out| out.text)
+    });
+    release.send(()).unwrap();
+    let (command, _) = answered.expect("the event-loop wait is bounded");
+    assert!(arrived.try_recv().is_ok(), "echo parked in the panel");
+    let error = command.expect_err("no answer within the bound");
+    assert!(error.starts_with(BUSY), "{error}");
+
+    let h = host.clone();
+    let (texts, _) = on_event_loop(Duration::from_secs(30), move || {
+        h.texts(HookPoint::SystemPrompt, &json!({}))
+    })
+    .expect("the isolate answers the event loop again");
+    assert_eq!(texts, vec!["echo addon active".to_string()]);
     host.shutdown();
 }
 

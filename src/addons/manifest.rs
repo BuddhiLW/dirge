@@ -109,9 +109,11 @@ impl AddonManifest {
 /// `[k1 v1 k2 v2 ...]` map body and return its value as text.
 fn required(entries: &[Form], key: &'static str) -> Result<String, ManifestError> {
     let value = entries
-        .chunks_exact(2)
-        .find(|kv| kv[0].as_keyword() == Some(key))
-        .map(|kv| &kv[1])
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .find(|[k, _]| k.as_keyword() == Some(key))
+        .map(|[_, v]| v)
         .ok_or(ManifestError::Missing(key))?;
     let text = match &value.kind {
         FormKind::Symbol(s) | FormKind::Str(s) | FormKind::Keyword(s) => s.as_str(),

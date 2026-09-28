@@ -108,6 +108,7 @@ pub enum DiscoveryError {
 impl DiscoveryError {
     /// Missing files are the normal "producer not running" state and
     /// are retried quietly; everything else is worth a warning once.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_missing(&self) -> bool {
         matches!(self, Self::Missing { .. })
     }
