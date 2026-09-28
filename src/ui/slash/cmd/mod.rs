@@ -40,6 +40,7 @@ pub(crate) mod quit;
 pub(crate) mod regen;
 pub(crate) mod retry;
 pub(crate) mod spec;
+pub(crate) mod swarm;
 pub(crate) mod tasks;
 pub(crate) mod toggle;
 pub(crate) mod tree;

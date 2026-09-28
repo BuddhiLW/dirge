@@ -93,6 +93,9 @@ pub enum KeyAction {
     PanelPrevTab,
     /// Ask the external panel producer to repaint everything it shows.
     PanelRefresh,
+    /// Open or close the swarm view: the external panels as a
+    /// full-screen grid instead of the compact left-panel boxes.
+    ToggleSwarm,
 }
 
 impl Command for KeyAction {
@@ -187,6 +190,11 @@ impl Command for KeyAction {
             KeyAction::PanelRefresh,
             "panel_refresh",
             &[(KeyCode::Char('/'), KeyModifiers::ALT)],
+        ),
+        (
+            KeyAction::ToggleSwarm,
+            "toggle_swarm",
+            &[(KeyCode::Char('s'), KeyModifiers::ALT)],
         ),
     ];
 }
@@ -807,6 +815,30 @@ mod tests {
         assert_eq!(
             KeyAction::from_command("panel-next-tab"),
             Some(KeyAction::PanelNextTab)
+        );
+    }
+
+    /// The swarm grid toggles on Alt+S, which no other default in either
+    /// keymap uses, and is rebindable as `toggle_swarm`.
+    #[test]
+    fn alt_s_toggles_the_swarm_grid() {
+        let km = Keymap::defaults();
+        let key = ev(KeyCode::Char('s'), KeyModifiers::ALT);
+        assert_eq!(km.resolve(&key), Some(KeyAction::ToggleSwarm));
+        assert_eq!(InputKeymap::defaults().resolve_lenient(&key), None);
+        let owners = KeyAction::ALL
+            .iter()
+            .filter(|(_, _, cs)| cs.contains(&(KeyCode::Char('s'), KeyModifiers::ALT)))
+            .count();
+        assert_eq!(owners, 1);
+        assert_eq!(
+            KeyAction::from_command("toggle-swarm"),
+            Some(KeyAction::ToggleSwarm)
+        );
+        // Plain `s` stays text.
+        assert_eq!(
+            km.resolve(&ev(KeyCode::Char('s'), KeyModifiers::NONE)),
+            None
         );
     }
 

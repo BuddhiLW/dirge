@@ -47,6 +47,7 @@ mod state;
 mod status;
 #[cfg(feature = "plugin")]
 mod streaming;
+pub(crate) mod swarm;
 pub(crate) mod sysload;
 pub(crate) mod terminal;
 mod text_output;
@@ -2061,6 +2062,40 @@ pub async fn run_interactive(
                                 // sequence would yank). The bound action still dispatches
                                 // through the normal `action` path.
                                 let from_sequence = seq_action.is_some();
+                                // Swarm grid open: its keys select cells, reply
+                                // to the panel producer, or close the grid, and
+                                // the editor below stays inert. Other global
+                                // commands and Ctrl+C pass through.
+                                if !from_sequence
+                                    && let Some(view) = renderer.swarm_view()
+                                {
+                                    use crate::ui::swarm::GridKey;
+                                    let grid = crate::ui::swarm::grid_key(
+                                        &key,
+                                        action,
+                                        view,
+                                        renderer.external_panels(),
+                                        renderer.swarm_grid_columns(),
+                                    );
+                                    match grid {
+                                        GridKey::Close => {
+                                            renderer.set_swarm_open(false);
+                                            renderer.request_repaint();
+                                            continue;
+                                        }
+                                        GridKey::Select(i) => {
+                                            renderer.select_swarm_panel(i);
+                                            renderer.request_repaint();
+                                            continue;
+                                        }
+                                        GridKey::Reply(reply) => {
+                                            crate::extras::panel_feed::spawn_reply(reply);
+                                            continue;
+                                        }
+                                        GridKey::Swallow => continue,
+                                        GridKey::PassThrough => {}
+                                    }
+                                }
                                 let is_ctrl_c = !from_sequence
                                     && key.code == KeyCode::Char('c')
                                     && key.modifiers.contains(KeyModifiers::CONTROL);
@@ -2726,6 +2761,12 @@ pub async fn run_interactive(
                                             }
                                             _ => crate::extras::panel_feed::ReplyAction::Refresh,
                                         });
+                                        continue;
+                                    }
+                                    Some(KeyAction::ToggleSwarm) => {
+                                        // Full-screen grid of the external panels.
+                                        renderer.toggle_swarm();
+                                        renderer.request_repaint();
                                         continue;
                                     }
                                     _ => {}

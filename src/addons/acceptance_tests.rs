@@ -401,10 +401,10 @@ fn an_event_loop_caller_stops_waiting_on_an_isolate_that_does_not_answer() {
 
 #[test]
 fn slash_command_names_dirge_dispatches_first_are_reserved() {
-    for taken in ["memory", "plan", "tasks", "addons", "help"] {
+    for taken in ["memory", "plan", "tasks", "addons", "help", "swarm"] {
         assert!(super::taken_by_dirge(taken), "{taken}");
     }
-    for free in ["shout", "echo", "swarm"] {
+    for free in ["shout", "echo", "kanban"] {
         assert!(!super::taken_by_dirge(free), "{free}");
     }
 }

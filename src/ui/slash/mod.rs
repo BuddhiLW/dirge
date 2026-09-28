@@ -732,6 +732,7 @@ pub async fn handle_slash(
         "/clone" => cmd::clone::cmd_clone(&mut ctx, &parts).await?,
         "/panel" => cmd::panel::cmd_panel(&mut ctx, &parts).await?,
         "/display" => cmd::panel::cmd_display(&mut ctx, &parts).await?,
+        "/swarm" => cmd::swarm::cmd_swarm(&mut ctx, &parts).await?,
         "/btw" => return cmd::btw::cmd_btw(&mut ctx, &parts).await,
         "/learn" => return cmd::learn::cmd_learn(&mut ctx, &parts).await,
         "/code-review" => cmd::code_review::cmd_code_review(&mut ctx).await?,
@@ -928,6 +929,10 @@ fn slash_commands() -> Vec<(&'static str, &'static str)> {
         ),
         ("/sessions", "list, switch, or delete saved sessions"),
         ("/spec", "inspect the spec-driven workflow tracker"),
+        (
+            "/swarm",
+            "open or close the full-screen grid of external panels (Alt+S)",
+        ),
         ("/tasks", "list subagent chats and background shells"),
         ("/toggle", "turn a feature (e.g. todo tools) on or off"),
         ("/tree", "show the conversation tree, or switch to a branch"),
@@ -1414,6 +1419,7 @@ mod tests {
             "/regen-prompts",
             "/retry",
             "/sessions",
+            "/swarm",
             "/tasks",
             "/toggle",
             "/tree",
@@ -1445,6 +1451,24 @@ mod tests {
             total,
             "duplicate command name in slash_commands()",
         );
+    }
+
+    /// `/swarm` is dispatched, listed in `/help` and parses its argument
+    /// through the pure `SwarmCmd` parser.
+    #[test]
+    fn swarm_command_is_known_and_parses() {
+        use crate::ui::swarm::SwarmCmd;
+        assert!(is_known_slash_command("/swarm"));
+        assert!(
+            slash_command_descriptions()
+                .iter()
+                .any(|(n, d)| *n == "/swarm" && d.contains("grid"))
+        );
+        let parts = split_command_parts("/swarm off");
+        assert_eq!(parts[0], "/swarm");
+        assert_eq!(SwarmCmd::parse(&parts[1..]), Ok(SwarmCmd::Close));
+        let bare = split_command_parts("/swarm");
+        assert_eq!(SwarmCmd::parse(&bare[1..]), Ok(SwarmCmd::Toggle));
     }
 
     /// dirge-dlpl: `/compact` used to check only the SIZE, so a summarizer

@@ -1111,6 +1111,7 @@ routes to the right one by its command name.
 | `panel_next_tab` | `alt-.` | External panel feed: ask the producer for its next view |
 | `panel_prev_tab` | `alt-,` | External panel feed: ask the producer for its previous view |
 | `panel_refresh` | `alt-/` | External panel feed: ask the producer to repaint |
+| `toggle_swarm` | `alt-s` | Open or close the swarm grid (external panels at full size) |
 
 ### Input-editor commands
 
