@@ -231,6 +231,17 @@ impl AddonHooks for LiveAddonHooks {
     fn open_run(&self, session_id: Option<String>, first_prompt: bool) -> Option<OpenRunFn> {
         super::global().and_then(|host| open_run(host, session_id, first_prompt))
     }
+
+    fn observe(&self, event: &crate::event::AgentEvent) {
+        let Some(host) = super::global() else {
+            return;
+        };
+        if host.listens_key(super::events::EVENT_KEY)
+            && let Some(ctx) = super::events::project(event)
+        {
+            host.post(super::events::EVENT_KEY, &ctx);
+        }
+    }
 }
 
 #[cfg(test)]

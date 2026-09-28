@@ -110,6 +110,7 @@ keys and ignores the rest:
 | `:dirge/on-prompt` | `{:prompt :session-id :first-prompt?}` | text added before the user's prompt |
 | `:dirge/before-tool-call` | `{:tool :args :tool-call-id}` | `nil`, `{:block "reason"}`, `{:context "text"}` or `{:args {…}}` |
 | `:dirge/after-tool-call` | `{:tool :args :result :error?}` | text appended to the tool result |
+| `:dirge/event` | one event of the run, see [Watching the run](#watching-the-run-dirgeevent) | ignored |
 
 A text answer may also be given as `{:context "text"}`. Hooks run for the
 main session only, after Janet plugin and command hooks. Subagents never run
@@ -280,6 +281,97 @@ it finishes, and a permission prompt raised from `initialize!` or `shutdown!`
 is answered as usual. Ctrl+C stops waiting for it; the reload still finishes
 on the interpreter thread, but its tool changes do not reach the running
 agent, so run `/addons reload` again.
+
+## Live development
+
+The addon runtime is meant to be the part of dirge you change while it
+runs: new behaviour goes into an addon, evaluated in place, and dirge's
+Rust core stays as it is.
+
+### An nREPL into the running addons
+
+Built with `--features addons-nrepl`, dirge can serve an nREPL on the addon
+runtime's own thread, so an editor (CIDER, Calva, Conjure), dirge's own
+`nrepl` plugin, or any nREPL client evaluates code among the loaded addons,
+with `dirge.harness` in reach:
+
+```json
+{ "addons": { "nrepl": { "port": 0, "bind": "127.0.0.1" } } }
+```
+
+or, without touching the config, `DIRGE_ADDON_NREPL=1 dirge` (or a port
+number instead of `1`; `0`, `off` or `false` turns a configured server off).
+The server binds loopback by default and writes the port it bound to
+`.dirge/addons/.nrepl-port` (`port_file` moves it; `""` writes none). `/addons`
+shows the endpoint.
+
+Evaluations run between dirge's calls into the addons, never during one, so
+a REPL form sees the same state a hook does. `mcp-call` and `call-tool` work
+from the REPL.
+
+### Refreshing in place
+
+After every REPL evaluation dirge asks each addon again for its `tools` and
+`hooks` (commands included), without `shutdown!` or `initialize!`, and hands
+what changed to the running agent: a new tool is offered to the model from
+the next request, a removed one is withdrawn, and a changed hook runs its
+new code on its next call. Addon code can ask for the same thing with
+`(dirge.harness/refresh!)`, which runs once the current call returns. Set
+`"live_refresh": false` under `addons` to refresh only when asked.
+
+So write `tools` and `hooks` to build their answer when called, from vars
+and atoms, rather than capturing functions once in `initialize!`:
+
+```clojure
+(defonce !extra (atom []))
+
+(defrecord MyAddon []
+  p/IAddon
+  (tools [_] (into [base-tool] @!extra))       ; re-read on every refresh
+  (hooks [_] {:dirge/on-prompt on-prompt}))    ; `on-prompt` resolved anew
+```
+
+Redefining `on-prompt` at the REPL is then enough. `/addons reload` is still
+the tool for a full restart of every addon: it re-evaluates the sources on
+disk and runs the lifecycle.
+
+### Open hook keys
+
+Hook keys are open. Besides the `:dirge/*` keys listed under
+[Hooks](#hooks), an addon may register any keyword; `/addons` lists every
+key an addon registered. A seam in dirge reaches such a key by name
+(`AddonHost::emit`) without a new hook point in the host, so adding a seam
+costs one call site, not a change to the addon host's types.
+
+### Watching the run: `:dirge/event`
+
+The `:dirge/event` hook hears every event of the main session's run as the
+front end gets it, one map per event, keyed by `:event`:
+
+| `:event` | Other keys |
+|---|---|
+| `:turn-start`, `:turn-end` | `:index` |
+| `:tool-call` | `:id :tool :args` |
+| `:tool-result` | `:id :output` |
+| `:usage` | `:input-tokens :cached-input-tokens :cache-creation-input-tokens :output-tokens` |
+| `:done` | `:response :tokens :cost` |
+| `:compaction-started` | `:tokens-before` |
+| `:context-compacted` | `:session-id :tokens-before :tokens-after :summary :kind` |
+| `:checkpoint` | `:summary` |
+| `:error`, `:context-overflow` | `:message` |
+| `:retry` | `:attempt :delay-ms :message` |
+| `:user-message` | `:content` |
+| `:interjected` | `:response :tokens` |
+| `:notice` | `:content` |
+| `:custom-message` | `:payload` |
+| `:escalation` | `:provider :reason` |
+| `:repair-stats` | |
+
+Streamed token and reasoning deltas are not sent: the whole response
+arrives with `:done`. Text longer than 16 KiB is cut and marked. The hook's
+answer is ignored and nothing waits for it: events are queued to the addon
+runtime and run in order after whatever it is doing, and when more than 256
+are waiting new ones are dropped.
 
 ## Example
 

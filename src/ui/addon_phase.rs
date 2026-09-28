@@ -182,20 +182,93 @@ pub(crate) fn land(
         Some(AddonDone::Command { name, result }) => command_landing(&name, result),
         Some(AddonDone::Reload(Err(error))) => failure(format!("addon reload failed: {error}")),
         Some(AddonDone::Reload(Ok((host, report)))) => {
-            let tools: Vec<Arc<dyn LoopTool>> =
-                crate::addons::tool::loop_tools(&host, permission.clone(), ask_tx.clone())
-                    .into_iter()
-                    .map(|t| Arc::new(t) as Arc<dyn LoopTool>)
-                    .collect();
-            let offered: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
-            let installed = agent.upsert_loop_tools(crate::addons::tool::SOURCE, tools);
-            crate::provider::publish_live_agent(agent);
-            #[cfg(feature = "slash-completion")]
-            crate::ui::slash::register_addon_commands(
-                host.commands().into_iter().map(|c| c.name).collect(),
-            );
+            let (offered, installed) = adopt(&host, agent, permission, ask_tx);
             reload_landing(&report, &offered, &installed)
         }
+    }
+}
+
+/// Give the live agent `host`'s addon tools in place of the ones it had,
+/// republish it, and register the addon commands for completion: the tools
+/// offered, and the ones the agent took.
+#[cfg(feature = "addons")]
+fn adopt(
+    host: &Arc<AddonHost>,
+    agent: &mut AnyAgent,
+    permission: &Option<PermCheck>,
+    ask_tx: &Option<AskSender>,
+) -> (Vec<String>, Vec<String>) {
+    let tools: Vec<Arc<dyn LoopTool>> =
+        crate::addons::tool::loop_tools(host, permission.clone(), ask_tx.clone())
+            .into_iter()
+            .map(|t| Arc::new(t) as Arc<dyn LoopTool>)
+            .collect();
+    let offered: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
+    let installed = agent.upsert_loop_tools(crate::addons::tool::SOURCE, tools);
+    crate::provider::publish_live_agent(agent);
+    #[cfg(feature = "slash-completion")]
+    crate::ui::slash::register_addon_commands(
+        host.commands().into_iter().map(|c| c.name).collect(),
+    );
+    (offered, installed)
+}
+
+/// Resolves when the addons changed in place: a REPL evaluation or
+/// `dirge.harness/refresh!` re-read their tools, hooks and commands. Never
+/// resolves in a build without the `addons` feature, so the select arm
+/// waiting on it can be unconditional.
+pub(crate) async fn live_change() {
+    #[cfg(feature = "addons")]
+    crate::addons::live::changed().await;
+    #[cfg(not(feature = "addons"))]
+    std::future::pending::<()>().await;
+}
+
+/// Land an in-place change of the addons: the live agent takes their tools
+/// as they are now. Quiet unless the tools changed, so a REPL session does
+/// not fill the chat area.
+#[cfg(feature = "addons")]
+pub(crate) fn land_live(
+    agent: &mut AnyAgent,
+    permission: &Option<PermCheck>,
+    ask_tx: &Option<AskSender>,
+) -> Landing {
+    let Some(host) = crate::addons::global() else {
+        return Landing::default();
+    };
+    let Some(report) = host.sync() else {
+        return Landing::default();
+    };
+    let (_, installed) = adopt(&host, agent, permission, ask_tx);
+    live_landing(&report, &installed)
+}
+
+/// What an in-place change says: the tools it added and removed, nothing
+/// when it changed none.
+#[cfg(feature = "addons")]
+fn live_landing(report: &ReloadReport, installed: &[String]) -> Landing {
+    let added: Vec<&str> = report
+        .tools_added
+        .iter()
+        .filter(|name| installed.contains(name))
+        .map(String::as_str)
+        .collect();
+    let mut lines = Vec::new();
+    if !added.is_empty() {
+        lines.push(line(
+            format!("[addons] + tools: {}", added.join(", ")),
+            Tone::Dim,
+        ));
+    }
+    if !report.tools_removed.is_empty() {
+        lines.push(line(
+            format!("[addons] - tools: {}", report.tools_removed.join(", ")),
+            Tone::Dim,
+        ));
+    }
+    Landing {
+        lines,
+        prompt: None,
     }
 }
 

@@ -138,7 +138,9 @@
     (swap! !addons dissoc id)
     (swap! !order (fn [ids] (vec (remove #{id} ids))))))
 
-(defn- install!
+(defn- register!
+  "Ask `addon` for its tools, hooks and commands now and keep them under
+   `id`: the addon's summary."
   [id manifest addon]
   (let [tools    (vec ((pf :tools) addon))
         hooks    (or (optional :hooks addon {}) {})
@@ -146,13 +148,32 @@
     (swap! !addons assoc id {:addon addon :manifest manifest
                              :tools (index-tools tools) :hooks hooks
                              :commands commands})
-    (swap! !order (fn [ids] (conj (vec (remove #{id} ids)) id)))
     {:id id
      :version (:addon/version manifest)
      :tools (mapv tool-view tools)
      :hooks (hook-names hooks)
      :commands (command-views commands)
      :health (optional :health addon {:status :ok})}))
+
+(defn- install!
+  [id manifest addon]
+  (let [summary (register! id manifest addon)]
+    (swap! !order (fn [ids] (conj (vec (remove #{id} ids)) id)))
+    summary))
+
+(defn refresh!
+  "Ask every loaded addon again for its tools, hooks and commands, without
+   shutting it down or initializing it, so definitions changed at a REPL
+   take effect: one summary per addon in load order, or {:id id :error msg}
+   for an addon that threw and keeps what it registered before."
+  []
+  (vec
+   (for [id @!order
+         :let [{:keys [addon manifest]} (get @!addons id)]]
+     (try
+       (json-safe (register! id manifest addon))
+       (catch #?(:clj Throwable :default :default) t
+         (assoc (failure t) :id id))))))
 
 (defn load-addon!
   "Load the manifest at `path`: construct, initialize!, register. A manifest
@@ -204,7 +225,8 @@
 (def hook-keyword-fields
   "Context fields a hook reads as keywords, by hook key. They reach the host
    as strings."
-  {:dirge/session-end [:reason]})
+  {:dirge/session-end [:reason]
+   :dirge/event       [:event]})
 
 (defn hook-ctx
   "`ctx` as the hook keyed `k` reads it."

@@ -52,7 +52,15 @@ const BLOCKED_CALL_TOOL: &str = "call-tool is unavailable while dirge waits on t
 ///   are refused, and so is any call while dirge's event loop waits on the
 ///   addon, as for `mcp-call`. In a build without the `plugin` feature
 ///   `(tools)` is empty and every call answers `{:error}` saying so.
-pub fn install(globals: &Arc<GlobalEnv>, harness: Harness, caller_on_runtime: Rc<Cell<bool>>) {
+/// - `(refresh!)`: once the current call returns, ask every addon again for
+///   its tools, hooks and commands, without shutting it down, and hand the
+///   changes to the running agent. For definitions changed at a REPL.
+pub fn install(
+    globals: &Arc<GlobalEnv>,
+    harness: Harness,
+    caller_on_runtime: Rc<Cell<bool>>,
+    refresh_requested: Rc<Cell<bool>>,
+) {
     let Harness {
         sink,
         panels,
@@ -118,6 +126,10 @@ pub fn install(globals: &Arc<GlobalEnv>, harness: Harness, caller_on_runtime: Rc
             }
         },
     );
+    define(globals, "refresh!", Arity::Fixed(0), move |_| {
+        refresh_requested.set(true);
+        Ok(Value::Bool(true))
+    });
     let catalog = tools.clone();
     define(globals, "tools", Arity::Fixed(0), move |_| {
         Ok(bridge::to_clj(&Json::from(catalog.names())))

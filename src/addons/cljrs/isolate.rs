@@ -9,6 +9,9 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(feature = "addons-nrepl")]
+use std::net::SocketAddr;
+
 use cljrs_gc::GcPtr;
 use cljrs_runtime::env::env::GlobalEnv;
 use cljrs_runtime::tiered::{Env, eval};
@@ -44,6 +47,36 @@ pub const BUSY: &str = "addon isolate busy";
 /// excepted.
 const EVENT_LOOP_WAIT: Duration = Duration::from_secs(5);
 
+/// Most posted hook calls ([`AddonRuntime::post_hook`]) queued at once;
+/// past it new ones are dropped rather than let an observer fall behind
+/// without bound.
+const MAX_POSTED: usize = 256;
+
+/// How long the thread waits for a command before it serves the REPL again,
+/// when one is running.
+#[cfg(feature = "addons-nrepl")]
+const REPL_TICK: Duration = Duration::from_millis(25);
+
+/// How the isolate is set up beyond its classpath, harness and protocol.
+#[derive(Debug, Clone, Default)]
+pub struct IsolateOptions {
+    /// Serve an nREPL on the isolate thread.
+    #[cfg(feature = "addons-nrepl")]
+    pub repl: Option<ReplOptions>,
+    /// Re-read the addons after every REPL evaluation, as
+    /// `dirge.harness/refresh!` does.
+    pub refresh_after_eval: bool,
+}
+
+/// Where the isolate's nREPL listens.
+#[cfg(feature = "addons-nrepl")]
+#[derive(Debug, Clone)]
+pub struct ReplOptions {
+    pub addr: SocketAddr,
+    /// File the bound port is written to, and removed when the server stops.
+    pub port_file: Option<PathBuf>,
+}
+
 enum Command {
     Load {
         manifest: PathBuf,
@@ -75,9 +108,14 @@ enum Command {
         reply: Sender<Result<Json, String>>,
     },
     Hook {
-        point: HookPoint,
+        key: String,
         ctx: Json,
         reply: Sender<Vec<HookReply>>,
+    },
+    /// A hook call nobody waits for; counted in `Isolate::posted`.
+    Post {
+        key: String,
+        ctx: Json,
     },
     Shutdown {
         reply: Sender<()>,
@@ -124,32 +162,58 @@ pub struct Isolate {
     /// Commands sent from threads other than the event loop and not yet
     /// answered.
     off_loop: AtomicUsize,
+    /// Posted hook calls not yet run.
+    posted: Arc<AtomicUsize>,
+    /// The addons as last re-read in place, until taken.
+    refreshed: Arc<Mutex<Option<Vec<Json>>>>,
+    /// `host:port` of the REPL, when one serves.
+    repl: Option<String>,
 }
 
 impl Isolate {
     /// Start the thread and boot the runtime with `source_roots` on the
     /// classpath, `harness` behind `dirge.harness`, and the IAddon protocol
     /// of `protocol_ns` bound. Returns once the host is ready, or why it is
-    /// not.
+    /// not. `options` sets up the REPL and refreshing.
     pub fn spawn(
         source_roots: Vec<PathBuf>,
         harness: Harness,
         protocol_ns: &str,
+        options: IsolateOptions,
     ) -> Result<Self, String> {
         let (tx, rx) = channel();
         let (ready_tx, ready_rx) = channel();
+        let posted = Arc::new(AtomicUsize::new(0));
+        let refreshed = Arc::new(Mutex::new(None));
+        let shared = Shared {
+            posted: posted.clone(),
+            refreshed: refreshed.clone(),
+        };
         let protocol_ns = protocol_ns.to_string();
         std::thread::Builder::new()
             .name("dirge-addons".into())
             .stack_size(ISOLATE_STACK_BYTES)
-            .spawn(move || serve(source_roots, harness, protocol_ns, ready_tx, rx))
+            .spawn(move || {
+                serve(
+                    source_roots,
+                    harness,
+                    protocol_ns,
+                    options,
+                    shared,
+                    ready_tx,
+                    rx,
+                )
+            })
             .map_err(|e| format!("cannot start the addon isolate: {e}"))?;
-        ready_rx
+        let repl = ready_rx
             .recv()
             .map_err(|_| "the addon isolate died while booting".to_string())??;
         Ok(Self {
             tx: Mutex::new(tx),
             off_loop: AtomicUsize::new(0),
+            posted,
+            refreshed,
+            repl,
         })
     }
 
@@ -265,15 +329,42 @@ impl AddonRuntime for Isolate {
     }
 
     fn run_hook(&self, point: HookPoint, ctx: &Json) -> Vec<HookReply> {
+        self.run_hook_key(point.key(), ctx)
+    }
+
+    fn run_hook_key(&self, key: &str, ctx: &Json) -> Vec<HookReply> {
         self.ask(|reply| Command::Hook {
-            point,
+            key: key.to_string(),
             ctx: ctx.clone(),
             reply,
         })
         .unwrap_or_else(|error| {
-            tracing::warn!(target: "dirge::addon", hook = point.key(), %error, "addon hooks skipped");
+            tracing::warn!(target: "dirge::addon", hook = key, %error, "addon hooks skipped");
             Vec::new()
         })
+    }
+
+    fn post_hook(&self, key: &str, ctx: &Json) {
+        if self.posted.fetch_add(1, Ordering::SeqCst) >= MAX_POSTED {
+            self.posted.fetch_sub(1, Ordering::SeqCst);
+            tracing::debug!(target: "dirge::addon", hook = key, "posted hook call dropped: the isolate is backed up");
+            return;
+        }
+        let command = Command::Post {
+            key: key.to_string(),
+            ctx: ctx.clone(),
+        };
+        if self.tx.lock_ignore_poison().send((false, command)).is_err() {
+            self.posted.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn take_refreshed(&self) -> Option<Vec<Json>> {
+        self.refreshed.lock_ignore_poison().take()
+    }
+
+    fn repl_endpoint(&self) -> Option<String> {
+        self.repl.clone()
     }
 
     fn shutdown(&self) {
@@ -285,92 +376,130 @@ impl AddonRuntime for Isolate {
     }
 }
 
-/// The thread body: boot, then answer commands until shut down or dropped.
+/// What the isolate thread shares with its handle.
+struct Shared {
+    posted: Arc<AtomicUsize>,
+    refreshed: Arc<Mutex<Option<Vec<Json>>>>,
+}
+
+/// The thread body: boot, then answer commands, and serve the REPL between
+/// them when one runs, until shut down or dropped.
 fn serve(
     roots: Vec<PathBuf>,
     harness: Harness,
     protocol_ns: String,
-    ready: Sender<Result<(), String>>,
+    options: IsolateOptions,
+    shared: Shared,
+    ready: Sender<Result<Option<String>, String>>,
     rx: Receiver<Envelope>,
 ) {
     let mut interp = match Interp::boot(roots, harness, &protocol_ns) {
-        Ok(interp) => {
-            let _ = ready.send(Ok(()));
-            interp
-        }
+        Ok(interp) => interp,
         Err(e) => {
             let _ = ready.send(Err(e));
             return;
         }
     };
-    for (on_runtime, command) in rx {
-        interp.caller_on_runtime.set(on_runtime);
-        match command {
-            Command::Load {
-                manifest,
-                host_config,
-                reply,
-            } => {
-                let path = Json::String(manifest.display().to_string());
-                let report = interp
-                    .call("load-addon!", vec![path, host_config])
-                    .unwrap_or_else(|e| json!({ "error": e }));
-                let _ = reply.send(report);
-            }
-            Command::Unload { addon_id, reply } => {
-                if let Err(e) = interp.call("shutdown-addon!", vec![addon_id.clone().into()]) {
-                    tracing::warn!(target: "dirge::addon", addon = %addon_id, error = %e, "unload failed");
-                }
-                let _ = reply.send(());
-            }
-            Command::ReloadSources { files, reply } => {
-                let _ = reply.send(interp.reload_sources(&files));
-            }
-            Command::SetRoots { roots, reply } => {
-                interp.set_roots(roots);
-                let _ = reply.send(());
-            }
-            Command::CallTool {
-                addon_id,
-                tool,
-                args,
-                reply,
-            } => {
-                let out = interp
-                    .call("call-tool", vec![addon_id.into(), tool.into(), args])
-                    .and_then(|envelope| policy::tool_reply(&envelope));
-                let _ = reply.send(out);
-            }
-            Command::Slash {
-                addon_id,
-                name,
-                ctx,
-                reply,
-            } => {
-                let out = interp
-                    .call("run-command", vec![addon_id.into(), name.into(), ctx])
-                    .and_then(|envelope| policy::tool_reply(&envelope));
-                let _ = reply.send(out);
-            }
-            Command::Hook { point, ctx, reply } => {
-                let replies = interp
-                    .call("run-hook", vec![point.key().into(), ctx])
-                    .map(|answer| policy::hook_replies(&answer))
-                    .unwrap_or_else(|e| {
-                        tracing::warn!(target: "dirge::addon", hook = point.key(), error = %e, "run-hook failed");
-                        Vec::new()
-                    });
-                let _ = reply.send(replies);
-            }
-            Command::Shutdown { reply } => {
-                interp.shutdown();
-                let _ = reply.send(());
+    let mut repl = Repl::start(&interp, &options);
+    let _ = ready.send(Ok(repl.endpoint()));
+    // `Err` once every handle dropped without an explicit shutdown.
+    while let Ok(next) = repl.wait(&rx) {
+        if let Some((on_runtime, command)) = next {
+            interp.caller_on_runtime.set(on_runtime);
+            if !interp.handle(command, &shared) {
                 return;
             }
         }
+        interp.caller_on_runtime.set(false);
+        if repl.serve() && options.refresh_after_eval {
+            interp.refresh_requested.set(true);
+        }
+        if interp.refresh_requested.replace(false) {
+            interp.publish_refresh(&shared);
+        }
     }
-    // Every handle dropped without an explicit shutdown.
     interp.shutdown();
+}
+
+/// The isolate's nREPL, when the build and the options have one.
+struct Repl {
+    #[cfg(feature = "addons-nrepl")]
+    poller: Option<(cljrs_nrepl::Poller, String)>,
+}
+
+impl Repl {
+    #[cfg_attr(not(feature = "addons-nrepl"), allow(unused_variables))]
+    fn start(interp: &Interp, options: &IsolateOptions) -> Self {
+        #[cfg(feature = "addons-nrepl")]
+        {
+            let poller = options.repl.as_ref().and_then(|repl| {
+                let config = cljrs_nrepl::Config {
+                    addr: repl.addr,
+                    port_file: repl.port_file.clone(),
+                };
+                if let Some(dir) = repl.port_file.as_deref().and_then(Path::parent) {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                match cljrs_nrepl::start(config, interp.globals.clone()) {
+                    Ok(server) => {
+                        let endpoint = format!("{}:{}", repl.addr.ip(), server.port());
+                        tracing::info!(target: "dirge::addon", %endpoint, "addon nREPL listening");
+                        Some((server.into_poller(), endpoint))
+                    }
+                    Err(error) => {
+                        tracing::warn!(target: "dirge::addon", %error, "addon nREPL did not start");
+                        None
+                    }
+                }
+            });
+            Self { poller }
+        }
+        #[cfg(not(feature = "addons-nrepl"))]
+        Self {}
+    }
+
+    fn endpoint(&self) -> Option<String> {
+        #[cfg(feature = "addons-nrepl")]
+        return self.poller.as_ref().map(|(_, endpoint)| endpoint.clone());
+        #[cfg(not(feature = "addons-nrepl"))]
+        None
+    }
+
+    /// The next command: waited for without bound when no REPL runs, for a
+    /// tick when one does, so its requests are served between commands.
+    /// `Err` once every handle is gone.
+    fn wait(&self, rx: &Receiver<Envelope>) -> Result<Option<Envelope>, ()> {
+        #[cfg(feature = "addons-nrepl")]
+        if self.poller.is_some() {
+            return match rx.recv_timeout(REPL_TICK) {
+                Ok(envelope) => Ok(Some(envelope)),
+                Err(RecvTimeoutError::Timeout) => Ok(None),
+                Err(RecvTimeoutError::Disconnected) => Err(()),
+            };
+        }
+        rx.recv().map(Some).map_err(|_| ())
+    }
+
+    /// Evaluate what REPL clients sent meanwhile; true when something was
+    /// evaluated. cljrs's `EvalError` is large, and it is the evaluator's
+    /// own return type.
+    #[allow(clippy::result_large_err)]
+    fn serve(&mut self) -> bool {
+        #[cfg(feature = "addons-nrepl")]
+        if let Some((poller, _)) = self.poller.as_mut() {
+            let mut evaluated = false;
+            let status = poller.poll(&mut |form: &cljrs_reader::Form, env: &mut Env| {
+                evaluated = true;
+                eval(form, env)
+            });
+            if status == cljrs_nrepl::PollStatus::Closed {
+                tracing::warn!(target: "dirge::addon", "addon nREPL closed");
+                self.poller = None;
+            }
+            return evaluated;
+        }
+        false
+    }
 }
 
 /// The runtime as the thread holds it.
@@ -384,6 +513,9 @@ struct Interp {
     /// True while serving a caller that blocks dirge's runtime; the harness
     /// refuses anything that would wait on it.
     caller_on_runtime: Rc<Cell<bool>>,
+    /// Set by `dirge.harness/refresh!`: re-read the addons once the current
+    /// work is done.
+    refresh_requested: Rc<Cell<bool>>,
     stopped: bool,
 }
 
@@ -397,7 +529,13 @@ impl Interp {
             .map_err(|e| format!("cannot build the cljrs runtime: {e}"))?;
         cljrs_stdlib::install(&runtime);
         let caller_on_runtime = Rc::new(Cell::new(false));
-        harness::install(runtime.globals(), harness, caller_on_runtime.clone());
+        let refresh_requested = Rc::new(Cell::new(false));
+        harness::install(
+            runtime.globals(),
+            harness,
+            caller_on_runtime.clone(),
+            refresh_requested.clone(),
+        );
         let inbox = Rc::new(RefCell::new(Vec::new()));
         install_bridge(runtime.globals(), inbox.clone());
         let mut interp = Self {
@@ -406,6 +544,7 @@ impl Interp {
             roots,
             inbox,
             caller_on_runtime,
+            refresh_requested,
             stopped: false,
         };
         interp
@@ -416,6 +555,101 @@ impl Interp {
             .and_then(|answer| policy::tool_reply(&answer))
             .map_err(|e| format!("cannot bind the IAddon protocol {protocol_ns}: {e}"))?;
         Ok(interp)
+    }
+
+    /// Answer one command; false once it was the shutdown.
+    fn handle(&mut self, command: Command, shared: &Shared) -> bool {
+        match command {
+            Command::Load {
+                manifest,
+                host_config,
+                reply,
+            } => {
+                let path = Json::String(manifest.display().to_string());
+                let report = self
+                    .call("load-addon!", vec![path, host_config])
+                    .unwrap_or_else(|e| json!({ "error": e }));
+                let _ = reply.send(report);
+            }
+            Command::Unload { addon_id, reply } => {
+                if let Err(e) = self.call("shutdown-addon!", vec![addon_id.clone().into()]) {
+                    tracing::warn!(target: "dirge::addon", addon = %addon_id, error = %e, "unload failed");
+                }
+                let _ = reply.send(());
+            }
+            Command::ReloadSources { files, reply } => {
+                let _ = reply.send(self.reload_sources(&files));
+            }
+            Command::SetRoots { roots, reply } => {
+                self.set_roots(roots);
+                let _ = reply.send(());
+            }
+            Command::CallTool {
+                addon_id,
+                tool,
+                args,
+                reply,
+            } => {
+                let out = self
+                    .call("call-tool", vec![addon_id.into(), tool.into(), args])
+                    .and_then(|envelope| policy::tool_reply(&envelope));
+                let _ = reply.send(out);
+            }
+            Command::Slash {
+                addon_id,
+                name,
+                ctx,
+                reply,
+            } => {
+                let out = self
+                    .call("run-command", vec![addon_id.into(), name.into(), ctx])
+                    .and_then(|envelope| policy::tool_reply(&envelope));
+                let _ = reply.send(out);
+            }
+            Command::Hook { key, ctx, reply } => {
+                let _ = reply.send(self.run_hook(&key, ctx));
+            }
+            Command::Post { key, ctx } => {
+                for reply in self.run_hook(&key, ctx) {
+                    if let Err(error) = reply.result {
+                        tracing::warn!(target: "dirge::addon", addon = %reply.addon_id, hook = %key, %error, "addon hook failed; ignored");
+                    }
+                }
+                shared.posted.fetch_sub(1, Ordering::SeqCst);
+            }
+            Command::Shutdown { reply } => {
+                self.shutdown();
+                let _ = reply.send(());
+                return false;
+            }
+        }
+        true
+    }
+
+    fn run_hook(&mut self, key: &str, ctx: Json) -> Vec<HookReply> {
+        self.call("run-hook", vec![key.into(), ctx])
+            .map(|answer| policy::hook_replies(&answer))
+            .unwrap_or_else(|e| {
+                tracing::warn!(target: "dirge::addon", hook = key, error = %e, "run-hook failed");
+                Vec::new()
+            })
+    }
+
+    /// Re-read every addon in place and leave the summaries for the handle
+    /// to take, then say the addons changed.
+    fn publish_refresh(&mut self, shared: &Shared) {
+        match self.call("refresh!", Vec::new()) {
+            Ok(Json::Array(reports)) => {
+                *shared.refreshed.lock_ignore_poison() = Some(reports);
+                crate::addons::live::notify();
+            }
+            Ok(other) => {
+                tracing::warn!(target: "dirge::addon", answer = %other, "addon refresh answered no summaries");
+            }
+            Err(error) => {
+                tracing::warn!(target: "dirge::addon", %error, "addon refresh failed");
+            }
+        }
     }
 
     /// `(apply dirge.addon.host/<f> args)`, arguments passed as data rather

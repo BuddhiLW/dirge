@@ -807,6 +807,8 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
     if let Some(addons) = &cfg.addon_hooks {
         addons.install_tool_hooks(&mut loop_config);
     }
+    // The addons also hear the run's events, from the pump below.
+    let addon_observer = cfg.addon_hooks.clone();
 
     let mut context = Context {
         system_prompt: cfg.system_prompt,
@@ -940,6 +942,9 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
                     // splits others, so "did the loop decide this" and "would
                     // the TUI show this twice" need separate answers.
                     super::trace::record_ui_event(&agent_evt);
+                    if let Some(addons) = &addon_observer {
+                        addons.observe(&agent_evt);
+                    }
                     let ends_the_run = super::run_end::is_terminal(&agent_evt);
                     // If the receiver dropped (UI exited),
                     // stop pumping — loop_future continues

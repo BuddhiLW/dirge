@@ -4673,6 +4673,23 @@ pub async fn run_interactive(
                         renderer.set_avatar_state(avatar::AvatarState::settled(ui.is_running));
                         renderer.request_repaint();
                     }
+                    // The addons changed in place (a REPL evaluation or
+                    // `dirge.harness/refresh!`): the live agent takes their tools as
+                    // they are now. Unconditional arm; never ready without `addons`.
+                    _ = crate::ui::addon_phase::live_change() => {
+                        #[cfg(feature = "addons")]
+                        {
+                            let landing = crate::ui::addon_phase::land_live(
+                                &mut agent, &permission, &ask_tx,
+                            );
+                            for line in &landing.lines {
+                                renderer.write_line(&line.text, line.tone.color())?;
+                            }
+                            if !landing.lines.is_empty() {
+                                renderer.request_repaint();
+                            }
+                        }
+                    }
                     Some(ask_req) = async {
                         if let Some(rx) = &mut ask_rx {
                             rx.recv().await

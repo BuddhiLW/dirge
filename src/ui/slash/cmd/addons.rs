@@ -56,7 +56,11 @@ fn list(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
         return Ok(());
     };
     let addons = host.addons();
+    let hook_keys = host.hook_keys();
     renderer.write_line(&format!("loaded {} addon(s):", addons.len()), c_agent())?;
+    if let Some(endpoint) = host.repl_endpoint() {
+        renderer.write_line(&format!("  nREPL    : {endpoint}"), theme::dim())?;
+    }
     for addon in &addons {
         let status = addon
             .health
@@ -79,7 +83,11 @@ fn list(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
             ),
             (
                 "hooks   ",
-                addon.hooks.iter().map(|h| h.key().to_string()).collect(),
+                hook_keys
+                    .iter()
+                    .find(|(id, _)| *id == addon.id)
+                    .map(|(_, keys)| keys.clone())
+                    .unwrap_or_else(|| addon.hooks.iter().map(|h| h.key().to_string()).collect()),
             ),
             (
                 "commands",

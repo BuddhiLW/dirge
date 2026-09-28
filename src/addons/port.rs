@@ -36,6 +36,38 @@ pub trait AddonRuntime: Send + Sync + 'static {
     /// Call every addon's `point` hook with `ctx`, in load order.
     fn run_hook(&self, point: HookPoint, ctx: &Value) -> Vec<HookReply>;
 
+    /// Call every addon's hook keyed `key` (a keyword without its colon,
+    /// e.g. `dirge/event`) with `ctx`, in load order. Unlike [`run_hook`] the
+    /// key is open: a seam needs no [`HookPoint`] of its own to reach addons.
+    /// The default reaches only the keys a [`HookPoint`] names.
+    ///
+    /// [`run_hook`]: AddonRuntime::run_hook
+    fn run_hook_key(&self, key: &str, ctx: &Value) -> Vec<HookReply> {
+        HookPoint::from_key(key)
+            .map(|point| self.run_hook(point, ctx))
+            .unwrap_or_default()
+    }
+
+    /// Hand `ctx` to every addon's hook keyed `key` without waiting for the
+    /// answers, which are dropped. May drop the call itself when the runtime
+    /// is backed up. The default runs it in place.
+    fn post_hook(&self, key: &str, ctx: &Value) {
+        let _ = self.run_hook_key(key, ctx);
+    }
+
+    /// The addons' summaries as the runtime re-read them since the last
+    /// call, when it did: after a REPL evaluation, or when addon code asked
+    /// with `dirge.harness/refresh!`. One load report per addon, in load
+    /// order.
+    fn take_refreshed(&self) -> Option<Vec<Value>> {
+        None
+    }
+
+    /// Where a REPL into this runtime listens (`host:port`), if one does.
+    fn repl_endpoint(&self) -> Option<String> {
+        None
+    }
+
     /// Shut every addon down. Idempotent.
     fn shutdown(&self);
 }

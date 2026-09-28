@@ -672,6 +672,28 @@ pub struct AddonsConfig {
     /// Seconds dirge waits for `:dirge/session-end` before it goes on (and,
     /// on exit, closes the MCP servers). Default 10.
     pub session_end_timeout_secs: Option<u64>,
+    /// An nREPL server inside the addon runtime (cargo feature
+    /// `addons-nrepl`). Absent = no server, unless `DIRGE_ADDON_NREPL` asks.
+    pub nrepl: Option<AddonsNreplConfig>,
+    /// After an nREPL evaluation or `dirge.harness/refresh!`, read every
+    /// addon's tools, hooks and commands again and hand the changes to the
+    /// running agent. Default true.
+    pub live_refresh: Option<bool>,
+}
+
+/// The `addons.nrepl` key.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AddonsNreplConfig {
+    /// `false` starts no server. Default true once the key is present.
+    pub enabled: Option<bool>,
+    /// Port to listen on; 0 (the default) lets the OS pick one.
+    pub port: Option<u16>,
+    /// Address to bind. Default `127.0.0.1`.
+    pub bind: Option<String>,
+    /// File the bound port is written to, relative to the working directory.
+    /// Default `.dirge/addons/.nrepl-port`; `""` writes none.
+    pub port_file: Option<String>,
 }
 
 /// Prompt-compression engine config. Disabled → no compression. Enabled with

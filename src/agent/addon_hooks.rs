@@ -27,6 +27,11 @@ pub trait AddonHooks: Send + Sync + 'static {
     /// The step that runs the addons' prompt hooks as a run of `session_id`
     /// opens. `None` when no addon listens on them.
     fn open_run(&self, session_id: Option<String>, first_prompt: bool) -> Option<OpenRunFn>;
+
+    /// Hear one event of the run as the front end gets it. Called on the
+    /// pump every event of the run passes through, so it must not block:
+    /// hand the event on and return.
+    fn observe(&self, _event: &crate::event::AgentEvent) {}
 }
 
 static INSTALLED: OnceLock<Arc<dyn AddonHooks>> = OnceLock::new();

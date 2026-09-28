@@ -10,9 +10,11 @@
 pub mod cljrs;
 pub mod discovery;
 pub mod domain;
+pub mod events;
 pub mod host;
 pub mod layout;
 pub mod lifecycle;
+pub mod live;
 pub mod loop_hooks;
 pub mod manifest;
 #[cfg(feature = "mcp")]
@@ -26,12 +28,15 @@ pub mod tool_calls;
 
 #[cfg(test)]
 mod acceptance_tests;
+#[cfg(test)]
+mod live_tests;
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use serde_json::json;
 
+use cljrs::isolate::IsolateOptions;
 use domain::{AddonPlan, LoadFailure, ReloadReport};
 use host::{AddonHost, LoadSet};
 use port::Harness;
@@ -64,7 +69,12 @@ pub fn install_from_config(cfg: &crate::config::Config) {
     if plan.is_empty() {
         return;
     }
-    match start(plan, harness(), protocol_ns(&settings)) {
+    match start_with(
+        plan,
+        harness(),
+        protocol_ns(&settings),
+        isolate_options(&settings),
+    ) {
         Ok(host) => {
             for failure in host.failures() {
                 tracing::warn!(
@@ -103,7 +113,12 @@ pub fn reload(
         register_commands(&host);
         return Ok((host, report));
     }
-    let host = Arc::new(start(plan, harness(), protocol_ns(settings))?);
+    let host = Arc::new(start_with(
+        plan,
+        harness(),
+        protocol_ns(settings),
+        isolate_options(settings),
+    )?);
     let report = ReloadReport {
         loaded: host.addons().into_iter().map(|a| a.id).collect(),
         failures: host.failures(),
@@ -124,7 +139,18 @@ pub fn shutdown() {
 /// Validate, boot, load: the plan becomes a running host. Manifests that
 /// fail validation or loading are kept as [`LoadFailure`]s beside the
 /// addons that loaded.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn start(plan: AddonPlan, harness: Harness, protocol_ns: &str) -> Result<AddonHost, String> {
+    start_with(plan, harness, protocol_ns, IsolateOptions::default())
+}
+
+/// [`start`], the runtime set up by `options`.
+pub fn start_with(
+    plan: AddonPlan,
+    harness: Harness,
+    protocol_ns: &str,
+    options: IsolateOptions,
+) -> Result<AddonHost, String> {
     let set = load_set(&plan, false);
     if set.manifests.is_empty() {
         return Err(describe_failures(&set.failures));
@@ -133,6 +159,7 @@ pub fn start(plan: AddonPlan, harness: Harness, protocol_ns: &str) -> Result<Add
         set.source_roots.clone(),
         harness,
         protocol_ns,
+        options,
     )?);
     let host_config = json!({ "harness": "dirge", "version": env!("CARGO_PKG_VERSION") });
     Ok(AddonHost::load(isolate, set, host_config))
@@ -211,6 +238,63 @@ fn harness() -> Harness {
     harness
 }
 
+/// How the runtime is set up: whether it serves an nREPL, and whether a
+/// REPL evaluation re-reads the addons.
+fn isolate_options(settings: &crate::config::AddonsConfig) -> IsolateOptions {
+    IsolateOptions {
+        #[cfg(feature = "addons-nrepl")]
+        repl: repl_options(
+            settings.nrepl.as_ref(),
+            std::env::var("DIRGE_ADDON_NREPL").ok().as_deref(),
+        ),
+        refresh_after_eval: settings.live_refresh != Some(false),
+    }
+}
+
+/// Default file the addon nREPL's port is written to, under the working
+/// directory.
+#[cfg(feature = "addons-nrepl")]
+pub const DEFAULT_REPL_PORT_FILE: &str = ".dirge/addons/.nrepl-port";
+
+/// The nREPL `config` and the `DIRGE_ADDON_NREPL` value `env` ask for.
+/// `env` wins: `0`, `false`, `off` or `no` start none; `1`, `true`, `on` or
+/// `yes` start one on the configured (or an OS-picked) port; any other
+/// number listens on that port.
+#[cfg(feature = "addons-nrepl")]
+fn repl_options(
+    config: Option<&crate::config::AddonsNreplConfig>,
+    env: Option<&str>,
+) -> Option<cljrs::isolate::ReplOptions> {
+    let env = env.map(str::trim).filter(|v| !v.is_empty());
+    let env_port = match env {
+        Some("0" | "false" | "off" | "no") => return None,
+        Some("1" | "true" | "on" | "yes") => None,
+        Some(v) => v.parse::<u16>().ok(),
+        None => None,
+    };
+    if env.is_none() && config.is_none_or(|c| c.enabled == Some(false)) {
+        return None;
+    }
+    let default = crate::config::AddonsNreplConfig::default();
+    let config = config.unwrap_or(&default);
+    let ip: std::net::IpAddr = config
+        .bind
+        .as_deref()
+        .and_then(|b| b.parse().ok())
+        .unwrap_or(std::net::IpAddr::from([127, 0, 0, 1]));
+    let port = env_port.or(config.port).unwrap_or(0);
+    let port_file = match config.port_file.as_deref() {
+        Some("") => None,
+        Some(file) => Some(expand_home(file)),
+        None => Some(PathBuf::from(DEFAULT_REPL_PORT_FILE)),
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    Some(cljrs::isolate::ReplOptions {
+        addr: std::net::SocketAddr::new(ip, port),
+        port_file: port_file.map(|f| if f.is_absolute() { f } else { cwd.join(f) }),
+    })
+}
+
 fn protocol_ns(settings: &crate::config::AddonsConfig) -> &str {
     settings
         .protocol_ns
@@ -283,5 +367,48 @@ fn expand_home(path: &str) -> PathBuf {
     match (path.strip_prefix("~/"), dirs::home_dir()) {
         (Some(rest), Some(home)) => home.join(rest),
         _ => PathBuf::from(path),
+    }
+}
+
+#[cfg(all(test, feature = "addons-nrepl"))]
+mod repl_option_tests {
+    use super::*;
+    use crate::config::AddonsNreplConfig;
+
+    #[test]
+    fn no_key_and_no_env_starts_no_repl() {
+        assert!(repl_options(None, None).is_none());
+    }
+
+    #[test]
+    fn a_present_key_starts_one_on_loopback_with_the_default_port_file() {
+        let repl = repl_options(Some(&AddonsNreplConfig::default()), None).expect("a repl");
+        assert_eq!(repl.addr, std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
+        assert!(repl.port_file.unwrap().ends_with(DEFAULT_REPL_PORT_FILE));
+    }
+
+    #[test]
+    fn the_env_overrides_the_key_both_ways() {
+        let off = AddonsNreplConfig {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        let repl = repl_options(Some(&off), Some("7888")).expect("env turns it on");
+        assert_eq!(repl.addr.port(), 7888);
+        assert!(repl_options(Some(&AddonsNreplConfig::default()), Some("off")).is_none());
+        let on = repl_options(None, Some("1")).expect("env alone turns it on");
+        assert_eq!(on.addr.port(), 0, "1 means on, not port 1");
+    }
+
+    #[test]
+    fn an_empty_port_file_writes_none() {
+        let config = AddonsNreplConfig {
+            port_file: Some(String::new()),
+            port: Some(7000),
+            ..Default::default()
+        };
+        let repl = repl_options(Some(&config), None).expect("a repl");
+        assert!(repl.port_file.is_none());
+        assert_eq!(repl.addr.port(), 7000);
     }
 }

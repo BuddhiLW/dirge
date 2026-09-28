@@ -32,6 +32,9 @@ struct Loaded {
     failures: Vec<LoadFailure>,
     tools: Vec<ToolSpec>,
     commands: Vec<CommandSpec>,
+    /// Every hook key each addon registered, by addon id, the ones no
+    /// [`HookPoint`] names included: what [`AddonHost::emit`] reaches.
+    hook_keys: Vec<(String, Vec<String>)>,
 }
 
 impl Loaded {
@@ -52,12 +55,42 @@ impl Loaded {
                 "addon command dropped: an earlier addon already registered that name"
             );
         }
+        let hook_keys = addons
+            .iter()
+            .map(|a| {
+                let keys = a.hooks.iter().map(|h| h.key().to_string()).collect();
+                (a.id.clone(), keys)
+            })
+            .collect();
         Self {
             addons,
             failures,
             tools,
             commands,
+            hook_keys,
         }
+    }
+
+    /// Add the hook keys load reports named beside the ones a [`HookPoint`]
+    /// names; `reports` are `(addon id, load report)`.
+    fn with_reported_keys(mut self, reports: &[(String, Value)]) -> Self {
+        for (id, report) in reports {
+            let reported = policy::hook_keys(report);
+            if let Some((_, keys)) = self.hook_keys.iter_mut().find(|(a, _)| a == id) {
+                for key in reported {
+                    if !keys.contains(&key) {
+                        keys.push(key);
+                    }
+                }
+            }
+        }
+        self
+    }
+
+    fn listens_key(&self, key: &str) -> bool {
+        self.hook_keys
+            .iter()
+            .any(|(_, keys)| keys.iter().any(|k| k == key))
     }
 }
 
@@ -66,13 +99,51 @@ impl Loaded {
 fn load_all(runtime: &dyn AddonRuntime, set: &LoadSet, host_config: &Value) -> Loaded {
     let mut failures = set.failures.clone();
     let mut addons = Vec::new();
+    let mut reports = Vec::new();
     for manifest in &set.manifests {
-        match policy::parse_summary(manifest, &runtime.load(manifest, host_config)) {
-            Ok(summary) => addons.push(summary),
+        let report = runtime.load(manifest, host_config);
+        match policy::parse_summary(manifest, &report) {
+            Ok(summary) => {
+                reports.push((summary.id.clone(), report));
+                addons.push(summary);
+            }
             Err(failure) => failures.push(failure),
         }
     }
-    Loaded::new(addons, failures)
+    Loaded::new(addons, failures).with_reported_keys(&reports)
+}
+
+/// `before` with the summaries a runtime re-read in place, `refreshed` being
+/// one load report per addon. An addon whose report failed keeps what it
+/// had, and the failure is logged.
+fn refreshed(before: &Loaded, refreshed: &[Value]) -> Loaded {
+    let mut addons = Vec::new();
+    let mut reports = Vec::new();
+    for old in &before.addons {
+        let report = refreshed
+            .iter()
+            .find(|r| r.get("id").and_then(Value::as_str) == Some(old.id.as_str()));
+        match report.map(|r| (r, policy::parse_summary(&old.manifest, r))) {
+            Some((report, Ok(summary))) => {
+                reports.push((summary.id.clone(), report.clone()));
+                addons.push(summary);
+            }
+            Some((_, Err(failure))) => {
+                tracing::warn!(
+                    target: "dirge::addon",
+                    addon = %old.id,
+                    error = %failure.error,
+                    "addon refresh failed; keeping what it registered before"
+                );
+                if let Some((_, keys)) = before.hook_keys.iter().find(|(a, _)| *a == old.id) {
+                    reports.push((old.id.clone(), serde_json::json!({ "hooks": keys })));
+                }
+                addons.push(old.clone());
+            }
+            None => addons.push(old.clone()),
+        }
+    }
+    Loaded::new(addons, before.failures.clone()).with_reported_keys(&reports)
 }
 
 /// True for a slash command name that dirge dispatches before any addon
@@ -147,6 +218,9 @@ impl AddonHost {
             .map(|(manifest, error)| LoadFailure { manifest, error })
             .collect();
         let after = load_all(self.runtime.as_ref(), &set, &self.host_config);
+        // What a refresh re-read before this reload describes addons that no
+        // longer run; taking it in later would undo the reload.
+        let _ = self.runtime.take_refreshed();
         let (tools_added, tools_removed) = policy::tool_diff(&before.tools, &after.tools);
         let report = ReloadReport {
             loaded: after.addons.iter().map(|a| a.id.clone()).collect(),
@@ -229,6 +303,62 @@ impl AddonHost {
             .any(|a| a.hooks.contains(&point))
     }
 
+    /// True when at least one addon registered a hook keyed `key` (a keyword
+    /// without its colon), whether or not a [`HookPoint`] names it.
+    pub fn listens_key(&self, key: &str) -> bool {
+        self.loaded.lock_ignore_poison().listens_key(key)
+    }
+
+    /// Every addon's answer to the hook keyed `key`, failures logged. The
+    /// open counterpart of the [`HookPoint`] calls: a new seam calls this
+    /// with its own key and reads the replies, and no addon type changes.
+    pub fn emit(&self, key: &str, ctx: &Value) -> Vec<super::domain::HookReply> {
+        if !self.listens_key(key) {
+            return Vec::new();
+        }
+        let replies = self.runtime.run_hook_key(key, ctx);
+        log_key_failures(key, &replies);
+        replies
+    }
+
+    /// Hand `ctx` to the hook keyed `key` without waiting; answers are
+    /// dropped. For observers on paths that must never block.
+    pub fn post(&self, key: &str, ctx: &Value) {
+        if self.listens_key(key) {
+            self.runtime.post_hook(key, ctx);
+        }
+    }
+
+    /// Take in what the runtime re-read since the last call (after a REPL
+    /// evaluation or `dirge.harness/refresh!`): the addons' tools, hooks and
+    /// commands are replaced, their lifecycles untouched. `None` when
+    /// nothing was re-read.
+    pub fn sync(&self) -> Option<ReloadReport> {
+        let reports = self.runtime.take_refreshed()?;
+        let mut loaded = self.loaded.lock_ignore_poison();
+        let after = refreshed(&loaded, &reports);
+        let (tools_added, tools_removed) = policy::tool_diff(&loaded.tools, &after.tools);
+        let report = ReloadReport {
+            loaded: after.addons.iter().map(|a| a.id.clone()).collect(),
+            failures: after.failures.clone(),
+            source_errors: Vec::new(),
+            tools_added,
+            tools_removed,
+        };
+        *loaded = after;
+        Some(report)
+    }
+
+    /// Where a REPL into the addon runtime listens, if one does.
+    pub fn repl_endpoint(&self) -> Option<String> {
+        self.runtime.repl_endpoint()
+    }
+
+    /// Every hook key each addon registered, by addon id.
+    pub fn hook_keys(&self) -> Vec<(String, Vec<String>)> {
+        self.loaded.lock_ignore_poison().hook_keys.clone()
+    }
+
     /// Run a tool: the runtime call, then the handler's return value read as
     /// `(content blocks, details)`.
     pub fn call_tool(&self, tool: &ToolSpec, args: &Value) -> Result<(Vec<Value>, Value), String> {
@@ -253,22 +383,12 @@ impl AddonHost {
 
     /// Texts every addon answered `point` with.
     pub fn texts(&self, point: HookPoint, ctx: &Value) -> Vec<String> {
-        if !self.listens(point) {
-            return Vec::new();
-        }
-        let replies = self.runtime.run_hook(point, ctx);
-        log_failures(point, &replies);
-        policy::texts(&replies)
+        policy::texts(&self.emit(point.key(), ctx))
     }
 
     /// The folded `BeforeToolCall` answer.
     pub fn before_tool_call(&self, ctx: &Value) -> BeforeOutcome {
-        if !self.listens(HookPoint::BeforeToolCall) {
-            return BeforeOutcome::default();
-        }
-        let replies = self.runtime.run_hook(HookPoint::BeforeToolCall, ctx);
-        log_failures(HookPoint::BeforeToolCall, &replies);
-        policy::fold_before(&replies)
+        policy::fold_before(&self.emit(HookPoint::BeforeToolCall.key(), ctx))
     }
 
     /// Texts every addon answered `:dirge/session-start` with.
@@ -278,10 +398,7 @@ impl AddonHost {
 
     /// Run `:dirge/session-end`; answers are ignored and failures logged.
     pub fn session_end(&self, ctx: &Value) {
-        if self.listens(HookPoint::SessionEnd) {
-            let replies = self.runtime.run_hook(HookPoint::SessionEnd, ctx);
-            log_failures(HookPoint::SessionEnd, &replies);
-        }
+        self.emit(HookPoint::SessionEnd.key(), ctx);
     }
 
     pub fn shutdown(&self) {
@@ -290,13 +407,13 @@ impl AddonHost {
 }
 
 /// Logs failed hook replies.
-fn log_failures(point: HookPoint, replies: &[super::domain::HookReply]) {
+fn log_key_failures(key: &str, replies: &[super::domain::HookReply]) {
     for reply in replies {
         if let Err(error) = &reply.result {
             tracing::warn!(
                 target: "dirge::addon",
                 addon = %reply.addon_id,
-                hook = point.key(),
+                hook = key,
                 %error,
                 "addon hook failed; ignored"
             );
@@ -321,6 +438,8 @@ pub(crate) mod tests {
         /// Load reports, answered in order.
         pub load_answers: Mutex<VecDeque<Value>>,
         pub source_errors: Vec<(PathBuf, String)>,
+        /// What `take_refreshed` answers, once.
+        pub refreshed: Mutex<Option<Vec<Value>>>,
         pub calls: Mutex<Vec<String>>,
     }
 
@@ -366,6 +485,10 @@ pub(crate) mod tests {
         fn run_hook(&self, point: HookPoint, ctx: &Value) -> Vec<HookReply> {
             self.record(format!("hook {} {ctx}", point.key()));
             self.hook_answers.clone()
+        }
+
+        fn take_refreshed(&self) -> Option<Vec<Value>> {
+            self.refreshed.lock().unwrap().take()
         }
 
         fn shutdown(&self) {
@@ -580,6 +703,49 @@ pub(crate) mod tests {
         assert_eq!(names(host.addons()[0].commands.clone()), vec!["go"]);
         assert!(host.command("memory").is_none());
         assert!(host.command("go").is_some());
+    }
+
+    #[test]
+    fn a_sync_takes_in_what_the_runtime_re_read_and_keeps_an_addon_that_failed() {
+        let rt = ScriptedRuntime::default();
+        *rt.refreshed.lock().unwrap() = Some(vec![
+            json!({"id": "a", "tools": [{"name": "x"}, {"name": "new"}], "hooks": ["acme/ping"]}),
+            json!({"id": "b", "error": "threw"}),
+        ]);
+        let (host, _) = host(
+            rt,
+            vec![summary("a", &["x"], &[]), summary("b", &["kept"], &[])],
+        );
+
+        let report = host.sync().expect("something was re-read");
+
+        assert_eq!(report.tools_added, vec!["new".to_string()]);
+        assert!(report.tools_removed.is_empty(), "b keeps its tool");
+        let tools: Vec<String> = host.tools().into_iter().map(|t| t.exposed_name).collect();
+        assert_eq!(tools, vec!["x", "new", "kept"]);
+        assert!(
+            host.listens_key("acme/ping"),
+            "open keys come with the refresh"
+        );
+        assert!(host.sync().is_none(), "taken once");
+    }
+
+    #[test]
+    fn a_reload_drops_what_a_refresh_re_read_before_it() {
+        let rt = ScriptedRuntime::default();
+        rt.load_answers
+            .lock()
+            .unwrap()
+            .push_back(json!({"id": "a", "tools": [{"name": "y"}]}));
+        *rt.refreshed.lock().unwrap() =
+            Some(vec![json!({"id": "a", "tools": [{"name": "stale"}]})]);
+        let (host, _) = host(rt, vec![summary("a", &["x"], &[])]);
+
+        host.reload(load_set(&["a.edn"]));
+
+        assert!(host.sync().is_none());
+        let tools: Vec<String> = host.tools().into_iter().map(|t| t.exposed_name).collect();
+        assert_eq!(tools, vec!["y"]);
     }
 
     #[test]

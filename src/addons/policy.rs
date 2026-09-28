@@ -38,6 +38,21 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 
 /// The host's load report for one manifest, as a summary or the reason it
 /// failed.
+/// Every hook key a load report names, as written (`dirge/event`, a colon
+/// stripped), those no [`HookPoint`] names included.
+pub fn hook_keys(report: &Value) -> Vec<String> {
+    report
+        .get("hooks")
+        .and_then(Value::as_array)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(Value::as_str)
+                .map(|k| k.strip_prefix(':').unwrap_or(k).to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn parse_summary(manifest: &Path, report: &Value) -> Result<AddonSummary, LoadFailure> {
     let fail = |error: String| LoadFailure {
         manifest: manifest.to_path_buf(),
