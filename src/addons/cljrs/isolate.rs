@@ -355,21 +355,27 @@ impl Interp {
         self.roots = roots;
     }
 
-    /// Evaluate `files` again; the ones that failed, with why. Files outside
-    /// every root cannot be named as a namespace and are left alone.
+    /// Evaluate `files` again, each named by the most specific root holding
+    /// it (null when none does); the ones that failed, with why. Files left
+    /// alone because nothing loaded their namespace are logged.
     fn reload_sources(&mut self, files: &[PathBuf]) -> Vec<(PathBuf, String)> {
         let sources: Vec<Json> = files
             .iter()
-            .filter_map(|file| {
-                let ns = self
-                    .roots
-                    .iter()
-                    .find_map(|root| layout::namespace_of(root, file))?;
-                Some(json!({ "file": file.display().to_string(), "ns": ns }))
+            .map(|file| {
+                json!({
+                    "file": file.display().to_string(),
+                    "ns": layout::namespace_in(&self.roots, file),
+                })
             })
             .collect();
         match self.call("reload-sources!", vec![Json::Array(sources)]) {
-            Ok(answer) => policy::source_errors(&answer),
+            Ok(answer) => {
+                let (errors, skipped) = policy::source_report(&answer);
+                for (file, why) in skipped {
+                    tracing::warn!(target: "dirge::addon", file = %file.display(), %why, "addon source not reloaded");
+                }
+                errors
+            }
             Err(e) => files.iter().map(|f| (f.clone(), e.clone())).collect(),
         }
     }
