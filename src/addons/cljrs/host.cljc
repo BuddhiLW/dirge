@@ -58,16 +58,22 @@
   [tools]
   (into {} (map (juxt :name identity)) tools))
 
+(defn command-name
+  "The name typed after `/` for a :dirge/commands key: its name without
+   leading slashes."
+  [k]
+  (or (re-find #"[^/].*" (name k)) ""))
+
 (defn command-index
-  "The slash commands in a hooks map's :dirge/commands entry, keyed by name:
-   {\"name\" {:description d :handler f}}. Entries without a handler are
-   dropped."
+  "The slash commands in a hooks map's :dirge/commands entry, keyed by
+   command-name: {\"name\" {:description d :handler f}}. Entries without a
+   handler are dropped."
   [hooks]
   (into {}
         (for [[k spec] (get hooks :dirge/commands)
               :when (some? (:handler spec))]
-          [(name k) {:description (or (:description spec) "")
-                     :handler     (:handler spec)}])))
+          [(command-name k) {:description (or (:description spec) "")
+                             :handler     (:handler spec)}])))
 
 (defn command-views
   "What dirge needs of indexed commands: names and descriptions, sorted."
@@ -100,7 +106,8 @@
           (reset! !protocol (merge required
                                    (into {} (remove (comp nil? val)) optional)
                                    {:unimplemented-method? (or (:unimplemented-method? optional)
-                                                               default-unimplemented?)}))
+                                                               default-unimplemented?)
+                                    :protocol-ns           (symbol protocol-ns)}))
           {:ok protocol-ns})))
     (catch #?(:clj Throwable :default :default) t
       (failure t))))
@@ -220,16 +227,80 @@
     (in-ns saved)
     result))
 
-(defn reload-sources!
-  "Evaluate again every source in `sources` ({:file path :ns name}) whose
-   namespace is loaded, so it runs the code now on disk. Namespaces not
-   loaded yet are left to `require`. A file that fails is retried while a
-   pass still makes progress, since it may need a definition a later file
-   adds. Answers the files that still fail: [{:file path :error msg}]."
+(defn- require-targets
+  "The namespaces one :require or :use spec names: a symbol, a vector
+   headed by one, or a prefix list."
+  [spec]
+  (cond
+    (symbol? spec) [spec]
+    (vector? spec) (let [lib (first spec)] (when (symbol? lib) [lib]))
+    (seq? spec)    (let [prefix (first spec)]
+                     (for [lib  (rest spec)
+                           :let [lib (if (vector? lib) (first lib) lib)]
+                           :when (symbol? lib)]
+                       (symbol (str prefix "." lib))))
+    :else          nil))
+
+(defn ns-deps
+  "What an ns form declares: {:ns name :requires #{name}}, :requires being
+   the namespaces its :require and :use clauses name. nil for any other
+   form."
+  [form]
+  (when (and (seq? form) (= 'ns (first form)) (symbol? (second form)))
+    {:ns       (second form)
+     :requires (set (for [clause (drop 2 form)
+                          :when  (and (seq? clause)
+                                      (contains? #{:require :use} (first clause)))
+                          spec   (rest clause)
+                          lib    (require-targets spec)]
+                      lib))}))
+
+(defn load-order
+  "`sources` ({:ns name :requires #{name}}) ordered so each follows the
+   sources it requires, ties in input order: {:order [source] :cycle
+   [source]}. :cycle holds, in input order, the sources no order can place:
+   those in a require cycle and those requiring one."
   [sources]
-  (loop [pending (vec (for [{:keys [file ns]} sources
-                            :when (find-ns (symbol ns))]
-                        file))]
+  (let [known (set (map :ns sources))]
+    (loop [order [] pending (vec sources)]
+      (let [placed (set (map :ns order))
+            ready? (fn [{:keys [ns requires]}]
+                     (every? #(or (= % ns) (contains? placed %) (not (contains? known %)))
+                             requires))
+            ready  (filterv ready? pending)]
+        (if (empty? ready)
+          {:order order :cycle pending}
+          (recur (into order ready) (vec (remove ready? pending))))))))
+
+(defn- first-form
+  "The first form of the source at `path`, or nil when it cannot be read."
+  [path]
+  (try
+    (read-string (slurp path))
+    (catch #?(:clj Throwable :default :default) _ nil)))
+
+(defn- source-info
+  "`source` ({:file path :ns name-or-nil}) as reloading reads it: :ns the
+   namespace its ns form declares, else the one its path names; :by-path
+   the latter; :requires what its ns form requires."
+  [{:keys [file ns]}]
+  (let [by-path  (when ns (symbol ns))
+        declared (ns-deps (first-form file))]
+    {:file     file
+     :ns       (or (:ns declared) by-path)
+     :by-path  by-path
+     :requires (or (:requires declared) #{})}))
+
+(defn- loaded?
+  [ns]
+  (boolean (and ns (find-ns ns))))
+
+(defn- evaluate!
+  "load-file each of `files` in order, retrying the ones that fail while a
+   pass makes progress, since one may need a definition a later file adds.
+   Answers [{:file path :error msg}] for those still failing."
+  [files]
+  (loop [pending (vec files)]
     (let [failed (vec (keep (fn [f]
                               (when-let [e (load-source! f)]
                                 (assoc e :file f)))
@@ -237,6 +308,47 @@
       (if (or (empty? failed) (= (count failed) (count pending)))
         failed
         (recur (mapv :file failed))))))
+
+(defn- unloaded-row
+  "Why `source`, whose namespace nothing has loaded, was not evaluated:
+   {:file :error} when `require` could never load it from its path, else
+   {:file :skipped}."
+  [{:keys [file ns by-path]}]
+  (cond
+    (nil? ns)
+    {:file file :error "not reloaded: no ns form, and outside every source root"}
+
+    (and by-path (not= ns by-path))
+    {:file file :error (str "not reloaded: declares " ns " but its path names " by-path)}
+
+    :else
+    {:file file :skipped (str "not reloaded: nothing has loaded " ns)}))
+
+(defn reload-sources!
+  "Evaluate again every source in `sources` ({:file path :ns name-or-nil})
+   whose namespace is loaded, each after the sources it requires, so it runs
+   the code now on disk. A source's namespace is the one its ns form
+   declares, else `:ns`. The bound IAddon protocol namespace is never
+   evaluated again. Answers one row per source not brought up to date:
+   {:file path :error msg} for a load failure, a require cycle, or a file
+   `require` could never load; {:file path :skipped msg} for the protocol
+   namespace and for namespaces nothing has loaded."
+  [sources]
+  (let [infos                 (mapv source-info sources)
+        protocol-ns           (pf :protocol-ns)
+        protocol?             (fn [s] (and (some? protocol-ns) (= (:ns s) protocol-ns)))
+        live                  (filterv #(and (loaded? (:ns %)) (not (protocol? %))) infos)
+        {:keys [order cycle]} (load-order live)
+        failed                (evaluate! (map :file order))
+        cyclic                (apply str (interpose ", " (sort (distinct (map (comp str :ns) cycle)))))
+        dormant               (filterv #(not (or (protocol? %) (loaded? (:ns %)))) infos)]
+    (vec (concat
+          failed
+          (for [{:keys [file]} cycle]
+            {:file file :error (str "not reloaded: require cycle among " cyclic)})
+          (for [{:keys [file]} (filter protocol? infos)]
+            {:file file :skipped (str "not reloaded: " protocol-ns " is the IAddon protocol namespace")})
+          (map unloaded-row dormant)))))
 
 (defn shutdown-all!
   "Shut every addon down, newest first."
