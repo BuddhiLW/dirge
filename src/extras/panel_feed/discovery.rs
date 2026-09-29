@@ -79,6 +79,9 @@ pub struct Endpoint {
     /// Base URL; the client appends `/events` and `/reply`.
     pub url: String,
     pub token: Option<String>,
+    /// The reply verbs the producer advertised (`capabilities.replies`);
+    /// `None` when it advertised none.
+    pub replies: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for Endpoint {
@@ -86,6 +89,7 @@ impl std::fmt::Debug for Endpoint {
         f.debug_struct("Endpoint")
             .field("url", &self.url)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("replies", &self.replies)
             .finish()
     }
 }
@@ -191,6 +195,39 @@ fn check_private(_meta: &std::fs::Metadata) -> Result<(), String> {
 struct DiscoveryDoc {
     url: String,
     token: Option<String>,
+    capabilities: Option<serde_json::Value>,
+}
+
+/// The only `capabilities.version` this client reads.
+const CAPABILITIES_VERSION: u64 = 1;
+
+/// The reply verbs a discovery document's `capabilities` advertise
+/// (pure). `None` (today's defaults) when there are none, the version is
+/// not one this client reads, or `replies` is not a list; a non-string
+/// entry is dropped. Each rejection is logged.
+pub fn advertised_replies(capabilities: &serde_json::Value) -> Option<Vec<String>> {
+    let version = capabilities
+        .get("version")
+        .and_then(serde_json::Value::as_u64);
+    if version != Some(CAPABILITIES_VERSION) {
+        tracing::warn!(target: "dirge::panel_feed", ?version, "capabilities version not read; using the default replies");
+        return None;
+    }
+    let replies = capabilities.get("replies")?.as_array().or_else(|| {
+        tracing::warn!(target: "dirge::panel_feed", "capabilities.replies is not a list; using the default replies");
+        None
+    })?;
+    let names: Vec<String> = replies
+        .iter()
+        .filter_map(|r| {
+            let name = r.as_str().map(str::trim).filter(|n| !n.is_empty());
+            if name.is_none() {
+                tracing::warn!(target: "dirge::panel_feed", reply = %r, "capabilities.replies entry ignored");
+            }
+            name.map(str::to_string)
+        })
+        .collect();
+    Some(names)
 }
 
 /// Parse a discovery document (pure).
@@ -207,6 +244,7 @@ pub fn parse_discovery(text: &str) -> Result<Endpoint, String> {
     Ok(Endpoint {
         url,
         token: doc.token.filter(|t| !t.is_empty()),
+        replies: doc.capabilities.as_ref().and_then(advertised_replies),
     })
 }
 
@@ -228,6 +266,7 @@ pub fn resolve(source: &Source) -> Result<Endpoint, DiscoveryError> {
             Ok(Endpoint {
                 url: url.trim_end_matches('/').to_string(),
                 token,
+                replies: None,
             })
         }
     }
@@ -310,6 +349,7 @@ mod tests {
         let ep = Endpoint {
             url: "http://h".into(),
             token: Some("s3cret".into()),
+            replies: None,
         };
         let dbg = format!("{ep:?}");
         assert!(!dbg.contains("s3cret"), "{dbg}");

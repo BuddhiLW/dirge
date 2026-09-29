@@ -164,12 +164,12 @@ pub fn reply_action(
         }
         (verb, target) => {
             // A target the verb does not take is dropped, as before.
-            let takes = panel_feed::find_verb(panel_feed::DEFAULT_VERBS, verb)?.takes_target;
-            ReplyAction::checked(
-                panel_feed::DEFAULT_VERBS,
-                verb,
-                if takes { target } else { None },
-            )?
+            let verbs = panel_feed::reply_verbs();
+            let target = match panel_feed::find_verb(&verbs, verb)?.target {
+                panel_feed::Target::None => None,
+                _ => target,
+            };
+            ReplyAction::checked(&verbs, verb, target)?
         }
     })
 }

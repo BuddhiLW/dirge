@@ -35,8 +35,8 @@ static ACTIVE: Mutex<Option<Source>> = Mutex::new(None);
 
 /// One reply the user can send back to the producer. The verbs are the
 /// producer's: dirge carries them as opaque names and knows only which
-/// ones need a target ([`DEFAULT_VERBS`] until the producer advertises
-/// its own).
+/// ones need a target ([`reply_verbs`]: the producer's, else
+/// [`DEFAULT_VERBS`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplyAction {
     /// A producer reply verb, with the item it names when it takes one.
@@ -53,43 +53,101 @@ pub enum ReplyAction {
     },
 }
 
-/// A reply verb the producer accepts, and whether it names an item.
+/// Whether a reply verb names an item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// It takes none.
+    None,
+    /// It needs one.
+    Required,
+    /// It may carry one; the producer decides what it means.
+    Optional,
+}
+
+/// A reply verb the producer accepts, and whether it names an item.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplyVerb {
-    pub name: &'static str,
-    pub takes_target: bool,
+    pub name: std::borrow::Cow<'static, str>,
+    pub target: Target,
 }
 
 /// The reply verbs assumed when the producer advertises none: the ones
 /// every panel-feed producer so far has accepted.
-pub const DEFAULT_VERBS: &[ReplyVerb] = &[
-    ReplyVerb {
-        name: "focus",
-        takes_target: true,
-    },
-    ReplyVerb {
-        name: "unfocus",
-        takes_target: false,
-    },
-    ReplyVerb {
-        name: "next-tab",
-        takes_target: false,
-    },
-    ReplyVerb {
-        name: "prev-tab",
-        takes_target: false,
-    },
-    ReplyVerb {
-        name: "refresh",
-        takes_target: false,
-    },
+const DEFAULT_VERBS: &[(&str, Target)] = &[
+    ("focus", Target::Required),
+    ("unfocus", Target::None),
+    ("next-tab", Target::None),
+    ("prev-tab", Target::None),
+    ("refresh", Target::None),
 ];
 
 /// Short names `/panel` accepts for a verb.
 const VERB_ALIASES: &[(&str, &str)] = &[("next", "next-tab"), ("prev", "prev-tab")];
 
-/// Usage line for the reply verbs of `/panel`.
+/// Usage line for the reply verbs of `/panel` when the producer
+/// advertises none.
 pub const REPLY_USAGE: &str = "usage: /panel next|prev|refresh|unfocus|focus <id>";
+
+/// The reply verbs the running producer advertised in its discovery
+/// document (`capabilities.replies`); `None` until one does.
+static ADVERTISED: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
+/// [`DEFAULT_VERBS`] as a verb list.
+pub fn default_verbs() -> Vec<ReplyVerb> {
+    DEFAULT_VERBS
+        .iter()
+        .map(|(name, target)| ReplyVerb {
+            name: (*name).into(),
+            target: *target,
+        })
+        .collect()
+}
+
+/// The verbs `names` advertises. A name that is a default verb keeps its
+/// target rule; any other may carry a target. `invoke` is a reply of its
+/// own ([`ReplyAction::Invoke`]), not a verb.
+pub fn advertised_verbs(names: &[String]) -> Vec<ReplyVerb> {
+    names
+        .iter()
+        .filter(|n| n.as_str() != "invoke" && !n.trim().is_empty())
+        .map(|name| ReplyVerb {
+            target: DEFAULT_VERBS
+                .iter()
+                .find(|(d, _)| d == name)
+                .map_or(Target::Optional, |(_, t)| *t),
+            name: name.clone().into(),
+        })
+        .collect()
+}
+
+/// The verbs replies may use now: the producer's, else the defaults.
+pub fn reply_verbs() -> Vec<ReplyVerb> {
+    match ADVERTISED.lock_ignore_poison().as_deref() {
+        Some(names) => advertised_verbs(names),
+        None => default_verbs(),
+    }
+}
+
+/// Record what the producer just advertised (`None`: nothing).
+pub fn set_advertised(replies: Option<Vec<String>>) {
+    *ADVERTISED.lock_ignore_poison() = replies;
+}
+
+/// The usage line for `verbs`.
+pub fn usage(verbs: &[ReplyVerb]) -> String {
+    if verbs == default_verbs().as_slice() {
+        return REPLY_USAGE.to_string();
+    }
+    let names: Vec<String> = verbs
+        .iter()
+        .map(|v| match v.target {
+            Target::None => v.name.to_string(),
+            Target::Required => format!("{} <id>", v.name),
+            Target::Optional => format!("{} [id]", v.name),
+        })
+        .collect();
+    format!("usage: /panel {}", names.join("|"))
+}
 
 /// The verb named `name` (after aliases) among `verbs`.
 pub fn find_verb<'a>(verbs: &'a [ReplyVerb], name: &str) -> Option<&'a ReplyVerb> {
@@ -118,34 +176,42 @@ impl ReplyAction {
     }
 
     /// `name` as a reply when `verbs` has it and `target` fits it: a
-    /// verb that takes a target needs one, and one that does not takes
-    /// none.
+    /// verb that needs a target needs one, one that takes none takes
+    /// none, and an optional one takes either.
     pub fn checked(verbs: &[ReplyVerb], name: &str, target: Option<&str>) -> Option<Self> {
         let verb = find_verb(verbs, name)?;
-        match (verb.takes_target, target) {
-            (true, Some(t)) if !t.trim().is_empty() => Some(Self::verb_on(verb.name, t.trim())),
-            (false, None) => Some(Self::verb(verb.name)),
+        let target = target.map(str::trim).filter(|t| !t.is_empty());
+        match (verb.target, target) {
+            (Target::Required | Target::Optional, Some(t)) => Some(Self::verb_on(&verb.name, t)),
+            (Target::None | Target::Optional, None) => Some(Self::verb(&verb.name)),
             _ => None,
         }
     }
 
-    /// Parse the words after `/panel` into a reply (pure). `Err`
-    /// carries a user-facing usage message.
+    /// Parse the words after `/panel` into a reply among the verbs the
+    /// producer accepts now. `Err` carries a user-facing usage message.
     pub fn parse(args: &[&str]) -> Result<Self, String> {
+        Self::parse_among(&reply_verbs(), args)
+    }
+
+    /// [`Self::parse`] among `verbs` (pure).
+    pub fn parse_among(verbs: &[ReplyVerb], args: &[&str]) -> Result<Self, String> {
+        let usage = usage(verbs);
         let name = args.first().map(|s| s.trim()).unwrap_or("");
         let rest = &args[args.len().min(1)..];
         if name.is_empty() {
-            return Err(REPLY_USAGE.to_string());
+            return Err(usage);
         }
-        let Some(verb) = find_verb(DEFAULT_VERBS, name) else {
-            return Err(format!("unknown /panel action '{name}' ({REPLY_USAGE})"));
+        let Some(verb) = find_verb(verbs, name) else {
+            return Err(format!("unknown /panel action '{name}' ({usage})"));
         };
-        match (verb.takes_target, rest) {
-            (true, [id]) if !id.trim().is_empty() => Ok(Self::verb_on(verb.name, id.trim())),
-            (true, []) => Err(format!("/panel {name} needs an item id ({REPLY_USAGE})")),
-            (true, _) => Err(format!("/panel {name} takes one id ({REPLY_USAGE})")),
-            (false, []) => Ok(Self::verb(verb.name)),
-            (false, _) => Err(format!("/panel {name} takes no argument ({REPLY_USAGE})")),
+        let id = |id: &str| Self::verb_on(&verb.name, id.trim());
+        match (verb.target, rest) {
+            (Target::Required | Target::Optional, [one]) if !one.trim().is_empty() => Ok(id(one)),
+            (Target::Required, []) => Err(format!("/panel {name} needs an item id ({usage})")),
+            (Target::None | Target::Optional, []) => Ok(Self::verb(&verb.name)),
+            (Target::None, _) => Err(format!("/panel {name} takes no argument ({usage})")),
+            _ => Err(format!("/panel {name} takes one id ({usage})")),
         }
     }
 
@@ -251,6 +317,7 @@ pub fn spawn_reply(action: ReplyAction) {
 /// Send `action` to the producer behind `source`.
 pub async fn reply_to(source: &Source, action: &ReplyAction) -> Result<(), ReplyError> {
     let ep = discovery::resolve(source)?;
+    set_advertised(ep.replies.clone());
     client::post_reply(&ep, action.to_json()).await
 }
 
@@ -276,6 +343,7 @@ impl Drop for FeedHandle {
     fn drop(&mut self) {
         let _ = self.stop.send(true);
         *ACTIVE.lock_ignore_poison() = None;
+        set_advertised(None);
     }
 }
 

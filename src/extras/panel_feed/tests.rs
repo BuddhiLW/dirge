@@ -434,7 +434,18 @@ mod reply_command {
 }
 
 mod reply_verbs {
-    use super::super::{DEFAULT_VERBS, ReplyAction, ReplyVerb, find_verb};
+    use super::super::{
+        ReplyAction, ReplyVerb, Target, advertised_verbs, default_verbs, find_verb, usage,
+    };
+    use crate::extras::panel_feed::discovery::{advertised_replies, parse_discovery};
+    use serde_json::json;
+
+    fn verb(name: &'static str, target: Target) -> ReplyVerb {
+        ReplyVerb {
+            name: name.into(),
+            target,
+        }
+    }
 
     #[test]
     fn verbs_are_opaque_names_on_the_wire() {
@@ -449,38 +460,89 @@ mod reply_verbs {
     #[test]
     fn checked_fits_the_target_to_the_verb() {
         let verbs = [
-            ReplyVerb {
-                name: "pin",
-                takes_target: true,
-            },
-            ReplyVerb {
-                name: "clear",
-                takes_target: false,
-            },
+            verb("pin", Target::Required),
+            verb("clear", Target::None),
+            verb("mark", Target::Optional),
         ];
+        let checked = |n, t| ReplyAction::checked(&verbs, n, t);
         assert_eq!(
-            ReplyAction::checked(&verbs, "pin", Some("a")),
+            checked("pin", Some("a")),
             Some(ReplyAction::verb_on("pin", "a"))
         );
-        assert_eq!(ReplyAction::checked(&verbs, "pin", None), None);
-        assert_eq!(ReplyAction::checked(&verbs, "clear", Some("a")), None);
+        assert_eq!(checked("pin", None), None);
+        assert_eq!(checked("clear", Some("a")), None);
         assert_eq!(
-            ReplyAction::checked(&verbs, "focus", Some("a")),
-            None,
-            "not advertised"
+            checked("mark", Some("a")),
+            Some(ReplyAction::verb_on("mark", "a"))
         );
+        assert_eq!(checked("mark", None), Some(ReplyAction::verb("mark")));
+        assert_eq!(checked("focus", Some("a")), None, "not advertised");
     }
 
     #[test]
     fn aliases_resolve_to_the_default_verbs() {
+        let verbs = default_verbs();
         assert_eq!(
-            find_verb(DEFAULT_VERBS, "next").map(|v| v.name),
+            find_verb(&verbs, "next").map(|v| v.name.as_ref()),
             Some("next-tab")
         );
         assert_eq!(
-            find_verb(DEFAULT_VERBS, "prev").map(|v| v.name),
+            find_verb(&verbs, "prev").map(|v| v.name.as_ref()),
             Some("prev-tab")
         );
-        assert!(find_verb(DEFAULT_VERBS, "pin").is_none());
+        assert!(find_verb(&verbs, "pin").is_none());
+    }
+
+    #[test]
+    fn advertised_verbs_keep_known_arity_and_skip_invoke() {
+        let names: Vec<String> = ["focus", "refresh", "pin", "invoke", " "]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            advertised_verbs(&names),
+            vec![
+                verb("focus", Target::Required),
+                verb("refresh", Target::None),
+                verb("pin", Target::Optional),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_among_uses_the_advertised_verbs() {
+        let verbs = advertised_verbs(&["pin".to_string(), "refresh".to_string()]);
+        assert_eq!(
+            ReplyAction::parse_among(&verbs, &["pin", "w-1"]),
+            Ok(ReplyAction::verb_on("pin", "w-1"))
+        );
+        assert_eq!(
+            ReplyAction::parse_among(&verbs, &["pin"]),
+            Ok(ReplyAction::verb("pin"))
+        );
+        let err = ReplyAction::parse_among(&verbs, &["unfocus"]).unwrap_err();
+        assert!(err.contains("unknown /panel action 'unfocus'"), "{err}");
+        assert!(err.contains("pin [id]|refresh"), "{err}");
+        assert_eq!(usage(&default_verbs()), super::super::REPLY_USAGE);
+    }
+
+    #[test]
+    fn discovery_capabilities_advertise_replies_for_version_1_only() {
+        let doc = |caps: serde_json::Value| {
+            parse_discovery(&json!({"url": "http://127.0.0.1:9", "capabilities": caps}).to_string())
+                .unwrap()
+                .replies
+        };
+        assert_eq!(
+            doc(json!({"version": 1, "replies": ["focus", "pin", 3, ""], "keys": {}})),
+            Some(vec!["focus".to_string(), "pin".to_string()])
+        );
+        assert_eq!(doc(json!({"version": 2, "replies": ["pin"]})), None);
+        assert_eq!(doc(json!({"version": 1})), None);
+        assert_eq!(
+            advertised_replies(&json!({"version": 1, "replies": "pin"})),
+            None
+        );
+        let plain = parse_discovery(r#"{"url":"http://127.0.0.1:9"}"#).unwrap();
+        assert_eq!(plain.replies, None, "no capabilities: today's defaults");
     }
 }
