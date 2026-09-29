@@ -489,7 +489,7 @@ pub async fn build_loop_tools(
     // returns `Arc<dyn MemoryProvider>` so plugin backends can plug
     // in without churning the call sites.
     // dirge-4hld: wrap the BM25 store in the hybrid retriever when configured.
-    let mem_cfg = cfg.memory.clone().unwrap_or_default();
+    let mem_cfg = cfg.memory_config();
     // dirge-0gxb: latch the verbatim pre-recall toggle for the loop to read.
     crate::agent::agent_loop::context_manager::set_verbatim_pre_recall(
         mem_cfg.verbatim_pre_recall == Some(true),

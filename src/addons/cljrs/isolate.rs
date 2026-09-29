@@ -79,6 +79,12 @@ enum Command {
         ctx: Json,
         reply: Sender<Vec<HookReply>>,
     },
+    HookHandler {
+        addon_id: String,
+        handler: String,
+        ctx: Json,
+        reply: Sender<Result<Json, String>>,
+    },
     Shutdown {
         reply: Sender<()>,
     },
@@ -114,6 +120,11 @@ thread_local! {
 /// that loop in turn.
 pub fn mark_event_loop_thread() {
     EVENT_LOOP.with(|marked| marked.set(true));
+}
+
+/// True on the thread [`mark_event_loop_thread`] marked.
+pub fn on_event_loop_thread() -> bool {
+    EVENT_LOOP.with(Cell::get)
 }
 
 /// Handle to the isolate thread. Cloning is not offered: one owner, shared
@@ -276,6 +287,15 @@ impl AddonRuntime for Isolate {
         })
     }
 
+    fn run_hook_handler(&self, addon_id: &str, handler: &str, ctx: &Json) -> Result<Json, String> {
+        self.ask(|reply| Command::HookHandler {
+            addon_id: addon_id.to_string(),
+            handler: handler.to_string(),
+            ctx: ctx.clone(),
+            reply,
+        })?
+    }
+
     fn shutdown(&self) {
         if let Err(error) = self.ask(|reply| Command::Shutdown { reply })
             && error != GONE
@@ -361,6 +381,20 @@ fn serve(
                         Vec::new()
                     });
                 let _ = reply.send(replies);
+            }
+            Command::HookHandler {
+                addon_id,
+                handler,
+                ctx,
+                reply,
+            } => {
+                let out = interp
+                    .call(
+                        "run-hook-handler",
+                        vec![addon_id.into(), handler.into(), ctx],
+                    )
+                    .and_then(|envelope| policy::tool_reply(&envelope));
+                let _ = reply.send(out);
             }
             Command::Shutdown { reply } => {
                 interp.shutdown();

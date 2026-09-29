@@ -251,6 +251,30 @@ impl AddonHost {
             .map(|answer| policy::command_output(&answer))
     }
 
+    /// Run command-hook `handler` of `addon_id` on a hook's JSON `payload`.
+    /// `Ok` carries the handler's answer, `Err` why there is none.
+    pub fn run_hook_handler(
+        &self,
+        addon_id: &str,
+        handler: &str,
+        payload: &Value,
+    ) -> Result<Value, String> {
+        let known = self
+            .loaded
+            .lock_ignore_poison()
+            .addons
+            .iter()
+            .any(|a| a.id == addon_id);
+        if !known {
+            return Err(format!("no addon {addon_id} is loaded"));
+        }
+        self.runtime.run_hook_handler(
+            addon_id,
+            handler,
+            &serde_json::json!({ "payload": payload }),
+        )
+    }
+
     /// Texts every addon answered `point` with.
     pub fn texts(&self, point: HookPoint, ctx: &Value) -> Vec<String> {
         if !self.listens(point) {

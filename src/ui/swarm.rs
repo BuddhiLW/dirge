@@ -1,18 +1,24 @@
-//! Swarm view: a full-screen grid of the external panels.
+//! Swarm view: a full-screen grid of the external panels and of
+//! dirge's own in-flight subagents.
 //!
-//! The left side panel shows external panels as compact boxes; the
-//! swarm view paints the same panels at full size, one grid cell per
-//! panel, above the input strip. It repaints the latest frame the
-//! producer sent (no accumulating timeline): it reads
-//! [`ExternalPanels`] exactly as the compact box does.
+//! The left side panel shows external panels as compact boxes and
+//! subagents as `[AGENTS]` rows; the swarm view paints both at full
+//! size, one grid cell each, above the input strip. External panels
+//! come first (the producer's focused one leads), then the subagents
+//! in spawn order. A panel cell repaints the latest frame its producer
+//! sent; a subagent cell shows the `[AGENTS]` preview line and the
+//! tail of the subagent's chat tab.
 //!
-//! This module is the pure half the painter needs: the selection it
-//! paints ([`SwarmView`]), `/swarm` argument parsing
-//! ([`SwarmCmd::parse`]) and the grid geometry ([`grid_geometry`]). The
-//! grid's state and keys belong to the view seam (`ui::view`); the
-//! painter lives in `ui::tui::swarm`.
+//! This module is the pure half the painter needs: the cell list
+//! ([`swarm_cells`]), the selection it paints ([`SwarmView`]), `/swarm`
+//! argument parsing ([`SwarmCmd::parse`]) and the grid geometry
+//! ([`grid_geometry`]). The grid's state and keys belong to the view
+//! seam (`ui::view`); the painter lives in `ui::tui::swarm`.
 
 use crate::ui::panels_ext::ExternalPanels;
+
+/// A grid cell, as the view seam's domain names it.
+pub use crate::ui::view::domain::GridCell as SwarmCell;
 
 /// Narrowest grid cell (columns) before the grid drops a column.
 pub const MIN_CELL_W: u16 = 24;
@@ -20,15 +26,46 @@ pub const MIN_CELL_W: u16 = 24;
 pub const MIN_CELL_H: u16 = 5;
 
 /// Key hint painted in the grid's header row.
-pub const GRID_HINT: &str =
-    "Tab/S-Tab view · r refresh · arrows/1-9 select · Enter focus · u unfocus · Esc close";
+pub const GRID_HINT: &str = "arrows/1-9 select · Enter focus/open · m msg agent · Tab/S-Tab view · r refresh · u unfocus · Esc close";
 
-/// State of the open swarm view. Selection is kept by panel id so a
-/// producer that reorders its panels (a new focus) does not move the
-/// highlight to a different panel.
+/// The grid's cells in paint order: external panels (as the producer
+/// orders them), then subagents (spawn order).
+pub fn swarm_cells<'a>(
+    panels: &ExternalPanels,
+    agent_ids: impl IntoIterator<Item = &'a str>,
+) -> Vec<SwarmCell> {
+    panels
+        .panels()
+        .iter()
+        .map(|p| SwarmCell::Panel(p.id.clone()))
+        .chain(
+            agent_ids
+                .into_iter()
+                .map(|id| SwarmCell::Agent(id.to_string())),
+        )
+        .collect()
+}
+
+/// A subagent as the grid paints it: its `[AGENTS]` row, the chat tab it
+/// streams into, and that tab's newest lines (filled by the renderer
+/// just before a paint, empty otherwise).
+#[derive(Debug, Clone, Default)]
+pub struct SwarmAgent {
+    /// Full task id (the `/msg` and chat-map key).
+    pub id: String,
+    /// Index of the subagent's chat tab, when it has one.
+    pub chat_idx: Option<usize>,
+    pub row: crate::ui::panel_data::SubagentStatusRow,
+    /// Newest chat-tab lines, oldest first.
+    pub tail: Vec<(String, crossterm::style::Color)>,
+}
+
+/// The selection the open grid paints, mirrored from the view model.
+/// Kept by cell identity so a producer that reorders its panels, or a
+/// subagent that finishes, does not move the highlight.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SwarmView {
-    selected: Option<String>,
+    selected: Option<SwarmCell>,
 }
 
 impl SwarmView {
@@ -37,18 +74,24 @@ impl SwarmView {
         Self::default()
     }
 
-    /// The grid with `selected` highlighted (`None`: the first panel).
-    pub fn selecting(selected: Option<String>) -> Self {
+    /// The grid with `selected` highlighted (`None`: the first cell).
+    pub fn selecting(selected: Option<SwarmCell>) -> Self {
         Self { selected }
     }
 
-    /// Index of the selected panel in paint order (`panels.panels()`),
-    /// falling back to the first panel when the selection is gone.
-    pub fn selected_index(&self, panels: &ExternalPanels) -> usize {
+    /// Index of the selected cell in paint order, falling back to the
+    /// first cell when the selection is gone.
+    pub fn selected_index(&self, cells: &[SwarmCell]) -> usize {
         self.selected
-            .as_deref()
-            .and_then(|id| panels.panels().iter().position(|p| p.id == id))
+            .as_ref()
+            .and_then(|sel| cells.iter().position(|c| c == sel))
             .unwrap_or(0)
+    }
+
+    /// Select the cell at `index` in paint order (clamped).
+    #[cfg(test)]
+    pub fn select_index(&mut self, cells: &[SwarmCell], index: usize) {
+        self.selected = cells.get(index.min(cells.len().saturating_sub(1))).cloned();
     }
 }
 
@@ -80,7 +123,7 @@ impl SwarmCmd {
     }
 }
 
-/// Grid geometry for `n` panels in a `width` x `height` region.
+/// Grid geometry for `n` cells in a `width` x `height` region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GridGeometry {
     /// Columns of cells.
@@ -99,7 +142,7 @@ impl GridGeometry {
     }
 }
 
-/// Lay out `n` panels in a `width` x `height` region (pure). The grid
+/// Lay out `n` cells in a `width` x `height` region (pure). The grid
 /// is as square as the cell minimums allow (`ceil(sqrt(n))` columns);
 /// when not every panel fits, the page holding `selected` is shown.
 pub fn grid_geometry(n: usize, width: u16, height: u16, selected: usize) -> GridGeometry {
@@ -152,20 +195,42 @@ mod tests {
     }
 
     #[test]
-    fn the_painted_selection_follows_the_panel_id() {
+    fn cells_list_panels_then_agents() {
+        let c = swarm_cells(&panels(&["a"]), ["t1", "t2"]);
+        assert_eq!(
+            c,
+            vec![
+                SwarmCell::Panel("a".into()),
+                SwarmCell::Agent("t1".into()),
+                SwarmCell::Agent("t2".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_painted_selection_follows_the_cell() {
         let mut s = panels(&["a", "b", "c"]);
-        assert_eq!(SwarmView::new().selected_index(&s), 0);
-        let v = SwarmView::selecting(Some("c".into()));
-        assert_eq!(v.selected_index(&s), 2);
+        assert_eq!(SwarmView::new().selected_index(&swarm_cells(&s, [])), 0);
+        let v = SwarmView::selecting(Some(SwarmCell::Panel("c".into())));
+        assert_eq!(v.selected_index(&swarm_cells(&s, [])), 2);
         // A producer focus moves `c` first; the highlight stays on it.
         s.apply(PanelOp::FocusTab {
             id: "c".into(),
             title: "C".into(),
         });
-        assert_eq!(v.selected_index(&s), 0);
-        // A closed panel falls back to the first one.
+        assert_eq!(v.selected_index(&swarm_cells(&s, [])), 0);
+        // A closed panel falls back to the first cell.
         s.apply(PanelOp::Close { id: "c".into() });
-        assert_eq!(v.selected_index(&s), 0);
+        assert_eq!(v.selected_index(&swarm_cells(&s, [])), 0);
+    }
+
+    #[test]
+    fn agent_selection_survives_a_sibling_finishing() {
+        let s = panels(&["a"]);
+        let v = SwarmView::selecting(Some(SwarmCell::Agent("t2".into())));
+        assert_eq!(v.selected_index(&swarm_cells(&s, ["t1", "t2"])), 2);
+        // t1 completes and drops out; the highlight stays on t2.
+        assert_eq!(v.selected_index(&swarm_cells(&s, ["t2"])), 1);
     }
 
     #[test]

@@ -234,7 +234,7 @@ fn kfmt(n: u64) -> String {
 /// `↳ 1m05s · 4 tools · read path=src/lib.rs`. The short fixed-width parts
 /// lead so a narrow panel truncates the activity, not the counters. `None`
 /// before its first event, so a just-spawned row stays one line.
-fn subagent_preview_line(row: &SubagentStatusRow) -> Option<String> {
+pub(crate) fn subagent_preview_line(row: &SubagentStatusRow) -> Option<String> {
     let activity = row.activity.as_deref()?;
     let secs = row.elapsed_secs;
     let elapsed = if secs >= 60 {

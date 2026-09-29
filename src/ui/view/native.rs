@@ -7,7 +7,7 @@
 //! row, never an edit to a match.
 
 use super::domain::{
-    NoticeLevel, PanelScope, SwarmModel, ViewEffect, ViewEvent, ViewModel, ViewUpdate,
+    GridCell, NoticeLevel, PanelScope, SwarmModel, ViewEffect, ViewEvent, ViewModel, ViewUpdate,
 };
 use super::port::Reducer;
 use crate::extras::panel_feed::ReplyAction;
@@ -36,16 +36,25 @@ enum Move {
     End,
 }
 
+/// A verb that acts on the selected cell; what it does depends on the
+/// cell's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CellVerb {
+    /// A panel: reply `focus`. A subagent: open its chat tab.
+    Focus,
+    /// A subagent: start a `/msg` to it. Nothing on a panel.
+    Message,
+}
+
 /// What a grid key does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GridVerb {
     Close,
     /// Reply to the producer with this wire action.
     Reply(&'static str),
-    /// Reply `focus` with the selected panel's id.
-    Focus,
+    OnCell(CellVerb),
     Move(Move),
-    /// Select the panel at this index (paint order).
+    /// Select the cell at this index (paint order).
     Nth(usize),
 }
 
@@ -57,7 +66,8 @@ const GRID_KEYMAP: &[(&str, GridVerb)] = &[
     ("BackTab", GridVerb::Reply("prev-tab")),
     ("r", GridVerb::Reply("refresh")),
     ("u", GridVerb::Reply("unfocus")),
-    ("Enter", GridVerb::Focus),
+    ("Enter", GridVerb::OnCell(CellVerb::Focus)),
+    ("m", GridVerb::OnCell(CellVerb::Message)),
     ("Left", GridVerb::Move(Move::Left)),
     ("h", GridVerb::Move(Move::Left)),
     ("Right", GridVerb::Move(Move::Right)),
@@ -79,28 +89,28 @@ const GRID_KEYMAP: &[(&str, GridVerb)] = &[
     ("9", GridVerb::Nth(8)),
 ];
 
-/// The grid as a key sees it: panel ids in paint order, the cursor
-/// (the selected panel, else the first) and the column count.
+/// The grid as a key sees it: cells in paint order, the cursor (the
+/// selected cell, else the first) and the column count.
 struct Grid<'a> {
-    ids: &'a [String],
+    cells: &'a [GridCell],
     cur: usize,
     cols: usize,
 }
 
 impl<'a> Grid<'a> {
-    fn new(ids: &'a [String], selected: Option<&str>, columns: usize) -> Self {
+    fn new(cells: &'a [GridCell], selected: Option<&GridCell>, columns: usize) -> Self {
         let cur = selected
-            .and_then(|id| ids.iter().position(|p| p == id))
+            .and_then(|sel| cells.iter().position(|c| c == sel))
             .unwrap_or(0);
         Self {
-            ids,
+            cells,
             cur,
             cols: columns.max(1),
         }
     }
 
     fn last(&self) -> usize {
-        self.ids.len().saturating_sub(1)
+        self.cells.len().saturating_sub(1)
     }
 
     fn moved(&self, m: Move) -> usize {
@@ -116,9 +126,14 @@ impl<'a> Grid<'a> {
         }
     }
 
-    /// The id at `index`, clamped to the last panel; `None` when empty.
-    fn id_at(&self, index: usize) -> Option<&'a String> {
-        self.ids.get(index.min(self.last()))
+    /// The selected cell, `None` when the grid is empty.
+    fn current(&self) -> Option<&'a GridCell> {
+        self.cells.get(self.cur)
+    }
+
+    /// The cell at `index`, clamped to the last one; `None` when empty.
+    fn cell_at(&self, index: usize) -> Option<&'a GridCell> {
+        self.cells.get(index.min(self.last()))
     }
 }
 
@@ -135,9 +150,9 @@ impl Reducer for NativeReducer {
             ViewEvent::Command { name, args } => self.command(name, args),
             ViewEvent::Grid {
                 key,
-                panels,
+                cells,
                 columns,
-            } => self.grid(key, panels, *columns),
+            } => self.grid(key, cells, *columns),
         };
         Ok(ViewUpdate {
             model: self.model(),
@@ -265,42 +280,55 @@ impl NativeReducer {
         }
     }
 
-    fn grid(&mut self, key: &str, panels: &[String], columns: usize) -> Vec<ViewEffect> {
+    fn grid(&mut self, key: &str, cells: &[GridCell], columns: usize) -> Vec<ViewEffect> {
         let Some(swarm) = self.swarm.as_ref() else {
             return Vec::new();
         };
         let Some(verb) = GRID_KEYMAP.iter().find(|(k, _)| *k == key).map(|(_, v)| *v) else {
             return Vec::new();
         };
-        let grid = Grid::new(panels, swarm.selected.as_deref(), columns);
+        let grid = Grid::new(cells, swarm.selected.as_ref(), columns);
         match verb {
             GridVerb::Close => {
                 self.swarm = None;
                 Vec::new()
             }
             GridVerb::Reply(action) => vec![reply(action, None)],
-            GridVerb::Focus => grid
-                .ids
-                .get(grid.cur)
-                .map(|id| vec![reply("focus", Some(id.clone()))])
-                .unwrap_or_default(),
+            GridVerb::OnCell(verb) => self.on_cell(verb, grid.current()),
             GridVerb::Move(m) => {
-                self.select(&grid, grid.moved(m));
+                self.select(grid.cell_at(grid.moved(m)));
                 Vec::new()
             }
             GridVerb::Nth(i) => {
-                if i < panels.len() {
-                    self.select(&grid, i);
+                if i < cells.len() {
+                    self.select(grid.cell_at(i));
                 }
                 Vec::new()
             }
         }
     }
 
-    fn select(&mut self, grid: &Grid<'_>, index: usize) {
-        if let Some(id) = grid.id_at(index) {
+    /// `verb` on the selected cell. Opening or messaging a subagent
+    /// leaves the grid, so it closes it.
+    fn on_cell(&mut self, verb: CellVerb, cell: Option<&GridCell>) -> Vec<ViewEffect> {
+        match (verb, cell) {
+            (CellVerb::Focus, Some(GridCell::Panel(id))) => vec![reply("focus", Some(id.clone()))],
+            (CellVerb::Focus, Some(GridCell::Agent(id))) => {
+                self.swarm = None;
+                vec![ViewEffect::OpenAgent { id: id.clone() }]
+            }
+            (CellVerb::Message, Some(GridCell::Agent(id))) => {
+                self.swarm = None;
+                vec![ViewEffect::MessageAgent { id: id.clone() }]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn select(&mut self, cell: Option<&GridCell>) {
+        if let Some(cell) = cell {
             self.swarm = Some(SwarmModel {
-                selected: Some(id.clone()),
+                selected: Some(cell.clone()),
             });
         }
     }

@@ -4,9 +4,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::domain::{ViewEvent, ViewModel};
+use super::domain::{GridCell, ViewEvent, ViewModel};
 use crate::ui::keymap::KeyAction;
-use crate::ui::panels_ext::ExternalPanels;
 
 /// Where a key goes while the grid is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,11 +63,12 @@ pub fn route_key(model: &ViewModel, key: &KeyEvent, action: Option<KeyAction>) -
     }
 }
 
-/// The grid event for key `name`, with what the grid paints right now.
-pub fn grid_event(name: String, panels: &ExternalPanels, columns: usize) -> ViewEvent {
+/// The grid event for key `name`, with the cells the grid paints right
+/// now (in paint order).
+pub fn grid_event(name: String, cells: Vec<GridCell>, columns: usize) -> ViewEvent {
     ViewEvent::Grid {
         key: name,
-        panels: panels.panels().iter().map(|p| p.id.clone()).collect(),
+        cells,
         columns,
     }
 }

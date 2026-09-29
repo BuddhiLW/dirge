@@ -523,10 +523,67 @@ pub struct MemoryConfig {
     /// Default off — it changes long-standing behavior.
     pub confirm_writes: Option<bool>,
     /// Which backend serves memory. Default `sqlite`, the builtin
-    /// per-project and global stores. `mcp` and `addon` are reserved:
-    /// selecting one today leaves the session without memory, with a
-    /// warning, rather than silently falling back to `sqlite`.
+    /// per-project and global stores. `mcp` serves memory from a tool on a
+    /// configured MCP server (see `mcp`). `addon` is reserved: selecting it
+    /// today leaves the session without memory, with a warning, rather than
+    /// silently falling back to `sqlite`.
     pub provider: Option<MemoryBackend>,
+    /// How `provider: "mcp"` reaches its server: which `mcp_servers` entry,
+    /// and which tool each memory operation calls with which arguments.
+    pub mcp: Option<McpMemoryConfig>,
+}
+
+/// `memory.mcp`: memory served by tools on an MCP server. Nothing here is
+/// specific to one server; the operation table says how each memory
+/// operation becomes a tool call.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpMemoryConfig {
+    /// The name of an entry in `mcp_servers`.
+    pub server: String,
+    /// One entry per memory operation the server can serve. An operation
+    /// left out is refused with an error when the agent asks for it.
+    pub operations: McpMemoryOperations,
+    /// The `mcp_servers` entry `server` names, filled in by
+    /// [`Config::memory_config`]. Never read from the file.
+    #[cfg(feature = "mcp")]
+    #[serde(skip)]
+    pub server_config: Option<McpServerConfig>,
+}
+
+/// `memory.mcp.operations`: the tool call behind each memory operation.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpMemoryOperations {
+    pub view: Option<McpMemoryOperation>,
+    pub add: Option<McpMemoryOperation>,
+    pub queue_for_review: Option<McpMemoryOperation>,
+    pub replace: Option<McpMemoryOperation>,
+    pub supersede: Option<McpMemoryOperation>,
+    pub remove: Option<McpMemoryOperation>,
+    pub restore: Option<McpMemoryOperation>,
+    pub expand: Option<McpMemoryOperation>,
+    pub search: Option<McpMemoryOperation>,
+    pub record_outcome: Option<McpMemoryOperation>,
+    /// The text injected into the system prompt.
+    pub prompt: Option<McpMemoryOperation>,
+}
+
+/// One memory operation as an MCP tool call.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpMemoryOperation {
+    /// The tool to call on the server.
+    pub tool: String,
+    /// The tool's arguments. A string that is exactly `{name}` becomes that
+    /// value with its JSON type (the key is dropped when the value is
+    /// absent); `{name}` inside a longer string is replaced by its text.
+    #[serde(default)]
+    pub arguments: serde_json::Map<String, serde_json::Value>,
+    /// A JSON pointer (`/results`) selecting the part of the tool's result
+    /// the operation returns. Default: the whole result.
+    #[serde(default)]
+    pub result: Option<String>,
 }
 
 /// The `memory.provider` backends.
@@ -1449,6 +1506,23 @@ pub struct Config {
 }
 
 impl Config {
+    /// The `memory` block with `memory.mcp.server` resolved against
+    /// `mcp_servers`, ready for `extras::memory_provider::build`. An
+    /// unknown server name stays unresolved; the factory reports it.
+    pub fn memory_config(&self) -> MemoryConfig {
+        #[allow(unused_mut)]
+        let mut memory = self.memory.clone().unwrap_or_default();
+        #[cfg(feature = "mcp")]
+        if let Some(mcp) = memory.mcp.as_mut() {
+            mcp.server_config = self
+                .mcp_servers
+                .as_ref()
+                .and_then(|servers| servers.get(&mcp.server))
+                .cloned();
+        }
+        memory
+    }
+
     /// Snapshot of the unified providers map. Empty when not set.
     pub fn providers_map(&self) -> HashMap<String, ProviderEntry> {
         self.providers.clone().unwrap_or_default()
@@ -3102,6 +3176,41 @@ mod tests {
         );
         assert_eq!(m.embed_api_key_env.as_deref(), Some("OPENAI_API_KEY"));
         assert_eq!(m.verbatim_pre_recall, Some(true));
+    }
+
+    /// `memory.mcp` parses its operation table and `memory_config` resolves
+    /// the server name against `mcp_servers`; a typo in the table is a
+    /// parse error rather than an operation silently missing.
+    #[test]
+    fn memory_mcp_block_parses_and_resolves_its_server() {
+        let cfg: Config = serde_json::from_str(
+            r#"{
+                "mcp_servers": { "notes": { "url": "http://localhost:9/mcp" } },
+                "memory": { "provider": "mcp", "mcp": {
+                    "server": "notes",
+                    "operations": {
+                        "search": { "tool": "find", "arguments": { "q": "{query}" }, "result": "/hits" }
+                    }
+                } }
+            }"#,
+        )
+        .unwrap();
+        let memory = cfg.memory_config();
+        assert_eq!(memory.provider, Some(MemoryBackend::Mcp));
+        let mcp = memory.mcp.expect("mcp block");
+        assert_eq!(mcp.server, "notes");
+        let search = mcp.operations.search.expect("search operation");
+        assert_eq!(search.tool, "find");
+        assert_eq!(search.arguments["q"], "{query}");
+        assert_eq!(search.result.as_deref(), Some("/hits"));
+        assert!(mcp.operations.add.is_none());
+        #[cfg(feature = "mcp")]
+        assert!(mcp.server_config.is_some(), "server resolved");
+
+        let typo = serde_json::from_str::<Config>(
+            r#"{ "memory": { "mcp": { "server": "n", "operations": { "serach": { "tool": "t" } } } } }"#,
+        );
+        assert!(typo.is_err(), "unknown operation names are rejected");
     }
 
     /// dirge-j0s2 (GH #461): `show_reasoning` controls whether the thinking

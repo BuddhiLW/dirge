@@ -36,6 +36,19 @@ pub trait AddonRuntime: Send + Sync + 'static {
     /// Call every addon's `point` hook with `ctx`, in load order.
     fn run_hook(&self, point: HookPoint, ctx: &Value) -> Vec<HookReply>;
 
+    /// Run command-hook `handler` of `addon_id` (its `:dirge/command-hooks`
+    /// entry) with `ctx`. `Ok` carries the handler's answer.
+    fn run_hook_handler(
+        &self,
+        addon_id: &str,
+        handler: &str,
+        _ctx: &Value,
+    ) -> Result<Value, String> {
+        Err(format!(
+            "this addon runtime cannot run command hook {handler} of {addon_id}"
+        ))
+    }
+
     /// Shut every addon down. Idempotent.
     fn shutdown(&self);
 }

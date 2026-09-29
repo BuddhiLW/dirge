@@ -7,9 +7,14 @@
 
    What the view owns is registered as data: `events` (event type ->
    handler), `commands` (slash command -> handler), `grid-keymap` (key ->
-   verb), `grid-verbs` and `moves`. The model's :view_commands and
-   :grid_keys are derived from them, so a new command, event kind, key or
-   verb is one more entry."
+   verb), `grid-verbs`, `moves` and `cell-actions` (cell kind -> verb ->
+   handler). The model's :view_commands and :grid_keys are derived from
+   them, so a new command, event kind, key, verb or kind of cell is one
+   more entry.
+
+   A grid cell is {:kind \"panel\"|\"agent\" :id id}; the selection is
+   kept by cell, so a producer refocus or a finishing sibling does not
+   move it."
   (:require [clojure.string :as str]))
 
 ;; SPDX-License-Identifier: GPL-3.0-only
@@ -50,13 +55,14 @@
 (defn swarm-cmd
   [state args]
   (let [[tag v] (parse-swarm args)
-        open?   (some? (:swarm state))]
+        open?   (some? (:swarm state))
+        want?   (if (= v :toggle) (not open?) (= v :open))]
     (cond
-      (= tag :err)                          [state [(notify :error v)]]
-      (and open? (not= v :close) (not= v :toggle)) [state []]
-      (and (not open?) (not= v :close))     [(assoc state :swarm {:selected nil}) []]
-      :else                                 [(assoc state :swarm nil)
-                                             [(notify :info "swarm grid closed")]])))
+      (= tag :err)      [state [(notify :error v)]]
+      (and want? open?) [state []]
+      want?             [(assoc state :swarm {:selected nil}) []]
+      :else             [(assoc state :swarm nil)
+                         [(notify :info "swarm grid closed")]])))
 
 ;; ---------------------------------------------------------------------------
 ;; /panel
@@ -153,22 +159,22 @@
 ;; Grid keys
 
 (defn index-of
-  [ids id]
+  [cells cell]
   (loop [i 0]
     (cond
-      (>= i (count ids)) nil
-      (= (nth ids i) id) i
-      :else              (recur (inc i)))))
+      (>= i (count cells)) nil
+      (= (nth cells i) cell) i
+      :else                  (recur (inc i)))))
 
 (defn grid-of
-  "The grid as a key sees it: panel ids in paint order, the cursor (the
-   selected panel, else the first), the column count."
+  "The grid as a key sees it: cells in paint order, the cursor (the
+   selected cell, else the first), the column count."
   [state event]
-  (let [ids (vec (:panels event))
-        n   (count ids)]
-    {:ids    ids
+  (let [cells (vec (:cells event))
+        n     (count cells)]
+    {:cells  cells
      :n      n
-     :cur    (or (index-of ids (:selected (:swarm state))) 0)
+     :cur    (or (index-of cells (:selected (:swarm state))) 0)
      :cols   (max (or (:columns event) 1) 1)
      :last-i (max (dec n) 0)}))
 
@@ -176,7 +182,7 @@
   [state grid i]
   (if (zero? (:n grid))
     state
-    (assoc state :swarm {:selected (nth (:ids grid) (min i (:last-i grid)))})))
+    (assoc state :swarm {:selected (nth (:cells grid) (min i (:last-i grid)))})))
 
 (def moves
   "Cursor move -> the index it lands on."
@@ -189,23 +195,39 @@
    :home  (fn [_] 0)
    :end   (fn [g] (:last-i g))})
 
+(def cell-actions
+  "Cell kind -> verb -> (fn [state id] [state' effects]). Opening or
+   messaging a subagent leaves the grid, so it closes it. A verb a kind
+   does not list means nothing on that kind of cell."
+  {"panel" {:focus   (fn [state id] [state [(reply "focus" id)]])}
+   "agent" {:focus   (fn [state id] [(assoc state :swarm nil) [{:op :open-agent :id id}]])
+            :message (fn [state id] [(assoc state :swarm nil) [{:op :message-agent :id id}]])}})
+
+(defn on-cell
+  "A grid verb that acts on the selected cell through `cell-actions`."
+  [verb]
+  (fn [state g _]
+    (let [cell (get (:cells g) (:cur g))
+          f    (get-in cell-actions [(:kind cell) verb])]
+      (if f
+        (f state (:id cell))
+        [state []]))))
+
 (def grid-verbs
   "Verb -> (fn [state grid arg] [state' effects])."
-  {:close (fn [state _ _] [(assoc state :swarm nil) []])
-   :reply (fn [state _ action] [state [(reply action)]])
-   :focus (fn [state g _]
-            (if (zero? (:n g))
-              [state []]
-              [state [(reply "focus" (nth (:ids g) (:cur g)))]]))
-   :move  (fn [state g dir] [(select-at state g ((get moves dir) g)) []])
-   :nth   (fn [state g i] [(if (< i (:n g)) (select-at state g i) state) []])})
+  {:close   (fn [state _ _] [(assoc state :swarm nil) []])
+   :reply   (fn [state _ action] [state [(reply action)]])
+   :focus   (on-cell :focus)
+   :message (on-cell :message)
+   :move    (fn [state g dir] [(select-at state g ((get moves dir) g)) []])
+   :nth     (fn [state g i] [(if (< i (:n g)) (select-at state g i) state) []])})
 
 (def grid-keymap
   "Key name -> [verb arg] while the grid is open."
   {"Esc" [:close] "q" [:close]
    "Tab" [:reply "next-tab"] "BackTab" [:reply "prev-tab"]
    "r" [:reply "refresh"] "u" [:reply "unfocus"]
-   "Enter" [:focus]
+   "Enter" [:focus] "m" [:message]
    "Left" [:move :left] "h" [:move :left]
    "Right" [:move :right] "l" [:move :right]
    "Up" [:move :up] "k" [:move :up]

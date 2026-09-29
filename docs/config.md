@@ -294,7 +294,69 @@ Reciprocal Rank Fusion. It needs an OpenAI-compatible embeddings endpoint.
 | `embed_api_key_env` | string  | Name of the env var holding the API key (the key itself is never stored in config). Omit for a keyless local endpoint. |
 | `verbatim_pre_recall` | boolean | Each turn, auto-search memory on the verbatim user message and inject the hits as a supplemental context note (separate from the frozen system-prompt snapshot — it never changes the cached prefix). Surfaces relevant memory the agent wouldn't think to look up. Works with BM25 or hybrid. Default `false`. |
 | `confirm_writes`    | boolean | Require human confirmation before any memory `add` is stored. See [Confirming memory writes](#confirming-memory-writes). Default `false`. |
-| `provider`          | string  | Which backend serves memory. Default `sqlite`, the builtin per-project and global stores. `mcp` and `addon` are reserved: selecting one today leaves the session without memory and prints a warning, rather than falling back to `sqlite`. |
+| `provider`          | string  | Which backend serves memory. Default `sqlite`, the builtin per-project and global stores. `mcp` serves memory from tools on an MCP server; see [Memory on an MCP server](#memory-on-an-mcp-server). `addon` is reserved: selecting it today leaves the session without memory and prints a warning, rather than falling back to `sqlite`. |
+| `mcp`               | object  | Which MCP server and tools serve memory when `provider` is `mcp`. |
+
+### Memory on an MCP server
+
+With `"provider": "mcp"` the `memory` tool, the system-prompt memory block and
+per-message pre-recall are served by tools on one of your `mcp_servers`
+instead of the builtin SQLite store. dirge does not assume any particular
+server: `memory.mcp.operations` says which tool each memory operation calls
+and with which arguments.
+
+```json
+{
+  "mcp_servers": {
+    "notes": { "command": "my-notes-mcp" }
+  },
+  "memory": {
+    "provider": "mcp",
+    "mcp": {
+      "server": "notes",
+      "operations": {
+        "add":    { "tool": "note_add",    "arguments": { "text": "{content}", "kind": "{kind}", "tags": ["{target}", "project:{project}"] } },
+        "search": { "tool": "note_search", "arguments": { "query": "{query}", "project": "{project}" }, "result": "/hits" },
+        "view":   { "tool": "note_list",   "arguments": { "tag": "{target}", "project": "{project}" } },
+        "remove": { "tool": "note_delete", "arguments": { "match": "{old_text}" } },
+        "prompt": { "tool": "note_digest", "arguments": { "project": "{project}" }, "result": "/text" }
+      }
+    }
+  }
+}
+```
+
+| Key | Description |
+| --- | --- |
+| `server` | The name of an `mcp_servers` entry. dirge opens its own connection to it on the first memory call. |
+| `operations` | One entry per operation the server serves: `view`, `add`, `queue_for_review`, `replace`, `supersede`, `remove`, `restore`, `expand`, `search`, `record_outcome`, and `prompt` (the text injected into the system prompt, fetched once per session and again after a memory refresh). |
+| `operations.<op>.tool` | The tool to call. |
+| `operations.<op>.arguments` | The tool's arguments. A string that is exactly `{name}` is replaced by that value with its JSON type, and its key is left out when the operation has no such value; `{name}` inside a longer string is replaced by its text. |
+| `operations.<op>.result` | A JSON pointer (`/hits`) selecting the part of the tool's result to use. Default: the whole result. |
+
+The placeholders are `{target}` (`memory` or `pitfalls`), `{content}`,
+`{kind}`, `{old_text}`, `{query}`, `{harsh}` and `{success}` (booleans),
+`{scope}` (`project` or `global`), `{project}` (the project directory's name;
+empty for the global store) and `{project_root}`. An unknown placeholder or a
+`result` that is not a JSON pointer stops memory from loading, with a warning.
+
+A tool result is read as its structured content when the server sends one,
+otherwise as its text parsed as JSON, otherwise as plain text. For `search`
+and `view`, a result that is an array is wrapped the way the builtin store
+answers (`{"results": [...]}` and `{"entries": [...]}`); pre-recall reads the
+`content` field of each search result.
+
+An operation you leave out is refused with an error the agent sees; it is
+never sent to the builtin store. `hybrid_retrieval` does not apply to this
+backend. The builtin store's review queue (`/memory review`) and curator are
+not served by it either.
+
+A server that files notes under tags, for instance, might map `add` to its
+own "add note" tool:
+
+```json
+"add": { "tool": "memory", "arguments": { "command": "add", "type": "note", "content": "{content}", "tags": ["dirge", "{target}"], "directory": "{project_root}" } }
+```
 
 ### Confirming memory writes
 
@@ -1114,7 +1176,7 @@ routes to the right one by its command name.
 | `panel_next_tab` | `alt-.` | External panel feed: ask the producer for its next view |
 | `panel_prev_tab` | `alt-,` | External panel feed: ask the producer for its previous view |
 | `panel_refresh` | `alt-/` | External panel feed: ask the producer to repaint |
-| `toggle_swarm` | `alt-s` | Open or close the swarm grid (external panels at full size) |
+| `toggle_swarm` | `alt-s` | Open or close the swarm grid (external panels and subagents at full size) |
 
 ### Input-editor commands
 

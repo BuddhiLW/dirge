@@ -2,15 +2,28 @@
 //! channel, no engine. Every other stratum of `ui::view` speaks these.
 //!
 //! Ubiquitous language:
+//! - a **cell** is one tile of the swarm grid: an external panel or an
+//!   in-process subagent;
 //! - a **view event** is something the user did to the view (a view
 //!   command, a grid key);
 //! - the **view model** is what the view engine publishes after folding
 //!   an event: the swarm grid's state and what the view owns;
 //! - a **view effect** is something the UI must do because of an event
-//!   (a notice, a producer reply, a side-panel mode);
+//!   (a notice, a producer reply, a side-panel mode, opening or
+//!   messaging a subagent);
 //! - a **view update** is one model plus its effects.
 
 use serde::{Deserialize, Serialize};
+
+/// One swarm-grid cell: an external panel (by panel id) or an
+/// in-process subagent (by full task id). Selection is kept by cell, so
+/// a producer refocus or a finishing sibling does not move it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "kebab-case")]
+pub enum GridCell {
+    Panel(String),
+    Agent(String),
+}
 
 /// Something the user did to the view. Closed set: the engines and the
 /// UI loop agree on it.
@@ -21,11 +34,11 @@ pub enum ViewEvent {
     Init,
     /// `/name args..` for a command the view owns.
     Command { name: String, args: Vec<String> },
-    /// A grid key (see `promote::key_name`), with the panels the grid
+    /// A grid key (see `promote::key_name`), with the cells the grid
     /// shows in paint order and its current column count.
     Grid {
         key: String,
-        panels: Vec<String>,
+        cells: Vec<GridCell>,
         columns: usize,
     },
 }
@@ -42,9 +55,9 @@ impl ViewEvent {
 /// The swarm grid while it is open.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct SwarmModel {
-    /// Selected panel id; `None` paints the producer's first panel.
+    /// Selected cell; `None` paints the first cell.
     #[serde(default)]
-    pub selected: Option<String>,
+    pub selected: Option<GridCell>,
 }
 
 /// What the engine publishes after every event.
@@ -113,6 +126,10 @@ pub enum ViewEffect {
     PanelStatus,
     /// Print which panes are shown.
     DisplayStatus,
+    /// Show this subagent's chat tab (full task id).
+    OpenAgent { id: String },
+    /// Start a `/msg` to this subagent in the editor (full task id).
+    MessageAgent { id: String },
 }
 
 impl ViewEffect {

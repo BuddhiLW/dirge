@@ -1,7 +1,7 @@
 //! Boundary: carry out a view update. The only stratum of `ui::view`
 //! with effects: it sets the renderer's view state and side-panel modes
-//! and fires producer replies. Chat lines are returned, not written, so
-//! the UI loop keeps owning chat output (tool chambers, scroll).
+//! and fires producer replies. What needs state only the UI loop owns
+//! (chat lines, chat tabs, the editor) is handed back in [`Applied`].
 
 use crossterm::style::Color;
 
@@ -13,25 +13,54 @@ use crate::ui::renderer::{PaneVisibility, PanelMode, Renderer};
 /// A line for the chat area.
 pub type ChatLine = (String, Color);
 
-/// Apply `update` to `renderer`; the chat lines it produced.
-pub fn apply(renderer: &mut Renderer, update: &ViewUpdate) -> Vec<ChatLine> {
-    renderer.set_swarm(update.model.swarm.as_ref());
-    update
-        .effects
-        .iter()
-        .filter_map(|effect| interpret(renderer, effect))
-        .collect()
+/// An effect the UI loop carries out itself: it owns the chat tabs and
+/// the editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Handoff {
+    /// Show this subagent's chat tab (full task id).
+    OpenAgent(String),
+    /// Start `/msg <id> ` in the editor.
+    MessageAgent(String),
 }
 
-fn interpret(renderer: &mut Renderer, effect: &ViewEffect) -> Option<ChatLine> {
+/// What applying an update leaves for the UI loop.
+#[derive(Debug, Default)]
+pub struct Applied {
+    pub lines: Vec<ChatLine>,
+    pub handoffs: Vec<Handoff>,
+}
+
+/// One effect's outcome at the boundary.
+enum Outcome {
+    Done,
+    Line(ChatLine),
+    Handoff(Handoff),
+}
+
+/// Apply `update` to `renderer`; the lines and hand-offs left for the
+/// UI loop.
+pub fn apply(renderer: &mut Renderer, update: &ViewUpdate) -> Applied {
+    renderer.set_swarm(update.model.swarm.as_ref());
+    let mut applied = Applied::default();
+    for effect in &update.effects {
+        match interpret(renderer, effect) {
+            Outcome::Done => {}
+            Outcome::Line(line) => applied.lines.push(line),
+            Outcome::Handoff(handoff) => applied.handoffs.push(handoff),
+        }
+    }
+    applied
+}
+
+fn interpret(renderer: &mut Renderer, effect: &ViewEffect) -> Outcome {
     match effect {
-        ViewEffect::Notify { level, text } => Some((text.clone(), notice_color(*level))),
+        ViewEffect::Notify { level, text } => Outcome::Line((text.clone(), notice_color(*level))),
         ViewEffect::Reply { action, target } => match reply_action(action, target.as_deref()) {
             Some(reply) => {
                 panel_feed::spawn_reply(reply);
-                None
+                Outcome::Done
             }
-            None => Some((format!("unknown panel reply '{action}'"), c_error())),
+            None => Outcome::Line((format!("unknown panel reply '{action}'"), c_error())),
         },
         ViewEffect::PanelMode { scope, mode } => match panel_mode(mode) {
             Some(mode) => {
@@ -39,19 +68,21 @@ fn interpret(renderer: &mut Renderer, effect: &ViewEffect) -> Option<ChatLine> {
                     PanelScope::Both => renderer.set_panel_mode(mode),
                     PanelScope::Right => renderer.set_right_panel_mode(mode),
                 }
-                None
+                Outcome::Done
             }
-            None => Some((format!("unknown panel mode '{mode}'"), c_error())),
+            None => Outcome::Line((format!("unknown panel mode '{mode}'"), c_error())),
         },
         ViewEffect::Panes { left, right } => {
             renderer.set_pane_visibility(PaneVisibility {
                 left: *left,
                 right: *right,
             });
-            None
+            Outcome::Done
         }
-        ViewEffect::PanelStatus => Some((panel_status_line(renderer), c_agent())),
-        ViewEffect::DisplayStatus => Some((display_status_line(renderer), c_agent())),
+        ViewEffect::PanelStatus => Outcome::Line((panel_status_line(renderer), c_agent())),
+        ViewEffect::DisplayStatus => Outcome::Line((display_status_line(renderer), c_agent())),
+        ViewEffect::OpenAgent { id } => Outcome::Handoff(Handoff::OpenAgent(id.clone())),
+        ViewEffect::MessageAgent { id } => Outcome::Handoff(Handoff::MessageAgent(id.clone())),
     }
 }
 

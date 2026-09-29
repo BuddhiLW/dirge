@@ -37,7 +37,7 @@ fn decode_effect(item: &Json) -> ViewEffect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::view::domain::SwarmModel;
+    use crate::ui::view::domain::{GridCell, SwarmModel};
     use serde_json::json;
 
     #[test]
@@ -50,20 +50,28 @@ mod tests {
         assert_eq!(
             encode_event(&ViewEvent::Grid {
                 key: "Tab".into(),
-                panels: vec!["a".into()],
+                cells: vec![GridCell::Panel("a".into()), GridCell::Agent("t1".into())],
                 columns: 2
             }),
-            json!({"type": "grid", "key": "Tab", "panels": ["a"], "columns": 2})
+            json!({"type": "grid", "key": "Tab", "columns": 2, "cells": [
+                {"kind": "panel", "id": "a"},
+                {"kind": "agent", "id": "t1"}
+            ]})
         );
     }
 
     #[test]
     fn updates_decode_and_bad_effects_become_notices() {
         let update = decode_update(&json!({
-            "model": {"swarm": {"selected": "b"}, "grid_keys": ["Esc"], "view_commands": ["swarm"]},
+            "model": {
+                "swarm": {"selected": {"kind": "agent", "id": "t1"}},
+                "grid_keys": ["Esc"],
+                "view_commands": ["swarm"]
+            },
             "effects": [
                 {"op": "reply", "action": "focus", "target": "b"},
                 {"op": "panel-status"},
+                {"op": "open-agent", "id": "t1"},
                 {"op": "teleport"}
             ]
         }))
@@ -71,7 +79,7 @@ mod tests {
         assert_eq!(
             update.model.swarm,
             Some(SwarmModel {
-                selected: Some("b".into())
+                selected: Some(GridCell::Agent("t1".into()))
             })
         );
         assert_eq!(
@@ -82,8 +90,9 @@ mod tests {
             }
         );
         assert_eq!(update.effects[1], ViewEffect::PanelStatus);
+        assert_eq!(update.effects[2], ViewEffect::OpenAgent { id: "t1".into() });
         assert!(matches!(
-            &update.effects[2],
+            &update.effects[3],
             ViewEffect::Notify { level: NoticeLevel::Error, text } if text.contains("teleport")
         ));
     }

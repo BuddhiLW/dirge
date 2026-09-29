@@ -595,6 +595,10 @@ pub struct Renderer {
     /// Open swarm view (`/swarm`, Alt+S): the external panels painted
     /// as a full-size grid above the input strip. `None` when closed.
     swarm_view: Option<crate::ui::swarm::SwarmView>,
+    /// In-flight subagents as swarm-grid cells (spawn order). Their
+    /// chat-tab tails are refreshed just before each paint while the
+    /// grid is open.
+    swarm_agents: Vec<crate::ui::swarm::SwarmAgent>,
     /// DAP debug panel snapshot — updated each UI tick when a
     /// DAP session is active and panel mode is Debug.
     #[cfg(feature = "dap")]
@@ -753,6 +757,7 @@ impl Renderer {
             left_panel_info: LeftPanelInfo::default(),
             external_panels: Default::default(),
             swarm_view: None,
+            swarm_agents: Vec::new(),
             #[cfg(feature = "dap")]
             debug_panel_data: None,
             alert_overlay: None,
@@ -883,6 +888,10 @@ impl Renderer {
         let show_right_panel = self.right_panel_visible();
         let frame_color = crate::ui::theme::header();
 
+        if self.swarm_view.is_some() {
+            self.refresh_swarm_tails();
+        }
+
         // Compute tooltip before the split borrow destructuring.
         let tooltip = self.current_tooltip().unwrap_or("");
 
@@ -899,6 +908,7 @@ impl Renderer {
             subagent_status,
             external_panels,
             swarm_view,
+            swarm_agents,
             alert_overlay,
             alert_scroll,
             alert_max_scroll,
@@ -1124,6 +1134,7 @@ impl Renderer {
             right_panel_mode: *right_panel_mode,
             tooltip,
             swarm: swarm_view.as_ref(),
+            swarm_agents,
             #[cfg(feature = "dap")]
             debug_panel_data: self.debug_panel_data.as_ref(),
         };
@@ -1447,8 +1458,54 @@ impl Renderer {
         self.external_panels.apply(op);
     }
 
-    pub fn external_panels(&self) -> &crate::ui::panels_ext::ExternalPanels {
-        &self.external_panels
+    /// Replace the swarm grid's subagent cells (spawn order). The UI
+    /// loop calls this alongside [`Self::set_subagent_status`].
+    pub fn set_swarm_agents(&mut self, agents: Vec<crate::ui::swarm::SwarmAgent>) {
+        self.swarm_agents = agents;
+    }
+
+    /// The swarm grid's cells in paint order: external panels, then
+    /// subagents.
+    pub fn swarm_cells(&self) -> Vec<crate::ui::swarm::SwarmCell> {
+        crate::ui::swarm::swarm_cells(
+            &self.external_panels,
+            self.swarm_agents.iter().map(|a| a.id.as_str()),
+        )
+    }
+
+    /// Newest `max` lines of chat tab `idx`, oldest first. The active
+    /// chat's lines live in the hot fields, the others in their slots.
+    fn chat_tail(&self, idx: usize, max: usize) -> Vec<(String, Color)> {
+        let buf = if idx == self.active_chat {
+            &self.buffer
+        } else {
+            match self.chats.get(idx) {
+                Some(slot) => &slot.buffer,
+                None => return Vec::new(),
+            }
+        };
+        buf[buf.len().saturating_sub(max)..]
+            .iter()
+            .map(|l| (l.text.to_string(), l.color))
+            .collect()
+    }
+
+    /// Re-read every subagent cell's chat tail (cheap: a bounded copy of
+    /// the newest lines per tab).
+    fn refresh_swarm_tails(&mut self) {
+        const TAIL: usize = 64;
+        let tails: Vec<_> = self
+            .swarm_agents
+            .iter()
+            .map(|a| {
+                a.chat_idx
+                    .map(|i| self.chat_tail(i, TAIL))
+                    .unwrap_or_default()
+            })
+            .collect();
+        for (a, tail) in self.swarm_agents.iter_mut().zip(tails) {
+            a.tail = tail;
+        }
     }
 
     /// Mirror the view model's swarm grid (`ui::view`): open with its
@@ -1476,9 +1533,9 @@ impl Renderer {
         // Header row on top; the grid body runs down to the chat's
         // bottom frame (same region `render_frame` paints).
         let body_h = layout.chat_bot_frame.y;
-        let n = self.external_panels.len();
-        crate::ui::swarm::grid_geometry(n, cols, body_h, v.selected_index(&self.external_panels))
-            .cols as usize
+        let cells = self.swarm_cells();
+        crate::ui::swarm::grid_geometry(cells.len(), cols, body_h, v.selected_index(&cells)).cols
+            as usize
     }
 
     /// ui-redesign: set the idle-state info shown in the left panel

@@ -26,7 +26,6 @@ mod tests;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-pub use boundary::ShellRunner;
 pub use domain::{HookEvent, HooksConfig};
 pub use registry::CommandHooks;
 
@@ -78,7 +77,7 @@ pub fn install_from_config(cfg: &crate::config::Config) {
         cfg.claude_hooks.unwrap_or(false),
         crate::extras::dirge_paths::project_root(&cwd),
         home.as_deref(),
-        Arc::new(ShellRunner),
+        Arc::new(boundary::DispatchRunner::live()),
     );
     if hooks.is_empty() {
         return;
