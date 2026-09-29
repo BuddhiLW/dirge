@@ -139,12 +139,10 @@ connection.
 Unknown ops, non-object payloads and ops missing a required field are
 ignored; the stream continues.
 
-dirge also accepts hive-vessel's `:json` dialect, the first producer's
-names, and renames them on arrival: `ui/show-panel`, `ui/close-panel`,
-`ui/focus-tab`, `ui/append-tab`, `ui/notify` and `ui/open-file` become
-`show`, `close`, `focus`, `append`, `notify` and `open-file`; a
-`panel/id` field becomes `id`; and a `doc`'s `doc/title` becomes `title`
-when there is none. New producers should send the neutral names.
+Only the names below are read. hive-vessel's older `:json` names
+(`ui/show-panel`, `panel/id`, ...) are unknown ops; hive-vessel sends the
+neutral names to any client that asks for `features`, which dirge always
+does.
 
 ### `show`
 
@@ -328,5 +326,4 @@ optional unified `diff`. The path must resolve to an existing regular file
 inside the current project root, including after symlink resolution. dirge
 opens it in the configured external editor, or previews its content in a
 panel; if `diff` is present it previews the supplied diff instead. A refused
-path produces a notice, never an editor launch. `ui/open-file` is accepted
-as part of the hive-vessel dialect above.
+path produces a notice, never an editor launch.

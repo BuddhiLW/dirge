@@ -12,9 +12,10 @@ use super::*;
 #[test]
 fn native_feed_open_file_is_generic() {
     let mut r = NativeReducer::default();
-    // Through the feed's intake, which renames the hive-vessel alias.
-    for name in ["open-file", "ui/open-file"] {
-        let data = serde_json::json!({"op":name, "path":"src/main.rs", "line":4}).to_string();
+    // Through the feed's intake.
+    {
+        let data =
+            serde_json::json!({"op":"open-file", "path":"src/main.rs", "line":4}).to_string();
         let event = crate::extras::panel_feed::ops::feed_event(&data).expect("an object");
         assert_eq!(
             run(&mut r, event).effects,
