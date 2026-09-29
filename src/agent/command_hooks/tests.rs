@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use super::boundary::{HookRunner, ShellRunner};
 use super::domain::{
-    Exited, HookCommand, HookError, HookEvent, HookMatcher, HookOutcome, HooksConfig,
+    Exited, HookCommand, HookError, HookEvent, HookMatcher, HookOutcome, HooksConfig, Submission,
 };
 use super::loop_hooks;
 use super::{CommandHooks, HookBinding, dialect, policy};
@@ -769,4 +769,55 @@ fn shell_runner_times_out() {
         ShellRunner.run(&slow, "{}", Path::new("/tmp")),
         Err(HookError::TimedOut(1))
     );
+}
+
+// ------------------------------------------------------ prompt submission
+
+#[test]
+fn submission_passes_the_prompt_through_when_no_hook_speaks() {
+    assert_eq!(
+        policy::submission(HookOutcome::default(), "hello".into()),
+        Submission::Proceed("hello".into())
+    );
+}
+
+#[test]
+fn submission_prepends_context() {
+    let Submission::Proceed(text) =
+        policy::submission(HookOutcome::with_context("ticket 42"), "hello".into())
+    else {
+        panic!("context alone must not block");
+    };
+    assert!(text.contains("ticket 42"), "{text}");
+    assert!(text.ends_with("hello"), "the prompt stays last: {text}");
+}
+
+#[test]
+fn submission_block_wins_over_context_and_drops_the_prompt() {
+    let outcome =
+        HookOutcome::with_context("ticket 42").combine(HookOutcome::blocked("no secrets"));
+    let Submission::Blocked(message) = policy::submission(outcome, "my password is x".into())
+    else {
+        panic!("a block must stop the run");
+    };
+    assert!(
+        message.contains("UserPromptSubmit") && message.contains("no secrets"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("my password is x"),
+        "a blocked prompt is not echoed back: {message}"
+    );
+}
+
+#[test]
+fn a_blocking_prompt_hook_yields_blocked_not_a_rewritten_prompt() {
+    let runner = ScriptedRunner::answering(vec![("gate", Ok(exit(2, "", "no secrets")))]);
+    let hooks = registry(
+        config(&[(HookEvent::UserPromptSubmit, None, &["gate"])]),
+        runner.clone(),
+    );
+    let submitted = loop_hooks::submitted_prompt(&hooks, Some("s-1"), "my password is x".into());
+    assert!(matches!(submitted, Submission::Blocked(ref m) if m.contains("no secrets")));
+    assert_eq!(runner.seen()[0].1["prompt"], "my password is x");
 }

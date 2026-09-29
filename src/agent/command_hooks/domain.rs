@@ -245,6 +245,16 @@ impl HookOutcome {
     }
 }
 
+/// What `UserPromptSubmit` made of a prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Submission {
+    /// Send this text to the model: the prompt, with any hook context
+    /// prepended.
+    Proceed(String),
+    /// Do not call the model. Carries the message shown to the user.
+    Blocked(String),
+}
+
 /// Wraps hook context for injection into a model-visible message.
 pub fn system_reminder(event: HookEvent, text: &str) -> String {
     format!("<system-reminder>\n{event} hook additional context: {text}\n</system-reminder>")
