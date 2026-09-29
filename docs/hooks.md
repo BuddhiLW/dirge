@@ -70,6 +70,14 @@ addon isolate answers within 5 seconds and refuses anything that waits on the
 loop, such as an MCP call; a handler that needs one allows those moments
 unjudged. The tool events and `Stop` run off the loop and can wait.
 
+### Other entry types
+
+`type` is open. An entry of any other type goes to the runner installed for
+that type (`command_hooks::boundary::install_runner`), which reads its own
+fields off the entry. With no runner for the type, such as Claude Code's
+`prompt` entries, the entry is kept but decides nothing, and the skip is
+logged at debug level.
+
 ## Events
 
 | Event | Fires | Matcher is matched against | Effect |
@@ -84,6 +92,24 @@ unjudged. The tool events and `Stop` run off the loop and can wait.
 Matchers follow Claude Code: absent, `""` or `"*"` match everything;
 otherwise the pattern is a regex anchored to the whole name (`Edit|Write`,
 `mcp__.*`).
+
+### Events dirge does not fire itself
+
+The event set is open. Entries under any other name, such as `Notification`,
+run whenever a seam fires that name (`HookEvent::named("Notification")`),
+through the same pipeline and decoder. Such an event also reaches every
+addon that registered the hook key `:dirge.hook/<Event>`, with no entry
+needed. The addon's hook gets the event's payload, and its answer is read
+like an addon entry's:
+
+```clojure
+{:dirge.hook/Notification
+ (fn [{:keys [message]}]
+   {:hookSpecificOutput {:additionalContext (str "heard " message)}})}
+```
+
+The events in the table above reach addons through their own hook points
+(`:dirge/before-tool-call` and the rest), not through this key.
 
 ## Payload
 
