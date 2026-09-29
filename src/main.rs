@@ -1852,7 +1852,7 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
                 match exit {
-                    HeadlessLoopExit::MaxIterations => {
+                    HeadlessLoopExit::MaxIterations | HeadlessLoopExit::BoardDrained => {
                         // dirge-jmc9: fire on_session_end before
                         // returning from --loop mode. session.messages
                         // is typically empty here (run_print doesn't
@@ -2185,6 +2185,15 @@ async fn main() -> anyhow::Result<()> {
                                         .rite_gate_enabled
                                         .store(true, std::sync::atomic::Ordering::Relaxed);
                                 }
+                                // Enable the filter/enrich stage only when a
+                                // plugin registered `on-vigil-enrich`.
+                                if let Some(pm_arc) = plugin_manager.as_ref()
+                                    && pm_arc.lock_ignore_poison().has_hook("on-vigil-enrich")
+                                {
+                                    keeper
+                                        .enrich_enabled
+                                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
                             }
                             eprintln!("info: vigil-keeper started with {n} vigil(s)");
                             let wake = keeper.wake_rx.take();
@@ -2284,18 +2293,16 @@ async fn main() -> anyhow::Result<()> {
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             #[cfg(feature = "plugin")]
             if let Some(pm_arc) = plugin_manager.as_ref() {
-                let ctx = crate::extras::vigil::observance_context(
+                let signal =
+                    serde_json::to_string(&obs.context).unwrap_or_else(|_| "{}".to_string());
+                crate::extras::vigil::dispatch_observance_and_act(
+                    pm_arc,
                     &obs.vigil_name,
                     obs.event_count,
                     &response,
-                );
-                let pm = pm_arc.clone();
-                tokio::task::spawn_blocking(move || {
-                    pm.lock_ignore_poison()
-                        .dispatch_tool_hook("on-vigil-observance", &ctx)
-                })
-                .await
-                .ok();
+                    &signal,
+                )
+                .await;
             }
 
             crate::agent::tools::bg_shell::global().kill_all();
@@ -2389,15 +2396,17 @@ async fn main() -> anyhow::Result<()> {
 /// How a single run of [`run_headless_loop`] ended.
 ///
 /// `MaxIterations` is the normal terminal state (or non-recoverable
-/// iteration error). `ModelSwap` is only returned when a plugin
-/// called `harness/set-next-model` from `prepare-next-run` — the
-/// caller is expected to rebuild the agent with the requested model
+/// iteration error). `BoardDrained` is returned only when `--loop-drain`
+/// is set and the live issue board is empty. `ModelSwap` is only returned
+/// when a plugin called `harness/set-next-model` from `prepare-next-run` —
+/// the caller is expected to rebuild the agent with the requested model
 /// and re-invoke `run_headless_loop` with the same mutable state /
 /// session id so iteration counting and the transcript continue
 /// seamlessly across the swap.
 #[cfg(feature = "loop")]
 enum HeadlessLoopExit {
     MaxIterations,
+    BoardDrained,
     #[cfg(feature = "plugin")]
     ModelSwap(String),
 }
@@ -2415,7 +2424,42 @@ async fn run_headless_loop(
 ) -> anyhow::Result<HeadlessLoopExit> {
     use crate::extras::r#loop as loop_mod;
 
+    // --loop-drain: stop once the live issue board is empty. Open it once
+    // here and re-check at the top of every iteration — a vigil emit-issue
+    // upsert and the agent's issue tool write the same table.
+    let board_store = if cli.loop_drain {
+        let paths = crate::extras::dirge_paths::ProjectPaths::new(
+            &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        );
+        match crate::extras::issue_db::IssueStore::open(&paths) {
+            Ok(store) => Some(store),
+            Err(e) => {
+                eprintln!(
+                    "[loop] warning: --loop-drain cannot open the issue board ({e}); falling back to --loop-max only"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     loop {
+        // `board_store` is `Some` only when `--loop-drain` was set and the
+        // board opened successfully, so this doubles as the flag guard.
+        if let Some(store) = &board_store {
+            match store.board(None) {
+                Ok(board) if board.is_empty() => {
+                    eprintln!("[loop] live issue board is empty, draining complete, stopping");
+                    return Ok(HeadlessLoopExit::BoardDrained);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("[loop] warning: failed to read the issue board ({e})");
+                }
+            }
+        }
+
         // dirge-vpma.15: next_iteration checks the max BEFORE incrementing,
         // so --loop-max N runs exactly N iterations (was N-1).
         if !state.next_iteration() {
@@ -3165,9 +3209,11 @@ fn build_vigil_entry(
         name: name.to_string(),
         trigger,
         reap_interval_secs,
+        cooldown_secs: 0,
         prompt,
         procession: None,
         rite: None,
+        gate: None,
     })
 }
 

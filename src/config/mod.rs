@@ -1399,6 +1399,12 @@ pub struct VigilEntry {
     pub trigger: VigilTrigger,
     #[serde(default = "default_reap_interval")]
     pub reap_interval_secs: u64,
+    /// Minimum seconds between observances for this vigil. A flapping alarm
+    /// keeps reaping on its cadence, but events arriving during the cooldown
+    /// are re-queued and coalesced into the next window instead of waking the
+    /// agent again. 0 (default) disables the throttle.
+    #[serde(default)]
+    pub cooldown_secs: u64,
     #[serde(default)]
     pub prompt: String,
     /// Optional Janet script for per-observance procession.
@@ -1406,11 +1412,81 @@ pub struct VigilEntry {
     pub procession: Option<String>,
     #[serde(default)]
     pub rite: Option<VigilRite>,
+    /// Cost-matrix policy for the rite gate. `None` = default policy
+    /// (false-positive cost 4, false-negative cost 1, fail open).
+    #[serde(default)]
+    pub gate: Option<VigilGate>,
 }
 
 #[cfg(feature = "vigil")]
 fn default_reap_interval() -> u64 {
     30
+}
+
+/// Cost-matrix policy for a vigil rite gate. The two costs are the price
+/// of a false wake (C_fp: the gate wakes the agent for something it would
+/// have dismissed) and a miss (C_fn: the gate lets a real event through).
+/// The gate wakes when the oracle's `p > τ`, with `τ = C_fp / (C_fn + C_fp)`.
+#[cfg(feature = "vigil")]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct VigilGate {
+    #[serde(default = "default_false_positive_cost")]
+    pub false_positive_cost: f64,
+    #[serde(default = "default_false_negative_cost")]
+    pub false_negative_cost: f64,
+    #[serde(default)]
+    pub fail: GateFail,
+}
+
+#[cfg(feature = "vigil")]
+fn default_false_positive_cost() -> f64 {
+    4.0
+}
+
+#[cfg(feature = "vigil")]
+fn default_false_negative_cost() -> f64 {
+    1.0
+}
+
+#[cfg(feature = "vigil")]
+impl Default for VigilGate {
+    fn default() -> Self {
+        VigilGate {
+            false_positive_cost: default_false_positive_cost(),
+            false_negative_cost: default_false_negative_cost(),
+            fail: GateFail::default(),
+        }
+    }
+}
+
+#[cfg(feature = "vigil")]
+impl VigilGate {
+    /// Derive the wake threshold from the cost ratio. Defaults (4 : 1)
+    /// yield τ = 0.8. A degenerate all-zero matrix yields 0 (wake on any
+    /// signal) rather than NaN.
+    pub fn threshold(&self) -> f64 {
+        let denom = self.false_negative_cost + self.false_positive_cost;
+        if denom <= 0.0 {
+            return 0.0;
+        }
+        self.false_positive_cost / denom
+    }
+}
+
+/// What the gate should do when it cannot reach an oracle at all
+/// (drainer gone, plugin error, timeout).
+#[cfg(feature = "vigil")]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GateFail {
+    /// Wake and run the observance (today's fail-open behavior).
+    #[default]
+    Open,
+    /// Skip the observance.
+    Closed,
+    /// Assume the empirical base rate. Uncalibrated until outcome data
+    /// exists, so it currently falls back to open (slice 08 feeds this).
+    Prior,
 }
 
 /// What triggers a vigil to fire.

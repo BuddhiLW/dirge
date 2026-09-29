@@ -589,6 +589,51 @@ fn test_take_pending_replace_result_roundtrips() {
     assert_eq!(mgr.take_pending_replace_result(), None);
 }
 
+/// `harness/toil` accepts a JSON array of commands, or a bare command
+/// string, and the host parses both into a command list.
+#[cfg(feature = "plugin")]
+#[test]
+fn test_take_pending_toil_roundtrips() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    assert_eq!(mgr.take_pending_toil(), None);
+
+    mgr.eval(r#"(harness/toil "[\"curl -fsS http://x/health\",\"systemctl restart x\"]")"#)
+        .unwrap();
+    assert_eq!(
+        mgr.take_pending_toil(),
+        Some(vec![
+            "curl -fsS http://x/health".to_string(),
+            "systemctl restart x".to_string()
+        ])
+    );
+    assert_eq!(mgr.take_pending_toil(), None);
+
+    // Bare (non-JSON) string is treated as a single command.
+    mgr.eval(r#"(harness/toil "echo single")"#).unwrap();
+    assert_eq!(
+        mgr.take_pending_toil(),
+        Some(vec!["echo single".to_string()])
+    );
+    assert_eq!(mgr.take_pending_toil(), None);
+}
+
+/// `harness/enrich` round-trips a JSON object string through the slot so
+/// the reaper can shallow-merge it into the event context.
+#[cfg(feature = "plugin")]
+#[test]
+fn test_take_pending_enrich_roundtrips() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    assert_eq!(mgr.take_pending_enrich(), None);
+
+    mgr.eval(r#"(harness/enrich "{\"author\":\"jane\",\"pr\":\"42\"}")"#)
+        .unwrap();
+    assert_eq!(
+        mgr.take_pending_enrich(),
+        Some(r#"{"author":"jane","pr":"42"}"#.to_string())
+    );
+    assert_eq!(mgr.take_pending_enrich(), None);
+}
+
 /// `dispatch_tool_hook` resets slots before running so previous-call
 /// state doesn't leak into the current tool's decision.
 #[cfg(feature = "plugin")]
@@ -659,6 +704,128 @@ fn test_dispatch_tool_hook_captures_replace_result() {
         .dispatch_tool_hook("on-tool-end", "@{:tool \"read\"}")
         .unwrap();
     assert_eq!(result.replace_result, Some("[truncated]".to_string()));
+}
+
+/// `on-vigil-observance` runs post-turn and its `(harness/toil ...)` output
+/// is the "act" half of act/chaining: the host drains the slot so it can run
+/// the commands. Chaining is the plugin's half, via `(vigil/emit next ...)`
+/// inside the same hook (exercised in the worker bridge test).
+#[cfg(feature = "plugin")]
+#[test]
+fn on_vigil_observance_hook_drains_toil_for_act() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    mgr.eval(
+        r#"(defn after-observe [ctx]
+             (harness/toil "[\"true\",\"echo chained\"]"))"#,
+    )
+    .unwrap();
+    mgr.register("on-vigil-observance", "after-observe");
+
+    let result = mgr
+        .dispatch_tool_hook(
+            "on-vigil-observance",
+            "@{:vigil \"sig-a\" :count 2 :response \"done\" :exit :ok}",
+        )
+        .unwrap();
+    assert_eq!(
+        result.toil,
+        Some(vec!["true".to_string(), "echo chained".to_string()])
+    );
+}
+
+/// `on-vigil-outcome` classifies a finished observance via `harness/outcome`;
+/// the host drains the JSON `{"label":...,"useful":...}` slot to persist the
+/// (signal, outcome) pair feeding the empirical prior.
+#[cfg(feature = "plugin")]
+#[test]
+fn on_vigil_outcome_hook_captures_outcome_slot() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    mgr.eval(r#"(defn classify [ctx] (harness/outcome "resolved" false))"#)
+        .unwrap();
+    mgr.register("on-vigil-outcome", "classify");
+
+    let result = mgr
+        .dispatch_tool_hook(
+            "on-vigil-outcome",
+            "@{:vigil \"sig-a\" :count 2 :response \"done\" :exit :ok}",
+        )
+        .unwrap();
+    // `json-encode` does not guarantee key order, so assert the parsed
+    // semantics rather than a fixed string.
+    let raw = result.outcome.expect("outcome slot set");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(parsed["label"], "resolved");
+    assert_eq!(parsed["useful"], false);
+}
+
+/// `on-vigil-rite` reports an oracle confidence via `harness/verdict`; the
+/// host drains the JSON `{"p":0.0..1.0}` slot and compares it to the vigil's
+/// wake threshold, so the plugin never bakes in its own magic number.
+#[cfg(feature = "plugin")]
+#[test]
+fn on_vigil_rite_hook_captures_verdict_slot() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    mgr.eval(r#"(defn gate [ctx] (harness/verdict 0.87))"#)
+        .unwrap();
+    mgr.register("on-vigil-rite", "gate");
+
+    let result = mgr
+        .dispatch_tool_hook("on-vigil-rite", "@{:vigil \"sig-a\" :count 2}")
+        .unwrap();
+    let raw = result.verdict.expect("verdict slot set");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(parsed["p"], 0.87);
+}
+
+/// The bundled `debounce-adapter` fixture loads as pure Janet functions and
+/// collapses event bursts: `reduce` folds values, `aggregate` groups by key
+/// and reduces each group, `coalesce` keeps the latest event per key.
+#[cfg(feature = "plugin")]
+#[test]
+fn janet_debounce_adapter_reduces_aggregates_and_coalesces() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/vigil/plugins/debounce-adapter.janet");
+    mgr.load_file(&path).unwrap();
+
+    assert_eq!(mgr.eval("(debounce/reduce @[1 2 3 4] :sum)").unwrap(), "10");
+    assert_eq!(
+        mgr.eval("(debounce/reduce @[1 2 3 4] :count)").unwrap(),
+        "4"
+    );
+    assert_eq!(
+        mgr.eval("(debounce/reduce @[1 2 3 4] :latest)").unwrap(),
+        "4"
+    );
+    assert_eq!(
+        mgr.eval("(debounce/reduce @[1 2 3 4] :first)").unwrap(),
+        "1"
+    );
+
+    let burst = r#"@[@{:k "a" :v 1} @{:k "b" :v 2} @{:k "a" :v 3}]"#;
+    assert_eq!(
+        mgr.eval(&format!(
+            r#"(get (debounce/aggregate {burst} :k :sum :v) "a")"#
+        ))
+        .unwrap(),
+        "4"
+    );
+    assert_eq!(
+        mgr.eval(&format!(
+            r#"(get (debounce/aggregate {burst} :k :sum :v) "b")"#
+        ))
+        .unwrap(),
+        "2"
+    );
+
+    assert_eq!(
+        mgr.eval(r#"(length (debounce/coalesce @[@{:id 1} @{:id 2} @{:id 1}] :id))"#,)
+            .unwrap(),
+        "2"
+    );
+
+    let err = mgr.eval("(debounce/reduce @[1] :bogus)").unwrap_err();
+    assert!(err.contains("unknown reducer"), "unexpected error: {err}");
 }
 
 /// First-blocker-wins precedence (Phase 1, matches pi's
@@ -1489,6 +1656,30 @@ fn emit_issue_creates_board_issue_and_returns_id() {
     assert_eq!(issue.body, "upgrade to v2");
     assert_eq!(issue.priority, "high");
     assert_eq!(issue.status, "open");
+
+    // A non-empty dedup-key upserts into the single live issue carrying that
+    // key instead of creating a fresh row on every emit.
+    let first = mgr
+        .eval(r#"(harness/emit-issue "flaky suite" "first failure" "normal" "sig-flaky")"#)
+        .unwrap();
+    let first = first.trim_matches('"');
+    let second = mgr
+        .eval(r#"(harness/emit-issue "flaky suite (updated)" "second failure" "high" "sig-flaky")"#)
+        .unwrap();
+    let second = second.trim_matches('"');
+    assert_eq!(first, second, "same live dedup key must reuse the row");
+
+    let reopened = IssueStore::open_at(&db_path).unwrap();
+    let deduped = reopened.get(second).unwrap().expect("deduped issue exists");
+    assert_eq!(deduped.title, "flaky suite (updated)");
+    assert_eq!(deduped.body, "second failure");
+    assert_eq!(deduped.priority, "high");
+    assert_eq!(deduped.dedup_key.as_deref(), Some("sig-flaky"));
+    assert_eq!(
+        reopened.board(None).unwrap().len(),
+        2,
+        "original issue + one deduped live row"
+    );
 }
 
 // --- H3: register-tool prepare-arguments field ---------------------

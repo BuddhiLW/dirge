@@ -23,13 +23,15 @@ name: dirge-vigil-lev
 #
 #   podman-compose up --build
 #
-# Verdict semantics: with the default LEV_THRESHOLD=0.8, lev's noul for an
-# empty heartbeat (~0.08) is BELOW the threshold, so the gate BLOCKS and no
-# observance fires. The pass criterion is the "on-vigil-rite gate blocked"
-# log line, not a clean exit — dirge bails non-zero after its 180s observance
-# timeout, so the test kills it early and greps the log. To exercise the PASS
-# path instead, set LEV_THRESHOLD=0: the observance then fires and requires a
-# live DeepSeek call (DEEPSEEK_API_KEY).
+# Verdict semantics: the vigil's gate.policy cost matrix (defaults C_fp=4,
+# C_fn=1) derives a wake threshold tau=0.8. lev's noul for an empty heartbeat
+# (~0.08) is BELOW that threshold, so the gate SHROUDS and no observance
+# fires. The pass criterion is the "on-vigil-rite gate blocked" log line, not
+# a clean exit — dirge bails non-zero after its 180s observance timeout, so
+# the test kills it early and greps the log. To exercise the PASS path
+# instead, drop the threshold to 0 (add `"gate":{"false_positive_cost":0,
+# "false_negative_cost":1}` to lev-rite.json): the observance then fires and
+# requires a live DeepSeek call (DEEPSEEK_API_KEY).
 #
 # For the continuous TUI vigil runtime use:
 #
@@ -84,7 +86,6 @@ services:
       DIRGE_MODEL: deepseek-v4-pro
       LEV_URL: http://lev:8080
       LEV_API_KEY: ${LEV_API_KEY:-s3cret}
-      LEV_THRESHOLD: ${LEV_THRESHOLD:-0.8}
       RUST_LOG: warn
       DIRGE_LOG: /tmp/dirge.log
     volumes:

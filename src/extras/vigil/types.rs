@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::config::{VigilCommand, VigilRite};
+use crate::config::{VigilCommand, VigilGate, VigilRite};
 
 /// An event pushed into a vigil's queue by a trigger (toll, watcher, harbinger).
 #[derive(Debug, Clone)]
@@ -34,6 +34,54 @@ impl TriggerKind {
     }
 }
 
+/// Verdict a vigil rite gate hands back through the synchronous hook
+/// oneshot. Three shapes cover the deferral seam:
+/// - `Shroud` — stay quiet and skip the observance (the gate blocked it);
+/// - `Rouse` — wake the agent and run the observance;
+/// - `Toil` — don't wake the agent, just run these shell commands.
+#[derive(Debug, Clone)]
+pub enum GateVerdict {
+    Shroud { reason: String },
+    Rouse,
+    Toil { commands: Vec<String> },
+}
+
+impl GateVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GateVerdict::Shroud { .. } => "shroud",
+            GateVerdict::Rouse => "rouse",
+            GateVerdict::Toil { .. } => "toil",
+        }
+    }
+}
+
+/// Outcome of the `on-vigil-enrich` hook — the filter/enrich stage of the
+/// vigil pipeline, before the rite gate runs.
+/// - `Pass` — no enrichment registered (or the plugin returned nothing);
+///   keep the original event context.
+/// - `Drop { reason }` — the plugin blocked the event; skip the gate and
+///   observance entirely.
+/// - `Enriched(json)` — a JSON object string to shallow-merge into each
+///   event's context before the gate and observance see it.
+#[derive(Debug, Clone)]
+pub enum EnrichOutcome {
+    Pass,
+    Drop { reason: String },
+    Enriched(String),
+}
+
+/// Reply the hook drainer sends back for a synchronous vigil hook. The
+/// reaper constructs the request with a oneshot of this type; the drainer
+/// fills the variant that matches the hook name.
+#[derive(Debug)]
+pub enum HookResponse {
+    /// Synchronous rite gate verdict (`on-vigil-rite`).
+    Verdict(GateVerdict),
+    /// Filter/enrich outcome (`on-vigil-enrich`).
+    Enrich(EnrichOutcome),
+}
+
 /// Per-vigil channel pair. `tx` (sender) is `Clone` and shared with triggers.
 /// `rx` (receiver) is consumed by the reaper for that vigil.
 pub fn make_vigil_channel(bound: usize) -> (mpsc::Sender<VigilEvent>, mpsc::Receiver<VigilEvent>) {
@@ -57,11 +105,13 @@ pub struct VigilReapInput {
     pub name: String,
     pub trigger: TriggerKind,
     pub reap_interval_secs: u64,
+    pub cooldown_secs: u64,
     pub rx: mpsc::Receiver<VigilEvent>,
     pub running: Arc<std::sync::atomic::AtomicBool>,
     pub rite: Option<VigilRite>,
     pub prompt: String,
     pub procession: Option<String>,
+    pub gate: Option<VigilGate>,
 }
 
 /// Snapshot of a single vigil's runtime state, returned by StatusReq queries.
@@ -85,9 +135,13 @@ pub struct VigilStatusInfo {
 pub struct HookDispatchRequest {
     pub hook_name: String,
     pub context: String,
-    /// Optional oneshot answered by the drainer with the hook's block verdict:
-    /// `Some(reason)` = blocked, `None` = passed. `None` = fire-and-forget.
-    pub respond_to: Option<tokio::sync::oneshot::Sender<Option<String>>>,
+    /// Optional oneshot answered by the drainer with a typed reply.
+    /// `None` = fire-and-forget (non-synchronous hooks).
+    pub respond_to: Option<tokio::sync::oneshot::Sender<HookResponse>>,
+    /// Wake threshold for the synchronous `on-vigil-rite` hook, used to turn
+    /// a `harness/verdict` confidence into a rouse/shroud. `None` for every
+    /// hook that does not produce a verdict.
+    pub threshold: Option<f64>,
 }
 
 /// Control messages for the vigil-keeper / reaper.

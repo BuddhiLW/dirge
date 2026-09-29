@@ -50,7 +50,6 @@ set the environment variables:
 ```bash
 export LEV_URL="http://127.0.0.1:8080"
 export LEV_API_KEY="s3cret"
-export LEV_THRESHOLD="0.8"   # block when lev's noul is below this
 dirge --vigil
 ```
 
@@ -89,13 +88,14 @@ with the observance rather than stalling the vigil.
 ## 5. Testing the plugin without lev
 
 `plugins/vigil_lev.janet`'s `lev-verdict` accepts an optional config table, so
-the gate logic is testable against a mock server with no lev running:
+the signal extraction is testable against a mock server with no lev running:
 
 ```janet
 (lev-verdict
   {:vigil "v" :trigger :toll :event_count 1 :payload "{}"}
-  {:endpoint "http://127.0.0.1:PORT" :threshold 0.8})
+  {:endpoint "http://127.0.0.1:PORT"})
 ```
 
-The Rust test suite exercises this path (`lev_rite_gate_blocks_below_threshold`,
-`lev_rite_gate_passes_above_threshold`) using a local mock HTTP server.
+It returns lev's `noul` probability as a number (or nil). The Rust test suite
+exercises this path (`lev_verdict_returns_noul_signal`,
+`lev_verdict_returns_high_noul_signal`) using a local mock HTTP server.

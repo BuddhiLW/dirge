@@ -122,11 +122,13 @@ fn build_entry(
         name: name.to_string(),
         trigger,
         reap_interval_secs,
+        cooldown_secs: 0,
         prompt,
         procession: None,
         rite: Some(VigilRite {
             cmd: None,
             git_dirty: false,
         }),
+        gate: None,
     })
 }

@@ -10,11 +10,16 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::time::Duration;
 
-use crate::config::{SocketMode, VigilCommand, VigilEntry, VigilRite, VigilTrigger};
+use crate::config::{
+    GateFail, SocketMode, VigilCommand, VigilEntry, VigilGate, VigilRite, VigilTrigger,
+};
 
 use super::VigilKeeper;
 use super::reaper::Observance;
-use super::types::{HookDispatchRequest, TriggerKind, VigilCtl, VigilEvent};
+use super::types::{
+    EnrichOutcome, GateVerdict, HookDispatchRequest, HookResponse, TriggerKind, VigilCtl,
+    VigilEvent,
+};
 
 fn toll_entry(
     name: &str,
@@ -41,7 +46,7 @@ fn ok_rite() -> Option<VigilRite> {
 }
 
 fn spawn_keeper(entries: Vec<VigilEntry>) -> VigilKeeper {
-    VigilKeeper::from_entries(entries, std::collections::HashSet::new())
+    VigilKeeper::from_entries(entries, std::collections::HashSet::new(), None)
         .expect("vigil keeper should build")
 }
 
@@ -288,9 +293,11 @@ async fn procession_chains_to_next_vigil() {
         name: "chain-a".to_string(),
         trigger: VigilTrigger::Toll { interval_secs: 1 },
         reap_interval_secs: 1,
+        cooldown_secs: 0,
         prompt: "a".to_string(),
         procession: Some("chain-b".to_string()),
         rite: None,
+        gate: None,
     };
     let b = VigilEntry {
         name: "chain-b".to_string(),
@@ -625,7 +632,9 @@ async fn on_vigil_rite_block_skips_observance() {
     // Block the rite gate; the reaper must skip the observance.
     req.respond_to
         .expect("rite gate carries a responder")
-        .send(Some("lev: low confidence".to_string()))
+        .send(HookResponse::Verdict(GateVerdict::Shroud {
+            reason: "lev: low confidence".to_string(),
+        }))
         .expect("send block verdict");
 
     assert!(
@@ -650,11 +659,166 @@ async fn on_vigil_rite_pass_allows_observance() {
     // A pass verdict lets the observance proceed.
     req.respond_to
         .expect("rite gate carries a responder")
-        .send(None)
+        .send(HookResponse::Verdict(GateVerdict::Rouse))
         .expect("send pass verdict");
 
     let obs = recv_observance_from(&mut keeper, "rite-pass", Duration::from_secs(8))
         .await
         .expect("rite-pass observance");
     assert_eq!(obs.vigil_name, "rite-pass");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn on_vigil_rite_toil_runs_commands_without_observance() {
+    let mut keeper = spawn_keeper(vec![toll_entry("rite-toil", 1, 1, "x", None)]);
+    keeper
+        .rite_gate_enabled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let marker = std::env::temp_dir().join(format!("dirge-vigil-toil-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+
+    let req = recv_hook(&mut keeper, "on-vigil-rite", Duration::from_secs(8))
+        .await
+        .expect("on-vigil-rite hook");
+    req.respond_to
+        .expect("rite gate carries a responder")
+        .send(HookResponse::Verdict(GateVerdict::Toil {
+            commands: vec![format!("echo toiled > {}", marker.display())],
+        }))
+        .expect("send toil verdict");
+
+    // Toil skips the observance (no agent turn)...
+    assert!(
+        recv_observance_from(&mut keeper, "rite-toil", Duration::from_secs(4))
+            .await
+            .is_none(),
+        "a toil verdict must skip the observance"
+    );
+
+    // ...and the command actually ran.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let ran = loop {
+        if std::fs::read_to_string(&marker).is_ok_and(|s| s.contains("toiled")) {
+            break true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let _ = std::fs::remove_file(&marker);
+    assert!(ran, "toil command should have written the marker file");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn on_vigil_enrich_drop_skips_observance() {
+    let mut keeper = spawn_keeper(vec![toll_entry("enrich-drop", 1, 1, "x", None)]);
+    keeper
+        .enrich_enabled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    // The filter/enrich stage runs before the rite gate. A plugin drops the
+    // event, so no observance may follow.
+    let req = recv_hook(&mut keeper, "on-vigil-enrich", Duration::from_secs(8))
+        .await
+        .expect("on-vigil-enrich hook");
+    assert_eq!(req.hook_name, "on-vigil-enrich");
+    assert!(
+        req.context.contains("enrich-drop"),
+        "context = {}",
+        req.context
+    );
+    assert!(
+        req.context.contains(":payload"),
+        "context = {}",
+        req.context
+    );
+
+    req.respond_to
+        .expect("enrich carries a responder")
+        .send(HookResponse::Enrich(EnrichOutcome::Drop {
+            reason: "filtered by plugin".to_string(),
+        }))
+        .expect("send drop outcome");
+
+    assert!(
+        recv_observance_from(&mut keeper, "enrich-drop", Duration::from_secs(4))
+            .await
+            .is_none(),
+        "a dropped on-vigil-enrich event must skip the observance"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn on_vigil_enrich_merges_context_into_gate() {
+    let mut keeper = spawn_keeper(vec![toll_entry("enrich-merge", 1, 1, "x", None)]);
+    keeper
+        .enrich_enabled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    keeper
+        .rite_gate_enabled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    // Enrich first: hand the host a JSON object to merge into the event.
+    let enrich = recv_hook(&mut keeper, "on-vigil-enrich", Duration::from_secs(8))
+        .await
+        .expect("on-vigil-enrich hook");
+    enrich
+        .respond_to
+        .expect("enrich carries a responder")
+        .send(HookResponse::Enrich(EnrichOutcome::Enriched(
+            r#"{"author":"jane"}"#.to_string(),
+        )))
+        .expect("send enrich outcome");
+
+    // The rite gate must now see the enriched key in its payload.
+    let gate = recv_hook(&mut keeper, "on-vigil-rite", Duration::from_secs(8))
+        .await
+        .expect("on-vigil-rite hook");
+    assert!(
+        gate.context.contains("author"),
+        "rite context should carry the enriched key: {}",
+        gate.context
+    );
+    assert!(
+        gate.context.contains("jane"),
+        "rite context should carry the enriched value: {}",
+        gate.context
+    );
+
+    gate.respond_to
+        .expect("rite gate carries a responder")
+        .send(HookResponse::Verdict(GateVerdict::Rouse))
+        .expect("send pass verdict");
+
+    let obs = recv_observance_from(&mut keeper, "enrich-merge", Duration::from_secs(8))
+        .await
+        .expect("enrich-merge observance");
+    assert_eq!(obs.vigil_name, "enrich-merge");
+}
+
+#[test]
+fn gate_threshold_derives_from_cost_matrix() {
+    // Defaults 4 : 1 → τ = 4/5.
+    assert!((VigilGate::default().threshold() - 0.8).abs() < 1e-9);
+    // 1 : 1 → τ = 0.5.
+    assert!(
+        (VigilGate {
+            false_positive_cost: 1.0,
+            false_negative_cost: 1.0,
+            fail: GateFail::Open,
+        }
+        .threshold()
+            - 0.5)
+            .abs()
+            < 1e-9
+    );
+    // Degenerate all-zero matrix → 0, never NaN.
+    let degenerate = VigilGate {
+        false_positive_cost: 0.0,
+        false_negative_cost: 0.0,
+        fail: GateFail::Open,
+    };
+    assert_eq!(degenerate.threshold(), 0.0);
 }

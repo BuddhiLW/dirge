@@ -183,6 +183,10 @@ const HARNESS_INIT: &str = r#"
 (var harness-block nil)
 (var harness-mutate-input nil)
 (var harness-replace-result nil)
+(var harness-toil nil)
+(var harness-enrich nil)
+(var harness-outcome nil)
+(var harness-verdict nil)
 
 # Entity/relation record accumulators (experimental-graph-search).
 # Janet compressors call harness/record-entity and harness/record-relation
@@ -228,6 +232,20 @@ const HARNESS_INIT: &str = r#"
   (when (string? json-str) (set harness-mutate-input json-str)))
 (defn harness/replace-result [output]
   (when (string? output) (set harness-replace-result output)))
+# Act half of act/chaining: ask the host to run shell commands directly.
+# Set from `on-vigil-rite` (gate Toil, instead of waking the agent) or
+# `on-vigil-observance` (post-turn actuation). `commands` is a JSON array
+# of command strings, e.g. "[\"curl -fsS http://x/health\" \"systemctl restart x\"]";
+# a bare non-JSON string is treated as a single command.
+(defn harness/toil [commands]
+  (when (string? commands) (set harness-toil commands)))
+# on-vigil-enrich stage only: hand the host a JSON object to merge into the
+# event context before the rite gate and observance run. `json` must be a
+# JSON object string, e.g. "{\"author\":\"jane\"}" — the host shallow-merges
+# its keys into each event's context so the prompt template can reference
+# them ({author}) and the gate sees the enriched payload.
+(defn harness/enrich [json]
+  (when (string? json) (set harness-enrich json)))
 
 # Entity/relation recording for graph-search (#393).
 # Compressors call these from `on-tool-end` to persist structured facts.
@@ -1046,15 +1064,18 @@ const HARNESS_TOOL_INIT: &str = r#"
 /// so a `defn` body that names the symbol would fail to compile there.
 #[cfg(feature = "plugin")]
 const HARNESS_ISSUE_INIT: &str = r#"
-# (harness/emit-issue title &opt body priority) -> issue id string | nil
+# (harness/emit-issue title &opt body priority dedup-key) -> issue id string | nil
 # Files a durable, session-unscoped issue on the board and returns its id
-# (e.g. "drg-a1b2"). Returns nil when the issue bridge is not installed
-# (plugin tests, --no-session without the store) or the title is empty.
-(defn harness/emit-issue [title &opt body priority]
+# (e.g. "drg-a1b2"). A non-empty dedup-key upserts into the single live issue
+# carrying that key instead of creating a new row. Returns nil when the issue
+# bridge is not installed (plugin tests, --no-session without the store) or
+# the title is empty.
+(defn harness/emit-issue [title &opt body priority dedup-key]
   (harness/__emit-issue
     (string title)
     (if (nil? body) "" (string body))
-    (if (nil? priority) "" (string priority))))
+    (if (nil? priority) "" (string priority))
+    (if (nil? dedup-key) "" (string dedup-key))))
 "#;
 
 /// Janet wrapper for the HTTP bridge, installed on the **plugin VM only**.
@@ -1121,6 +1142,26 @@ const HARNESS_VIGIL_INIT: &str = r#"
               (string/join (map json-encode x) ",")
               "]")
     (string x)))
+
+# on-vigil-outcome stage only: classify a finished observance so the host
+# can persist (signal, outcome) and build the empirical prior that feeds
+# GateFail::Prior (wake iff P(useful) > threshold when the oracle is
+# unavailable). `label` is a short token ("resolved", "false-alarm",
+# "escalated", ...); `useful` is an optional boolean marking whether the
+# wake was worth it and defaults to true when omitted.
+(defn harness/outcome [label &opt useful]
+  (when (string? label)
+    (set harness-outcome
+         (json-encode {:label label :useful (if (nil? useful) true (truthy? useful))}))))
+
+# on-vigil-rite predicate: return the oracle's confidence p in [0,1] and let
+# the host apply the vigil's cost-matrix threshold (p > threshold -> rouse,
+# otherwise shroud). The host keeps the threshold math so the plugin never
+# bakes in its own magic number; `harness/block` and `harness/toil` remain
+# the explicit override paths checked before this slot.
+(defn harness/verdict [p]
+  (when (number? p)
+    (set harness-verdict (json-encode {:p p}))))
 
 (defn vigil/emit
   "Push an event into the vigil-keeper. `event-name` is a string key;
@@ -3898,7 +3939,7 @@ unsafe fn get_dict_int_array(v: janetrs::lowlevel::Janet, key: &str) -> Option<V
 /// Bridge from the Janet worker thread to the durable issue board.
 ///
 /// Exposes Janet function:
-/// - `harness/emit-issue` — (title [body] [priority]) -> issue id string or nil
+/// - `harness/emit-issue` — (title [body] [priority] [dedup-key]) -> issue id string or nil
 ///
 /// Guarded by `plugin` only (issues are core, not vigil-gated): a flow plugin
 /// can file an issue in loop, vigil, or interactive mode. The issue is created
@@ -3923,9 +3964,11 @@ pub(crate) mod issue_bridge {
         }
     }
 
-    /// (harness/emit-issue title [body] [priority]) -> issue id string or nil.
+    /// (harness/emit-issue title [body] [priority] [dedup-key]) -> issue id or nil.
     /// Files a durable, session-unscoped issue on the board and returns its id
     /// (e.g. `drg-a1b2`), or nil when the store is absent / the title is empty.
+    /// A non-empty `dedup-key` upserts into the single live issue carrying that
+    /// key instead of creating a new row.
     pub unsafe extern "C-unwind" fn issue_emit_cfn(
         argc: i32,
         argv: *mut janetrs::lowlevel::Janet,
@@ -3947,16 +3990,35 @@ pub(crate) mod issue_bridge {
         } else {
             None
         };
+        let dedup_key = if argc > 3 {
+            unsafe { read_string_arg(argv, 3) }
+        } else {
+            None
+        };
         let Some(store) = ISSUE_STORE.get() else {
             return unsafe { janet_wrap_nil() };
         };
-        match store.create(
-            title.trim(),
-            body.as_deref().unwrap_or(""),
-            priority.as_deref(),
-            None,
-            None,
-        ) {
+        // An absent or empty dedup key falls back to a plain create.
+        let result = match dedup_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+        {
+            Some(key) => store.upsert(
+                key,
+                title.trim(),
+                body.as_deref().unwrap_or(""),
+                priority.as_deref(),
+            ),
+            None => store.create(
+                title.trim(),
+                body.as_deref().unwrap_or(""),
+                priority.as_deref(),
+                None,
+                None,
+            ),
+        };
+        match result {
             Ok(id) => unsafe { wrap_string(&id) },
             Err(_) => unsafe { janet_wrap_nil() },
         }
@@ -5435,6 +5497,26 @@ mod tests {
         let context: serde_json::Value =
             serde_json::from_str(payload).expect("payload must be valid JSON");
         assert_eq!(context["job"], "my-pipeline");
+
+        // Chaining half of act/chaining: a hook body is just a Janet defn,
+        // so prove vigil/emit also reaches the bus when called from one.
+        let r = worker
+            .eval(
+                r#"(do
+                     (defn chain [ctx] (vigil/emit "chained" {:from (ctx :vigil)}))
+                     (chain @{:vigil "sig-a"}))"#,
+            )
+            .unwrap();
+        assert_eq!(r, "nil");
+
+        let msg = rx
+            .blocking_recv()
+            .expect("vigil/emit from a defn must reach the bridge tx across threads");
+        let (name, payload) = msg.split_once('\t').expect("name\tpayload");
+        assert_eq!(name, "chained");
+        let context: serde_json::Value =
+            serde_json::from_str(payload).expect("payload must be valid JSON");
+        assert_eq!(context["from"], "sig-a");
     }
 
     /// Minimal single-threaded HTTP server for the HTTP-bridge and lev-gate
@@ -5498,11 +5580,11 @@ mod tests {
         assert_eq!(r, "nil");
     }
 
-    /// The lev gate blocks (returns a reason) when lev's noul probability is
-    /// below the configured threshold.
+    /// `lev-verdict` returns lev's raw `noul` signal; the host applies the
+    /// vigil's wake threshold, so the plugin holds no threshold of its own.
     #[cfg(feature = "vigil")]
     #[test]
-    fn lev_rite_gate_blocks_below_threshold() {
+    fn lev_verdict_returns_noul_signal() {
         let url = spawn_mock_lev(r#"{"answers":{"judgment":{"noul":0.42}}}"#);
         let src = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -5515,17 +5597,20 @@ mod tests {
         let r = worker
             .eval(&format!(
                 r#"(lev-verdict @{{:vigil "v" :trigger :toll :event_count 1 :payload "{{}}"}}
-             @{{:endpoint "{url}" :threshold 0.8}})"#
+             @{{:endpoint "{url}"}})"#
             ))
             .unwrap();
-        assert!(r.contains("below threshold 0.8"), "block reason, got {r:?}");
+        assert_eq!(
+            r, "0.42",
+            "lev-verdict must return the noul signal, got {r:?}"
+        );
     }
 
-    /// The lev gate passes (returns nil) when lev's noul probability is at or
-    /// above the configured threshold.
+    /// A high noul signal is reported as-is; whether it rouses is the host's
+    /// threshold decision, not the plugin's.
     #[cfg(feature = "vigil")]
     #[test]
-    fn lev_rite_gate_passes_above_threshold() {
+    fn lev_verdict_returns_high_noul_signal() {
         let url = spawn_mock_lev(r#"{"answers":{"judgment":{"noul":0.95}}}"#);
         let src = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -5538,9 +5623,12 @@ mod tests {
         let r = worker
             .eval(&format!(
                 r#"(lev-verdict @{{:vigil "v" :trigger :toll :event_count 1 :payload "{{}}"}}
-             @{{:endpoint "{url}" :threshold 0.8}})"#
+             @{{:endpoint "{url}"}})"#
             ))
             .unwrap();
-        assert_eq!(r, "nil");
+        assert_eq!(
+            r, "0.95",
+            "lev-verdict must return the noul signal, got {r:?}"
+        );
     }
 }

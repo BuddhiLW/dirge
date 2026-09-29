@@ -254,6 +254,13 @@ pub struct Cli {
     )]
     pub loop_run: Option<String>,
 
+    #[cfg(feature = "loop")]
+    #[arg(
+        long = "loop-drain",
+        help = "Stop looping when the live issue board is empty (opt-in)"
+    )]
+    pub loop_drain: bool,
+
     #[cfg(feature = "vigil")]
     #[arg(
         long = "vigil",

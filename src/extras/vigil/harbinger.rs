@@ -138,6 +138,7 @@ async fn handle_connection(
         hook_name: "on-vigil-event".into(),
         context: hook_ctx,
         respond_to: None,
+        threshold: None,
     });
 
     if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {

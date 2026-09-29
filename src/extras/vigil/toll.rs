@@ -41,6 +41,7 @@ pub fn spawn_toll(
                 hook_name: "on-vigil-event".into(),
                 context: hook_ctx,
                 respond_to: None,
+                threshold: None,
             });
             // Flush pending events before pushing the new one.
             while let Some(ev) = pending.pop_front() {

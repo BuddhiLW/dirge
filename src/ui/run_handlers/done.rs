@@ -234,18 +234,14 @@ pub(crate) async fn handle_done(
     {
         #[cfg(feature = "plugin")]
         if let Some(pm) = plugin_manager {
-            let ctx = crate::extras::vigil::observance_context(
+            crate::extras::vigil::dispatch_observance_and_act(
+                pm,
                 &pending.vigil_name,
                 pending.event_count,
                 &response,
-            );
-            let pm = pm.clone();
-            tokio::task::spawn_blocking(move || {
-                pm.lock_ignore_poison()
-                    .dispatch_tool_hook("on-vigil-observance", &ctx)
-            })
-            .await
-            .ok();
+                &pending.signal,
+            )
+            .await;
         }
         // Release the in-flight flag so the vigil can fire again on its next
         // reap window. The reaper skips a vigil while this flag is set.

@@ -5381,6 +5381,8 @@ pub async fn run_interactive(
                                             vigil_name: obs.vigil_name.clone(),
                                             event_count: obs.event_count,
                                             running: obs.running.clone(),
+                                            signal: serde_json::to_string(&obs.context)
+                                                .unwrap_or_else(|_| "{}".to_string()),
                                         },
                                     );
                                 }

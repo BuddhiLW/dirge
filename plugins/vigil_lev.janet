@@ -3,18 +3,22 @@
 # System-1 gate ahead of a vigil observance: before the agent is woken for a
 # toll/watcher/harbinger reap, this hook POSTs the coalesced event state to a
 # lev sidecar (`POST /v1/systemone`) and asks one yes/no question — "does the
-# current state require agent intervention?". If lev's `noul` probability is
-# below the configured threshold the observance is blocked via `harness/block`;
-# otherwise, or if lev is unreachable, the gate fails open (returns nil).
+# current state require agent intervention?". lev answers with a `noul`
+# probability (0..1). The hook reports that signal to the host via
+# `harness/verdict`; the host compares it to the vigil's wake threshold
+# (derived from the `gate.policy` cost matrix, default 0.8) and rouses or
+# shrouds. The plugin holds no threshold of its own — if lev is unreachable or
+# answers without a numeric noul, the hook reports nothing and the vigil's
+# fail posture (default open) applies.
 #
 # Config (env, read at call time):
-#   LEV_URL       base URL of the lev server, default http://127.0.0.1:8080
-#   LEV_API_KEY   optional; sent as `Authorization: Bearer <key>` when set
-#   LEV_THRESHOLD block when the noul probability is below this, default 0.8
+#   LEV_URL     base URL of the lev server, default http://127.0.0.1:8080
+#   LEV_API_KEY optional; sent as `Authorization: Bearer <key>` when set
 #
-# `lev-verdict` is the testable seam: it returns a block-reason string, or nil
-# to pass. It accepts an optional cfg table (:endpoint / :api-key / :threshold)
-# so tests can point it at a mock lev without touching process env vars.
+# `lev-verdict` is the testable seam: it returns lev's `noul` probability as a
+# number, or nil when lev is unreachable/malformed. It accepts an optional cfg
+# table (:endpoint / :api-key) so tests can point it at a mock lev without
+# touching process env vars.
 
 (def hooks ["on-vigil-rite"])
 
@@ -24,9 +28,6 @@
 (defn- lev-api-key []
   (os/getenv "LEV_API_KEY"))
 
-(defn- lev-threshold []
-  (or (scan-number (or (os/getenv "LEV_THRESHOLD") "0.8")) 0.8))
-
 # Assumes the key holds no `"` or `\` (true of lev's tokens); a pathological
 # key would need JSON escaping here.
 (defn- lev-headers [api-key]
@@ -35,14 +36,14 @@
     ""))
 
 (defn lev-verdict
-  "POST the vigil state to lev and return a block reason, or nil to pass.
-   `ctx` is the on-vigil-rite context (:vigil :trigger :event_count :payload).
-   `cfg` optionally overrides :endpoint / :api-key / :threshold for tests."
+  "POST the vigil state to lev and return its `noul` probability, or nil when
+   lev is unreachable or answers without a numeric noul. `ctx` is the
+   on-vigil-rite context (:vigil :trigger :event_count :payload :threshold);
+   `cfg` optionally overrides :endpoint / :api-key for tests."
   [ctx &opt cfg]
   (let [endpoint (or (get cfg :endpoint) (lev-endpoint))
         api-key (or (get cfg :api-key) (lev-api-key))
-        threshold (or (get cfg :threshold) (lev-threshold))
-        state (or (ctx :payload) "{}")
+        state (or (get ctx :payload) "{}")
         body (string
                "{\"state\":" state
                ",\"questions\":{\"judgment\":{"
@@ -52,10 +53,8 @@
         resp (harness/http-post (string endpoint "/v1/systemone") body (lev-headers api-key))
         decoded (if resp (harness/json-decode resp) nil)
         prob (if decoded (get-in decoded ["answers" "judgment" "noul"]) nil)]
-    (if (and (number? prob) (< prob threshold))
-        (string "lev rite gate: noul " prob " below threshold " threshold)
-        nil)))
+    (if (number? prob) prob nil)))
 
 (defn on-vigil-rite [ctx]
-  (when-let [reason (lev-verdict ctx)]
-    (harness/block reason)))
+  (when-let [prob (lev-verdict ctx)]
+    (harness/verdict prob)))

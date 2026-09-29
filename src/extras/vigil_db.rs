@@ -90,9 +90,29 @@ impl VigilStore {
                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
             );
-            CREATE INDEX IF NOT EXISTS idx_vigils_status ON vigils(status);",
+            CREATE INDEX IF NOT EXISTS idx_vigils_status ON vigils(status);
+            CREATE TABLE IF NOT EXISTS vigil_verdicts (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                vigil      TEXT NOT NULL,
+                trigger    TEXT NOT NULL,
+                verdict    TEXT NOT NULL,
+                reason     TEXT,
+                commands   TEXT,
+                threshold  REAL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+             CREATE INDEX IF NOT EXISTS idx_vigil_verdicts_vigil ON vigil_verdicts(vigil);
+             CREATE TABLE IF NOT EXISTS vigil_outcomes (
+                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                 vigil      TEXT NOT NULL,
+                 signal     TEXT,
+                 outcome    TEXT NOT NULL,
+                 useful     INTEGER NOT NULL DEFAULT 1,
+                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             CREATE INDEX IF NOT EXISTS idx_vigil_outcomes_vigil ON vigil_outcomes(vigil);",
         )
-        .map_err(|e| format!("create vigils table: {e}"))
+        .map_err(|e| format!("create vigils tables: {e}"))
     }
 
     pub fn upsert(&self, name: &str, payload_json: &str) -> Result<(), String> {
@@ -133,6 +153,71 @@ impl VigilStore {
             return Err(format!("vigil {name} not found"));
         }
         Ok(())
+    }
+
+    /// Append a gate verdict. `verdict` is `shroud` | `rouse` | `toil`;
+    /// `commands` is a JSON array of shell commands (only for `toil`).
+    pub fn record_verdict(
+        &self,
+        vigil: &str,
+        trigger: &str,
+        verdict: &str,
+        reason: Option<&str>,
+        commands: Option<&str>,
+        threshold: Option<f64>,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO vigil_verdicts (vigil, trigger, verdict, reason, commands, threshold)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![vigil, trigger, verdict, reason, commands, threshold],
+        )
+        .map_err(|e| format!("record verdict for vigil {vigil}: {e}"))?;
+        Ok(())
+    }
+
+    /// Append a finished observance's (signal, outcome) pair. `signal` is the
+    /// coalesced event context that triggered the wake; `outcome` is a short
+    /// token the plugin chose (`resolved`, `false-alarm`, ...); `useful` marks
+    /// whether the wake was worth it and feeds the empirical prior. Only the
+    /// plugin-gated `on-vigil-outcome` path calls this, so gate it the same
+    /// way to stay warning-free in a `vigil`-without-`plugin` build.
+    #[cfg(feature = "plugin")]
+    pub fn record_outcome(
+        &self,
+        vigil: &str,
+        signal: &str,
+        outcome: &str,
+        useful: bool,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO vigil_outcomes (vigil, signal, outcome, useful)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![vigil, signal, outcome, useful],
+        )
+        .map_err(|e| format!("record outcome for vigil {vigil}: {e}"))?;
+        Ok(())
+    }
+
+    /// Empirical prior for `GateFail::Prior`: the fraction of a vigil's
+    /// outcomes over the trailing seven days marked useful. `None` when the
+    /// vigil has no recorded outcomes yet (uncalibrated, falls back to open).
+    pub fn positive_rate(&self, vigil: &str) -> Result<Option<f64>, String> {
+        let conn = self.conn.lock().unwrap();
+        let (useful, total): (i64, i64) = conn
+            .query_row(
+                "SELECT COALESCE(SUM(useful), 0), COUNT(*)
+                 FROM vigil_outcomes
+                 WHERE vigil = ?1 AND created_at >= datetime('now', '-7 days')",
+                params![vigil],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| format!("positive rate for vigil {vigil}: {e}"))?;
+        if total == 0 {
+            return Ok(None);
+        }
+        Ok(Some(useful as f64 / total as f64))
     }
 
     /// Slice-2 keeper API: not yet called from this slice's CLI, so it would
@@ -298,5 +383,58 @@ mod tests {
         let (store, _dir) = temp_db();
         assert!(store.set_status("nope", VigilStatus::Paused).is_err());
         assert!(store.remove("nope").is_err());
+    }
+
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn record_outcome_feeds_positive_rate() {
+        let (store, _dir) = temp_db();
+        assert_eq!(store.positive_rate("poll").unwrap(), None);
+        store
+            .record_outcome("poll", "{}", "resolved", true)
+            .unwrap();
+        store
+            .record_outcome("poll", "{}", "false-alarm", false)
+            .unwrap();
+        store
+            .record_outcome("poll", "{}", "resolved", true)
+            .unwrap();
+        let rate = store.positive_rate("poll").unwrap().unwrap();
+        assert!((rate - 2.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn record_verdict_persists_row() {
+        let (store, _dir) = temp_db();
+        store
+            .record_verdict(
+                "poll",
+                "toll",
+                "shroud",
+                Some("low confidence"),
+                None,
+                Some(0.8),
+            )
+            .unwrap();
+        let conn = store.conn.lock().unwrap();
+        let (vigil, trigger, verdict, reason, threshold): (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<f64>,
+        ) = conn
+            .query_row(
+                "SELECT vigil, trigger, verdict, reason, threshold
+                 FROM vigil_verdicts WHERE vigil = 'poll'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(vigil, "poll");
+        assert_eq!(trigger, "toll");
+        assert_eq!(verdict, "shroud");
+        assert_eq!(reason.as_deref(), Some("low confidence"));
+        assert_eq!(threshold, Some(0.8));
     }
 }

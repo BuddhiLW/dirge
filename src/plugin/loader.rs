@@ -42,6 +42,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "on-vigil-reap",
     "on-vigil-rite",
     "on-vigil-observance",
+    "on-vigil-outcome",
 ];
 
 /// Filter an input candidate list to only paths that exist as
