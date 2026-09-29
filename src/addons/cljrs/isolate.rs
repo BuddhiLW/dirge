@@ -33,6 +33,10 @@ pub const ISOLATE_STACK_BYTES: usize = 64 * 1024 * 1024;
 const HOST_NS: &str = "dirge.addon.host";
 const HOST_SRC: &str = include_str!("host.cljc");
 
+/// dirge's own IAddon protocol, embedded so an addon that implements it
+/// needs no protocol library on its source roots.
+const PROTOCOL_SRC: &str = include_str!("protocol.cljc");
+
 /// Private namespace through which a call's arguments reach Clojure.
 const BRIDGE_NS: &str = "dirge.bridge";
 
@@ -545,6 +549,7 @@ impl Interp {
             .execution_mode(ExecutionMode::Tiered)
             .source_paths(roots.clone())
             .builtin_source(HOST_NS, HOST_SRC)
+            .builtin_source(super::super::DEFAULT_PROTOCOL_NS, PROTOCOL_SRC)
             .build()
             .map_err(|e| format!("cannot build the cljrs runtime: {e}"))?;
         cljrs_stdlib::install(&runtime);

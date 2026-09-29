@@ -2,9 +2,10 @@
 
 dirge can host addons written in Clojure. They run on an embedded
 [clojurust](https://github.com/BuddhiLW/clojurust) interpreter, beside Janet
-plugins, and implement an `IAddon` protocol defined by a small Clojure
-library that dirge loads by namespace. Written as portable `.cljc`, the same
-addon also runs in any JVM host of that protocol.
+plugins, and implement an `IAddon` protocol. dirge ships its own,
+`dirge.addon.protocol`; an addon written for another host names that host's
+protocol instead, and dirge binds it by namespace. Written as portable
+`.cljc`, the same addon also runs in any JVM host of its protocol.
 
 Build with the feature enabled:
 
@@ -34,8 +35,13 @@ A symlink to an addon checkout works in any of them.
 The addon's `src/` and `resources/` go on the interpreter's source path, plus
 the `src/` of every `:local/root` dependency named in its `deps.edn`
 (followed transitively). Anything else can be added with `addons.source_paths`
-or the `DIRGE_ADDON_PATH` environment variable (a `:`-separated list). The
-protocol library's source must be reachable one of these ways.
+or the `DIRGE_ADDON_PATH` environment variable (a `:`-separated list). An
+addon on dirge's built-in protocol needs nothing more; any other protocol
+library's source must be reachable one of these ways.
+
+Addons that follow another host's convention keep their manifests in that
+host's directory under `META-INF`. List the directory name in
+`addons.manifest_dirs` and dirge reads it beside `addons`.
 
 A manifest whose init namespace has no `.cljc` or `.cljrs` source on that path
 is skipped, so JVM-only addons can share a repository with portable ones.
@@ -45,17 +51,37 @@ is skipped, so JVM-only addons can share a repository with portable ones.
   "addons": {
     "enabled": true,
     "paths": ["~/src/my-addons"],
-    "source_paths": ["~/src/addon-protocol/src"],
-    "protocol_ns": "my.addon-protocol"
+    "manifest_dirs": ["other-host-addons"],
+    "source_paths": ["~/src/addon-protocol/src"]
   }
 }
 ```
 
 ## The protocol
 
-`addons.protocol_ns` names the namespace that defines the protocol. dirge
-resolves these functions from it at startup and refuses to start the host if
-a required one is missing:
+dirge binds one protocol namespace per run, chosen in this order:
+
+1. `addons.protocol_ns` in `config.json`
+2. the `:addon/protocol-ns` a manifest declares (the first one found, when
+   manifests disagree; the others are logged)
+3. `dirge.addon.protocol`, built into dirge
+
+```clojure
+(ns my-addon.core
+  (:require [dirge.addon.protocol :as p]))
+
+(defrecord MyAddon []
+  p/IAddon
+  (addon-id [_] "my.addon")
+  (initialize! [_ _] {:success? true :errors []})
+  (shutdown! [_] {:success? true})
+  (tools [_] [])
+  (hooks [_] {})
+  (health [_] {:status :ok}))
+```
+
+dirge resolves these functions from the bound namespace at startup and
+refuses to start the host if a required one is missing:
 
 | Function | Required | Meaning |
 |---|---|---|
@@ -74,6 +100,9 @@ a required one is missing:
  :addon/init-fn "addon-ctor"
  :addon/config  {}}
 ```
+
+`:addon/protocol-ns` is optional: it names the protocol namespace the addon
+implements when that is not `dirge.addon.protocol`.
 
 `init-fn` is called with `:addon/config` and must return an addon. dirge then
 calls `initialize!` with `{:addon/id … :addon/config … :dirge/host {…}}`.

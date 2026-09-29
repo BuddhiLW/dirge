@@ -9,17 +9,18 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Directories under `META-INF` that hold manifests.
-pub const MANIFEST_DIRS: [&str; 2] = ["addons", "hive-addons"];
+/// The directory under `META-INF` that holds dirge's manifests. Others
+/// are added by `addons.manifest_dirs`.
+pub const MANIFEST_DIR: &str = "addons";
 
-/// True when `path` is `.../META-INF/<manifest dir>/<name>.edn`.
-pub fn is_manifest(path: &Path) -> bool {
+/// True when `path` is `.../META-INF/<one of manifest_dirs>/<name>.edn`.
+pub fn is_manifest(path: &Path, manifest_dirs: &[String]) -> bool {
     let is_edn = path.extension().is_some_and(|e| e == "edn");
     let mut dirs = path.parent().into_iter().flat_map(Path::iter).rev();
     let parent = dirs.next();
     let grandparent = dirs.next();
     is_edn
-        && parent.is_some_and(|p| MANIFEST_DIRS.iter().any(|d| p == *d))
+        && parent.is_some_and(|p| manifest_dirs.iter().any(|d| p == d.as_str()))
         && grandparent.is_some_and(|g| g == "META-INF")
 }
 
@@ -167,12 +168,24 @@ mod tests {
 
     #[test]
     fn recognizes_only_manifests_under_meta_inf() {
-        assert!(is_manifest(Path::new(MANIFEST)));
-        assert!(is_manifest(Path::new("/w/x/META-INF/hive-addons/a.edn")));
-        assert!(!is_manifest(Path::new("/w/x/resources/addons/a.edn")));
-        assert!(!is_manifest(Path::new("/w/x/META-INF/addons/a.clj")));
-        assert!(!is_manifest(Path::new("/w/x/META-INF/other/a.edn")));
-        assert!(!is_manifest(Path::new("a.edn")));
+        let dirs = [MANIFEST_DIR.to_string()];
+        assert!(is_manifest(Path::new(MANIFEST), &dirs));
+        assert!(!is_manifest(
+            Path::new("/w/x/resources/addons/a.edn"),
+            &dirs
+        ));
+        assert!(!is_manifest(Path::new("/w/x/META-INF/addons/a.clj"), &dirs));
+        assert!(!is_manifest(Path::new("/w/x/META-INF/other/a.edn"), &dirs));
+        assert!(!is_manifest(Path::new("a.edn"), &dirs));
+    }
+
+    #[test]
+    fn another_hosts_manifest_dir_counts_only_when_configured() {
+        let other = Path::new("/w/x/META-INF/other-addons/a.edn");
+        assert!(!is_manifest(other, &[MANIFEST_DIR.to_string()]));
+        let dirs = [MANIFEST_DIR.to_string(), "other-addons".to_string()];
+        assert!(is_manifest(other, &dirs));
+        assert!(is_manifest(Path::new(MANIFEST), &dirs));
     }
 
     #[test]

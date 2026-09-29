@@ -42,8 +42,9 @@ use domain::{AddonPlan, LoadFailure, ReloadReport};
 use host::{AddonHost, LoadSet};
 use port::Harness;
 
-/// Protocol namespace used when `addons.protocol_ns` is not set.
-pub const DEFAULT_PROTOCOL_NS: &str = "hive-addon.protocol";
+/// Protocol namespace used when neither `addons.protocol_ns` nor a
+/// manifest's `:addon/protocol-ns` names one: dirge's own, built in.
+pub const DEFAULT_PROTOCOL_NS: &str = "dirge.addon.protocol";
 
 static HOST: OnceLock<Arc<AddonHost>> = OnceLock::new();
 
@@ -71,16 +72,16 @@ pub fn install_from_config(cfg: &crate::config::Config) {
     if settings.enabled == Some(false) {
         return;
     }
-    let plan = discovery::plan(&search_dirs(&settings), &extra_roots(&settings));
+    let plan = discovery::plan(
+        &search_dirs(&settings),
+        &extra_roots(&settings),
+        &manifest_dirs(&settings),
+    );
     if plan.is_empty() {
         return;
     }
-    match start_with(
-        plan,
-        harness(),
-        protocol_ns(&settings),
-        isolate_options(&settings),
-    ) {
+    let protocol = protocol_ns(&settings, &plan);
+    match start_with(plan, harness(), &protocol, isolate_options(&settings)) {
         Ok(host) => {
             for failure in host.failures() {
                 tracing::warn!(
@@ -113,16 +114,21 @@ pub fn reload(
     if settings.enabled == Some(false) {
         return Err("addons are disabled (addons.enabled is false)".to_string());
     }
-    let plan = discovery::plan(&search_dirs(settings), &extra_roots(settings));
+    let plan = discovery::plan(
+        &search_dirs(settings),
+        &extra_roots(settings),
+        &manifest_dirs(settings),
+    );
     if let Some(host) = global() {
         let report = host.reload(load_set(&plan, true));
         register_commands(&host);
         return Ok((host, report));
     }
+    let protocol = protocol_ns(settings, &plan);
     let host = Arc::new(start_with(
         plan,
         harness(),
-        protocol_ns(settings),
+        &protocol,
         isolate_options(settings),
     )?);
     let report = ReloadReport {
@@ -301,11 +307,40 @@ fn repl_options(
     })
 }
 
-fn protocol_ns(settings: &crate::config::AddonsConfig) -> &str {
-    settings
-        .protocol_ns
-        .as_deref()
-        .unwrap_or(DEFAULT_PROTOCOL_NS)
+/// The protocol the isolate binds: `addons.protocol_ns`, else the
+/// `:addon/protocol-ns` the manifests declare, else dirge's own. One
+/// isolate binds one protocol, so when manifests disagree the first
+/// declaration wins and the others are reported.
+fn protocol_ns(settings: &crate::config::AddonsConfig, plan: &AddonPlan) -> String {
+    if let Some(ns) = settings.protocol_ns.as_deref() {
+        return ns.to_string();
+    }
+    let declared: Vec<(PathBuf, String)> = plan
+        .manifests
+        .iter()
+        .filter_map(|path| {
+            let ns = manifest::AddonManifest::from_path(path).ok()?.protocol_ns?;
+            Some((path.clone(), ns))
+        })
+        .collect();
+    declared_protocol(&declared)
+}
+
+/// [`protocol_ns`]'s choice among manifest declarations.
+fn declared_protocol(declared: &[(PathBuf, String)]) -> String {
+    let Some((_, chosen)) = declared.first() else {
+        return DEFAULT_PROTOCOL_NS.to_string();
+    };
+    for (path, other) in declared.iter().filter(|(_, ns)| ns != chosen) {
+        tracing::warn!(
+            target: "dirge::addon",
+            manifest = %path.display(),
+            declared = %other,
+            bound = %chosen,
+            "addon declares a different :addon/protocol-ns; set addons.protocol_ns to choose"
+        );
+    }
+    chosen.clone()
 }
 
 /// Manifests that parse and whose init namespace has portable source.
@@ -353,6 +388,19 @@ fn search_dirs(settings: &crate::config::AddonsConfig) -> Vec<PathBuf> {
     }
     dirs.extend(settings.paths.iter().map(|p| expand_home(p)));
     dirs
+}
+
+/// Directory names under `META-INF` that hold manifests: `addons`, then
+/// configured `addons.manifest_dirs` (another host's convention, e.g. one
+/// whose addons also load in dirge).
+fn manifest_dirs(settings: &crate::config::AddonsConfig) -> Vec<String> {
+    let mut names = vec![layout::MANIFEST_DIR.to_string()];
+    for name in &settings.manifest_dirs {
+        if !name.is_empty() && !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    names
 }
 
 /// Extra source roots: configured `addons.source_paths`, then
@@ -416,5 +464,37 @@ mod repl_option_tests {
         let repl = repl_options(Some(&config), None).expect("a repl");
         assert!(repl.port_file.is_none());
         assert_eq!(repl.addr.port(), 7000);
+    }
+}
+
+#[cfg(test)]
+mod protocol_choice_tests {
+    use super::*;
+
+    fn declared(pairs: &[(&str, &str)]) -> Vec<(PathBuf, String)> {
+        pairs
+            .iter()
+            .map(|(path, ns)| (PathBuf::from(path), ns.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn no_declaration_binds_dirges_own_protocol() {
+        assert_eq!(declared_protocol(&[]), DEFAULT_PROTOCOL_NS);
+    }
+
+    #[test]
+    fn the_first_declaration_wins_when_manifests_disagree() {
+        let pairs = declared(&[("a.edn", "one.protocol"), ("b.edn", "two.protocol")]);
+        assert_eq!(declared_protocol(&pairs), "one.protocol");
+    }
+
+    #[test]
+    fn manifest_dirs_start_with_dirges_own_and_skip_repeats() {
+        let settings = crate::config::AddonsConfig {
+            manifest_dirs: vec!["addons".into(), "other".into(), "".into(), "other".into()],
+            ..Default::default()
+        };
+        assert_eq!(manifest_dirs(&settings), vec!["addons", "other"]);
     }
 }
