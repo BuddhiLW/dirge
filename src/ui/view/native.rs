@@ -153,6 +153,7 @@ impl Reducer for NativeReducer {
                 cells,
                 columns,
             } => self.grid(key, cells, *columns),
+            ViewEvent::Feed { .. } => Vec::new(),
         };
         Ok(ViewUpdate {
             model: self.model(),
@@ -184,6 +185,8 @@ impl NativeReducer {
             swarm: self.swarm.clone(),
             grid_keys: sorted(GRID_KEYMAP.iter().map(|(k, _)| *k)),
             view_commands: sorted(COMMANDS.iter().map(|(n, _)| *n)),
+            // The native view leaves feed ops to the UI's own decoder.
+            owns_feed: false,
         }
     }
 

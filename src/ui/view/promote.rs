@@ -94,6 +94,7 @@ mod tests {
             swarm: open.then(Default::default),
             grid_keys: vec!["BackTab".into(), "Esc".into(), "q".into()],
             view_commands: vec!["panel".into(), "swarm".into()],
+            owns_feed: false,
         }
     }
 

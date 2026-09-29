@@ -16,8 +16,11 @@
 //! 3. **Painter** — `ui::tui::panels` paints the state as sub-panels
 //!    above the AGENTS box (see [`ExternalPanels::panels`]).
 //!
-//! Lines arrive pre-rendered as `{text, face}`: the producer decides
-//! the wording, dirge decides the colours via [`PanelFace`].
+//! Lines arrive pre-rendered as `{text, face}`, optionally split into
+//! styled spans: the producer decides the wording and layout, dirge
+//! decides the colours via [`PanelFace`]. A view engine that owns the
+//! panels' policy (the cljrs `dirge.panels`) drives this state through
+//! [`PanelOp::Paint`] alone; core keeps sanitising, bounds and paint.
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
@@ -35,10 +38,13 @@ const PANEL_CHAN_CAP: usize = 1024;
 /// new id beyond this evicts the oldest panel.
 pub const MAX_PANELS: usize = 16;
 /// Maximum body lines per panel. `Show` truncates; `AppendTab` drops
-/// the oldest line.
-pub const MAX_PANEL_LINES: usize = 200;
+/// the oldest line. A panel taller than its box is windowed by its
+/// anchor and offset.
+pub const MAX_PANEL_LINES: usize = 1000;
 /// Maximum characters per line / title / id after sanitising.
 pub const MAX_LINE_CHARS: usize = 512;
+/// Maximum styled spans per line; runs past it are dropped.
+pub const MAX_LINE_SPANS: usize = 64;
 
 /// Visual treatment of one panel line. Named faces map onto the
 /// panel palette at paint time; `Fixed` carries an explicit colour
@@ -84,11 +90,30 @@ impl PanelFace {
     }
 }
 
-/// One pre-rendered body line.
+/// One styled run of text inside a line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PanelSpan {
+    pub text: String,
+    pub face: PanelFace,
+}
+
+impl PanelSpan {
+    pub fn new(text: impl Into<String>, face: PanelFace) -> Self {
+        Self {
+            text: text.into(),
+            face,
+        }
+    }
+}
+
+/// One pre-rendered body line. `text` is always the whole row as
+/// plain text; when `spans` is non-empty it holds the same text split
+/// into styled runs, which the painter uses instead of `face`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanelLine {
     pub text: String,
     pub face: PanelFace,
+    pub spans: Vec<PanelSpan>,
 }
 
 impl PanelLine {
@@ -96,6 +121,30 @@ impl PanelLine {
         Self {
             text: text.into(),
             face,
+            spans: Vec::new(),
+        }
+    }
+
+    /// A line made of styled runs; `face` is its fallback for
+    /// consumers that paint one colour per row.
+    pub fn from_spans(spans: Vec<PanelSpan>, face: PanelFace) -> Self {
+        Self {
+            text: spans.iter().map(|s| s.text.as_str()).collect(),
+            face,
+            spans,
+        }
+    }
+
+    /// The runs to paint, in order: the spans, or the whole text in
+    /// the line's face when it has none.
+    pub fn segments(&self) -> Vec<(&str, PanelFace)> {
+        if self.spans.is_empty() {
+            vec![(self.text.as_str(), self.face)]
+        } else {
+            self.spans
+                .iter()
+                .map(|s| (s.text.as_str(), s.face))
+                .collect()
         }
     }
 }
@@ -134,6 +183,19 @@ pub enum PanelOp {
     /// Append one line to panel `id`, creating it (titled `id`) when
     /// absent. Oldest lines drop once the panel is full.
     AppendTab { id: String, line: PanelLine },
+    /// Set panel `id` wholesale from a view engine that owns the
+    /// panels' policy (the cljrs `dirge.panels`): title, body, whether
+    /// it anchors at the bottom (`tail`), how many rows the view is
+    /// moved away from that anchor (`offset`), and whether it is the
+    /// focused panel. Core only sanitises, bounds and paints.
+    Paint {
+        id: String,
+        title: String,
+        lines: Vec<PanelLine>,
+        tail: bool,
+        offset: usize,
+        focus: bool,
+    },
 }
 
 /// One panel's state.
@@ -145,15 +207,20 @@ pub struct ExternalPanel {
     /// Accumulating panel: when rows are short the painter keeps the
     /// NEWEST lines; a `Show` panel keeps the first ones.
     pub tail: bool,
+    /// Rows the view is moved away from its anchor: from the top for
+    /// a head panel, from the bottom for a tail panel. The painter
+    /// clamps it to the rows it has.
+    pub scroll: usize,
 }
 
 impl ExternalPanel {
     /// The body rows to paint when only `rows` fit.
     pub fn visible_lines(&self, rows: usize) -> impl Iterator<Item = &PanelLine> {
+        let max_skip = self.lines.len().saturating_sub(rows);
         let skip = if self.tail {
-            self.lines.len().saturating_sub(rows)
+            max_skip.saturating_sub(self.scroll)
         } else {
-            0
+            self.scroll.min(max_skip)
         };
         self.lines.iter().skip(skip).take(rows)
     }
@@ -178,10 +245,24 @@ fn clean(s: &str) -> String {
 }
 
 fn clean_line(line: PanelLine) -> PanelLine {
-    PanelLine {
-        text: clean(&line.text),
-        face: line.face,
+    if line.spans.is_empty() {
+        return PanelLine::new(clean(&line.text), line.face);
     }
+    // Sanitise each run, then hold the whole row to the width cap a
+    // plain line gets.
+    let mut left = MAX_LINE_CHARS;
+    let mut spans = Vec::new();
+    for span in line.spans.into_iter().take(MAX_LINE_SPANS) {
+        if left == 0 {
+            break;
+        }
+        let text: String = clean(&span.text).chars().take(left).collect();
+        left -= text.chars().count();
+        if !text.is_empty() {
+            spans.push(PanelSpan::new(text, span.face));
+        }
+    }
+    PanelLine::from_spans(spans, line.face)
 }
 
 impl ExternalPanels {
@@ -245,6 +326,7 @@ impl ExternalPanels {
             title: title.to_string(),
             lines: VecDeque::new(),
             tail,
+            scroll: 0,
         });
         self.panels.last_mut().expect("just pushed")
     }
@@ -287,6 +369,31 @@ impl ExternalPanels {
                 p.lines.push_back(clean_line(line));
                 while p.lines.len() > MAX_PANEL_LINES {
                     p.lines.pop_front();
+                }
+            }
+            PanelOp::Paint {
+                id,
+                title,
+                lines,
+                tail,
+                offset,
+                focus,
+            } => {
+                let id = clean(&id);
+                let title = clean(&title);
+                let p = self.entry(&id, &title, tail);
+                p.title = title;
+                p.tail = tail;
+                p.lines = lines
+                    .into_iter()
+                    .take(MAX_PANEL_LINES)
+                    .map(clean_line)
+                    .collect();
+                p.scroll = offset.min(p.lines.len().saturating_sub(1));
+                if focus {
+                    self.focused = Some(id);
+                } else if self.focused.as_deref() == Some(id.as_str()) {
+                    self.focused = None;
                 }
             }
         }
@@ -495,6 +602,90 @@ mod tests {
             .collect();
         assert_eq!(head, ["1", "2"]);
         assert_eq!(tail, ["2", "3"]);
+    }
+
+    fn paint(id: &str, rows: &[&str], tail: bool, offset: usize, focus: bool) -> PanelOp {
+        PanelOp::Paint {
+            id: id.into(),
+            title: id.to_uppercase(),
+            lines: rows
+                .iter()
+                .map(|r| PanelLine::new(*r, PanelFace::Normal))
+                .collect(),
+            tail,
+            offset,
+            focus,
+        }
+    }
+
+    fn visible(s: &ExternalPanels, id: &str, rows: usize) -> Vec<String> {
+        s.get(id)
+            .unwrap()
+            .visible_lines(rows)
+            .map(|l| l.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn span_line_keeps_plain_text_and_runs() {
+        let line = PanelLine::from_spans(
+            vec![
+                PanelSpan::new("+ ", PanelFace::Success),
+                PanelSpan::new("added", PanelFace::Normal),
+            ],
+            PanelFace::Dim,
+        );
+        assert_eq!(line.text, "+ added");
+        assert_eq!(
+            line.segments(),
+            [("+ ", PanelFace::Success), ("added", PanelFace::Normal)]
+        );
+        let plain = PanelLine::new("x", PanelFace::Warn);
+        assert_eq!(plain.segments(), [("x", PanelFace::Warn)]);
+    }
+
+    #[test]
+    fn spans_are_sanitised_and_capped() {
+        let mut spans = vec![PanelSpan::new("a\x1b[31m\x07b", PanelFace::Error)];
+        spans.push(PanelSpan::new("", PanelFace::Normal));
+        spans.push(PanelSpan::new(
+            "y".repeat(MAX_LINE_CHARS),
+            PanelFace::Normal,
+        ));
+        spans.extend((0..MAX_LINE_SPANS * 2).map(|_| PanelSpan::new("z", PanelFace::Dim)));
+        let mut s = ExternalPanels::default();
+        s.apply(PanelOp::Show {
+            id: "a".into(),
+            title: "A".into(),
+            lines: vec![PanelLine::from_spans(spans, PanelFace::Normal)],
+        });
+        let l = &s.get("a").unwrap().lines[0];
+        assert_eq!(l.spans[0].text, "ab");
+        assert_eq!(l.spans.len(), 2, "empty run dropped, width cap reached");
+        assert_eq!(l.text.chars().count(), MAX_LINE_CHARS);
+        assert_eq!(
+            l.text,
+            l.spans.iter().map(|s| s.text.as_str()).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn paint_sets_body_anchor_offset_and_focus() {
+        let mut s = ExternalPanels::default();
+        s.apply(paint("a", &["1", "2", "3", "4", "5"], false, 2, false));
+        assert_eq!(visible(&s, "a", 2), ["3", "4"]);
+        assert_eq!(s.get("a").unwrap().title, "A");
+        s.apply(paint("a", &["1", "2", "3", "4", "5"], false, 99, false));
+        assert_eq!(visible(&s, "a", 2), ["4", "5"], "never past the end");
+        s.apply(paint("log", &["1", "2", "3", "4"], true, 0, true));
+        assert_eq!(visible(&s, "log", 2), ["3", "4"]);
+        assert_eq!(s.focused(), Some("log"));
+        s.apply(paint("log", &["1", "2", "3", "4"], true, 1, true));
+        assert_eq!(visible(&s, "log", 2), ["2", "3"], "tail offset counts back");
+        s.apply(paint("a", &["x"], false, 0, false));
+        assert_eq!(s.focused(), Some("log"), "painting another keeps focus");
+        s.apply(paint("log", &["x"], true, 0, false));
+        assert_eq!(s.focused(), None, "a panel can drop its own focus");
     }
 
     #[test]

@@ -41,6 +41,10 @@ pub enum ViewEvent {
         cells: Vec<GridCell>,
         columns: usize,
     },
+    /// One panel op from outside the agent loop (a panel feed), passed
+    /// through undecoded; only an engine whose model `owns_feed` gets
+    /// these. `feed/ended` is sent when the feed's stream ends.
+    Feed { op: serde_json::Value },
 }
 
 impl ViewEvent {
@@ -73,6 +77,11 @@ pub struct ViewModel {
     /// whether or not the agent is busy.
     #[serde(default)]
     pub view_commands: Vec<String>,
+    /// The engine owns the external panels: panel-feed ops come to it
+    /// as [`ViewEvent::Feed`] and it answers with `paint`/`unpaint`.
+    /// When false the UI applies feed ops itself.
+    #[serde(default)]
+    pub owns_feed: bool,
 }
 
 impl ViewModel {
@@ -93,6 +102,7 @@ impl ViewModel {
 #[serde(rename_all = "kebab-case")]
 pub enum NoticeLevel {
     Info,
+    Warn,
     Error,
 }
 
@@ -130,6 +140,34 @@ pub enum ViewEffect {
     OpenAgent { id: String },
     /// Start a `/msg` to this subagent in the editor (full task id).
     MessageAgent { id: String },
+    /// Set external panel `id` wholesale: the engine owns panel policy
+    /// (what a feed op means, focus, scroll, bounds on history); the
+    /// UI only sanitises and paints. `offset` counts rows away from
+    /// the anchor: the top, or the bottom when `tail`.
+    Paint {
+        id: String,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        rows: Vec<Vec<PaintSpan>>,
+        #[serde(default)]
+        tail: bool,
+        #[serde(default)]
+        offset: usize,
+        #[serde(default)]
+        focus: bool,
+    },
+    /// Remove external panel `id`.
+    Unpaint { id: String },
+}
+
+/// One styled run of a painted row; `face` is a wire face name
+/// (`added`, `warn`, `dim`, ...), unknown names paint plain.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PaintSpan {
+    pub text: String,
+    #[serde(default)]
+    pub face: String,
 }
 
 impl ViewEffect {

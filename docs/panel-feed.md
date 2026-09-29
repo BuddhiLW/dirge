@@ -125,6 +125,19 @@ Create panel `panel/id`, or replace its title and body.
 - `lines`: array of strings or `{text, face}` objects. A `text`
   containing newlines becomes several rows with the same face. If
   `lines` is absent, a string `text` field is used as the body.
+- A line may instead be `{face, spans: [...]}`: styled runs painted
+  left to right on one row, each a string (in the line's face) or a
+  `{text, face}` object. A newline inside a run starts a new row and
+  keeps the run's face. Spans are honoured when the cljrs view engine
+  owns the panels (see below); the plain fallback paints the `text`.
+
+When dirge runs the cljrs view engine (`--features addons`, the
+default engine there), the panels' policy is not in core: every op
+reaches the `dirge.panels` reducer undecoded, and it answers with
+`paint` / `unpaint` effects that core only sanitises, bounds and
+draws. When the stream ends the reducer hears `{"op": "feed/ended"}`
+and closes what the producer opened. Without that engine core applies
+the ops itself, as described here.
 - If the first line equals the title with face `title`/`heading`, it
   (and one following blank line) is dropped, so the title is not
   painted twice.

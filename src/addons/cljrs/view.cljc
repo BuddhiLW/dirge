@@ -15,7 +15,8 @@
    A grid cell is {:kind \"panel\"|\"agent\" :id id}; the selection is
    kept by cell, so a producer refocus or a finishing sibling does not
    move it."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [dirge.panels :as panels]))
 
 ;; SPDX-License-Identifier: GPL-3.0-only
 
@@ -259,17 +260,25 @@
     (f state (vec (:args event)))
     [state [(notify :error (str "not a view command: /" (:name event)))]]))
 
+(defn feed-step
+  "A panel-feed op: the panels' policy lives in `dirge.panels`."
+  [state event]
+  (let [[p effects] (panels/step (:panels state) (:op event))]
+    [(assoc state :panels p) effects]))
+
 (def events
   "Event type -> (fn [state event] [state' effects])."
   {"init"    (fn [state _] [state []])
    "command" command-step
-   "grid"    grid-step})
+   "grid"    grid-step
+   "feed"    feed-step})
 
 (defn model
   [state]
   {:swarm         (when-let [s (:swarm state)] {:selected (:selected s)})
    :grid_keys     (vec (sort (keys grid-keymap)))
-   :view_commands (vec (sort (keys commands)))})
+   :view_commands (vec (sort (keys commands)))
+   :owns_feed     true})
 
 (defn step
   "[state' effects] for `event`."
@@ -278,7 +287,7 @@
     (f state event)
     [state [(notify :error (str "unknown view event: " (:type event)))]]))
 
-(def state (atom {:swarm nil}))
+(def state (atom {:swarm nil :panels panels/empty-state}))
 
 (defn dispatch!
   "Fold `event` into the view state; {:model :effects}."
