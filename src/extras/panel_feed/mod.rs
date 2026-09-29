@@ -44,6 +44,13 @@ pub enum ReplyAction {
     PrevTab,
     /// Ask the producer to repaint everything it shows.
     Refresh,
+    /// A producer-defined verb on a panel and optional row.
+    Invoke {
+        panel: String,
+        verb: String,
+        row: Option<String>,
+        payload: serde_json::Value,
+    },
 }
 
 /// Usage line for the reply verbs of `/panel`.
@@ -85,6 +92,7 @@ impl ReplyAction {
             Self::NextTab => "next-tab",
             Self::PrevTab => "prev-tab",
             Self::Refresh => "refresh",
+            Self::Invoke { .. } => "invoke",
         }
     }
 
@@ -96,6 +104,14 @@ impl ReplyAction {
             Self::NextTab => json!({"action": "next-tab"}),
             Self::PrevTab => json!({"action": "prev-tab"}),
             Self::Refresh => json!({"action": "refresh"}),
+            Self::Invoke {
+                panel,
+                verb,
+                row,
+                payload,
+            } => {
+                json!({"action": "invoke", "panel": panel, "verb": verb, "row": row, "payload": payload})
+            }
         };
         value.to_string()
     }

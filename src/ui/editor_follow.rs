@@ -7,6 +7,81 @@
 //! returns errors to the caller, and is a no-op when the config key
 //! is absent.
 
+/// Resolve only existing regular files under the canonical project root.
+/// Canonicalization rejects symlink escapes and `..` traversal alike.
+pub fn project_file(path: &str, cwd: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let root = crate::extras::dirge_paths::project_root(cwd)
+        .canonicalize()
+        .map_err(|e| format!("project root: {e}"))?;
+    let candidate = cwd
+        .join(path)
+        .canonicalize()
+        .map_err(|e| format!("file unavailable: {e}"))?;
+    if !candidate.starts_with(&root) || !candidate.is_file() {
+        return Err("file is outside the project or not a regular file".into());
+    }
+    Ok(candidate)
+}
+
+/// Apply a feed's file handoff after the canonical project-root guard.
+/// A supplied diff takes precedence over the configured external editor.
+pub fn open_file(
+    renderer: &mut super::renderer::Renderer,
+    cfg: &crate::config::Config,
+    cwd: &std::path::Path,
+    path: &str,
+    line: Option<usize>,
+    diff: Option<&str>,
+) {
+    use super::panels_ext::{PanelFace, PanelLine, PanelOp};
+    let file = match project_file(path, cwd) {
+        Ok(file) => file,
+        Err(e) => {
+            super::notifications::notify_send(super::notifications::Notification::Warn(format!(
+                "open file refused: {e}"
+            )));
+            return;
+        }
+    };
+    let lines = if let Some(diff) = diff {
+        diff.lines()
+            .take(1000)
+            .map(|text| {
+                let face = if text.starts_with('+') {
+                    "added"
+                } else if text.starts_with('-') {
+                    "removed"
+                } else {
+                    "code"
+                };
+                PanelLine::new(text, crate::extras::panel_feed::ops::face_of(Some(face)))
+            })
+            .collect()
+    } else if let Some(template) = cfg
+        .editor_open_command
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        let argv = build_editor_open_argv(template, &file.to_string_lossy(), line);
+        spawn_editor_follow(&argv);
+        return;
+    } else {
+        let content =
+            std::fs::read_to_string(&file).unwrap_or_else(|e| format!("cannot preview file: {e}"));
+        content
+            .lines()
+            .skip(line.unwrap_or(1).saturating_sub(1))
+            .take(1000)
+            .map(|text| PanelLine::new(text, PanelFace::Normal))
+            .collect()
+    };
+    renderer.apply_external_panel_op(PanelOp::Show {
+        id: "file-preview".into(),
+        title: file.display().to_string(),
+        lines,
+    });
+}
+
 /// Split `template` on whitespace into argv tokens, replacing `{path}`
 /// and `{line}` in each token. Returns an empty vec when `template` is
 /// blank.
@@ -117,6 +192,17 @@ pub fn spawn_editor_follow(argv: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_file_rejects_escape_and_accepts_local_file() {
+        let root = std::env::temp_dir().join(format!("dirge-file-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("inside"), "ok").unwrap();
+        assert!(project_file("inside", &root).is_ok());
+        assert!(project_file("../outside", &root).is_err());
+        assert!(project_file("missing", &root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     // ── build_editor_open_argv ──────────────────────────────────────
 

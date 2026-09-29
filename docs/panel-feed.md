@@ -258,3 +258,32 @@ These are the same replies `/panel` sends, over the same channel. Other
 global keys (scrolling, Ctrl+L, Alt+. / Alt+, / Alt+/) keep working,
 and Ctrl+C still interrupts a running agent. A permission prompt or
 question from the agent takes the keys while it is shown.
+
+## Lens capabilities (wire v2)
+
+On every subscription dirge sends `GET /events?token=...&features=spans,keys,cursor,open-file`
+(the comma list is URL encoded). `features` is the capability list for this
+version of the panel feed, not a version of the producer; an absent parameter
+means the v1 plain-lines client. Producers must degrade to plain lines and
+legacy replies for clients without a capability. Replies do not carry this
+parameter.
+
+With `keys`, `ui/show-panel` may include `"keys":{"n":"next","Enter":"open"}`.
+Only keys declared by the focused panel are claimed; the producer decides
+what verbs mean. With `cursor`, `"cursor":true` enables j/k, Up/Down and
+PgUp/PgDn navigation over body rows. A line may include an `"id"` (stable
+row identifier); moving the cursor highlights the row and scrolls the panel
+without sending a reply. Declared keys send the selected row id (or null):
+
+```json
+{"action":"invoke","panel":"carto-flow","verb":"next","row":null,"payload":{}}
+```
+
+The five existing focus/unfocus/next-tab/prev-tab/refresh replies remain
+valid aliases. `open-file` accepts `path`, optional 1-based `line`, and
+optional unified `diff`. The path must resolve to an existing regular file
+inside the current project root, including after symlink resolution. dirge
+opens it in the configured external editor, or previews its content in a
+panel; if `diff` is present it previews the supplied diff instead. A refused
+path produces a notice, never an editor launch. `ui/open-file` remains an
+alias for compatibility.

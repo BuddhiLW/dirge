@@ -1650,15 +1650,14 @@ pub async fn run_interactive(
     // first use, so producers that fired before this point have their
     // ops queued and drained on the first iterations below.
     let mut panel_rx = crate::ui::panels_ext::take_receiver();
-    // Optional external panel feed (`panel_feed` config, off by
-    // default). The handle lives for the whole loop; dropping it on
-    // any exit path stops the subscription task.
-    let _panel_feed = crate::extras::panel_feed::start(cfg.panel_feed.as_ref());
     // View engine (`ui::view`): the view commands and the swarm grid run
     // off this loop and apart from the agent. Updates arrive on `view_rx`;
     // the latest model decides locally which keys and commands it owns.
     let (view_tx, mut view_rx) = mpsc::unbounded_channel::<crate::ui::view::ViewUpdate>();
     let mut view_model = crate::ui::view::start(view_tx);
+    // Optional external panel feed (off by default). Its handle lives for
+    // the loop; dropping it on exit stops the subscription task.
+    let _panel_feed = crate::extras::panel_feed::start(cfg.panel_feed.as_ref());
 
     let (user_tx, mut user_rx) = mpsc::unbounded_channel::<UserEvent>();
     input_reader::spawn_input_reader(user_tx.clone());
@@ -2073,10 +2072,11 @@ pub async fn run_interactive(
                                 // stays inert, other global commands and
                                 // Ctrl+C pass through. Decided from the model
                                 // alone; the loop never waits on the engine.
-                                if !from_sequence && view_model.swarm_open() {
+                                if !from_sequence {
                                     use crate::ui::view::promote::{KeyRoute, grid_event, route_key};
+                                    let grid_open = view_model.swarm_open();
                                     match route_key(&view_model, &key, action) {
-                                        KeyRoute::Grid(name) => {
+                                        KeyRoute::Grid(name) if grid_open => {
                                             crate::ui::view::submit(grid_event(
                                                 name,
                                                 renderer.swarm_cells(),
@@ -2084,8 +2084,15 @@ pub async fn run_interactive(
                                             ));
                                             continue;
                                         }
-                                        KeyRoute::Swallow => continue,
-                                        KeyRoute::PassThrough => {}
+                                        KeyRoute::Panel(name) => {
+                                            if let Some(panel) = renderer.focused_external_panel_id() {
+                                                crate::ui::view::submit(crate::ui::view::ViewEvent::Key { key: name, panel });
+                                                continue;
+                                            }
+                                            if grid_open { continue; }
+                                        }
+                                        KeyRoute::Swallow if grid_open => continue,
+                                        _ => {}
                                     }
                                 }
                                 let is_ctrl_c = !from_sequence
@@ -4965,6 +4972,12 @@ pub async fn run_interactive(
                                 }
                                 Handoff::MessageAgent(id) => {
                                     input.set_text(&format!("/msg {id} "));
+                                }
+                                Handoff::OpenFile { path, line, diff } => {
+                                    editor_follow::open_file(
+                                        &mut renderer, cfg, std::path::Path::new(session.working_dir.as_str()),
+                                        &path, line, diff.as_deref(),
+                                    );
                                 }
                             }
                         }

@@ -68,7 +68,7 @@ impl PanelFace {
     pub fn from_name(name: &str) -> Self {
         match name.trim().to_ascii_lowercase().as_str() {
             "dim" | "muted" | "comment" => Self::Dim,
-            "accent" | "info" | "highlight" | "title" => Self::Accent,
+            "accent" | "info" | "highlight" | "title" | "cursor" => Self::Accent,
             "success" | "ok" | "good" => Self::Success,
             "warn" | "warning" => Self::Warn,
             "error" | "err" | "bad" => Self::Error,

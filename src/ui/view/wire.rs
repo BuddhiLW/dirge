@@ -44,6 +44,13 @@ mod tests {
     fn events_encode_with_a_type_tag() {
         assert_eq!(encode_event(&ViewEvent::Init), json!({"type": "init"}));
         assert_eq!(
+            encode_event(&ViewEvent::Key {
+                key: "Enter".into(),
+                panel: "p".into()
+            }),
+            json!({"type":"key", "key":"Enter", "panel":"p"})
+        );
+        assert_eq!(
             encode_event(&ViewEvent::command("swarm", &["on"])),
             json!({"type": "command", "name": "swarm", "args": ["on"]})
         );
@@ -86,7 +93,8 @@ mod tests {
             update.effects[0],
             ViewEffect::Reply {
                 action: "focus".into(),
-                target: Some("b".into())
+                target: Some("b".into()),
+                payload: None
             }
         );
         assert_eq!(update.effects[1], ViewEffect::PanelStatus);

@@ -219,6 +219,170 @@ mod tests {
     }
 
     #[test]
+    fn lens_capabilities_chords_normalize_and_invoke_cursor_row() {
+        use serde_json::json;
+        on_isolate_stack(|| {
+            let mut r = CljrsReducer::boot().unwrap();
+            let normalized = eval_source(
+                &mut r.env,
+                "(= (dirge.panels/normalize-panel-keys {\"enter\" {\"invoke\" \"open\"} \"tab\" \"next\" \"shift-tab\" \"prev\" \"pgdn\" \"down\" \"pagedown\" \"down\" \"esc\" \"close\" \"j\" \"move\" \"bad\" 3}) {\"Enter\" \"open\" \"Tab\" \"next\" \"BackTab\" \"prev\" \"PgDn\" \"down\" \"Esc\" \"close\" \"j\" \"move\"})",
+            )
+            .unwrap();
+            assert_eq!(
+                normalized.to_string(),
+                "true",
+                "normalization: {normalized}"
+            );
+            let u = r
+                .step(&feed(json!({"op":"ui/show-panel", "panel/id":"lens",
+                "cursor":true, "keys":{"enter":{"invoke":"open"}, "n":"next"},
+                "lines":[{"text":"alpha", "id":"a"},
+                         {"text":"beta", "id":"b", "payload":{"file":"x"}}]})))
+                .unwrap();
+            assert!(u.model.panel_keys.contains(&"Enter".into()));
+            r.step(&ViewEvent::Key {
+                key: "j".into(),
+                panel: "lens".into(),
+            })
+            .unwrap();
+            let u = r
+                .step(&ViewEvent::Key {
+                    key: "Enter".into(),
+                    panel: "lens".into(),
+                })
+                .unwrap();
+            assert_eq!(
+                u.effects,
+                vec![ViewEffect::Reply {
+                    action: "invoke".into(),
+                    target: None,
+                    payload: Some(json!({"panel":"lens", "verb":"open", "row":"b",
+                                     "payload":{"file":"x"}}))
+                }]
+            );
+            let u = r
+                .step(&ViewEvent::Key {
+                    key: "Esc".into(),
+                    panel: "lens".into(),
+                })
+                .unwrap();
+            assert!(u.model.panel_keys.is_empty());
+            let u = r
+                .step(&ViewEvent::Key {
+                    key: "Enter".into(),
+                    panel: "lens".into(),
+                })
+                .unwrap();
+            assert!(u.effects.is_empty());
+            let u = r
+                .step(&feed(json!({"op":"ui/show-panel", "panel/id":"invalid",
+                                   "keys":{"enter":{"invoke":42}, "ctrl-x":"unsupported"}})))
+                .unwrap();
+            assert!(
+                u.model.panel_keys.is_empty(),
+                "malformed declarations cannot claim focus"
+            );
+            assert!(u.effects.iter().any(|effect| matches!(
+                effect,
+                ViewEffect::Notify {
+                    level: NoticeLevel::Warn,
+                    ..
+                }
+            )));
+        });
+    }
+
+    #[test]
+    fn panel_cursor_scroll_invoke_and_open_file() {
+        use serde_json::json;
+        on_isolate_stack(|| {
+            let mut r = CljrsReducer::boot().unwrap();
+            let u = r
+                .step(&feed(json!({"op":"ui/show-panel", "panel/id":"lens",
+                "cursor":true, "keys":{"n":"next", "Enter":"open"},
+                "payload":{"scope":"lens"},
+                "lines":[{"text":"alpha", "id":"a"}, {"text":"beta", "id":"b", "payload":{"file":"x"}}]})))
+                .unwrap();
+            assert_eq!(
+                u.model.panel_keys,
+                vec!["Down", "Enter", "Esc", "PgDn", "PgUp", "Up", "j", "k", "n"]
+            );
+            assert!(
+                matches!(&u.effects[0], ViewEffect::Paint {rows, focus: true, ..} if rows[0][0] == span("▸ ", "cursor") && rows[0][1] == span("alpha", "cursor"))
+            );
+            let u = r
+                .step(&ViewEvent::Key {
+                    key: "j".into(),
+                    panel: "lens".into(),
+                })
+                .unwrap();
+            assert!(
+                matches!(&u.effects[0], ViewEffect::Paint {offset:1, rows, ..} if rows[1][0] == span("▸ ", "cursor") && rows[1][1] == span("beta", "cursor"))
+            );
+            let u = r
+                .step(&ViewEvent::Key {
+                    key: "Enter".into(),
+                    panel: "lens".into(),
+                })
+                .unwrap();
+            assert_eq!(
+                u.effects,
+                vec![ViewEffect::Reply {
+                    action: "invoke".into(),
+                    target: None,
+                    payload: Some(
+                        json!({"panel":"lens", "verb":"open", "row":"b", "payload":{"file":"x"}})
+                    )
+                }]
+            );
+            let u = r
+                .step(&ViewEvent::Key {
+                    key: "Esc".into(),
+                    panel: "lens".into(),
+                })
+                .unwrap();
+            assert!(
+                u.model.panel_keys.is_empty(),
+                "release focus in the published model"
+            );
+            assert!(matches!(
+                &u.effects[..],
+                [ViewEffect::Paint { focus: false, rows, .. }] if rows[1] == vec![span("beta", "")]
+            ));
+            let u = r
+                .step(&ViewEvent::Key {
+                    key: "Enter".into(),
+                    panel: "lens".into(),
+                })
+                .unwrap();
+            assert!(u.effects.is_empty(), "released panel cannot invoke");
+            // Unfocused panels ignore scroll events as well as invocations.
+            let u = r
+                .step(&ViewEvent::Key {
+                    key: "PgUp".into(),
+                    panel: "lens".into(),
+                })
+                .unwrap();
+            assert!(u.effects.is_empty());
+            for name in ["open-file", "ui/open-file"] {
+                let u = r
+                    .step(&feed(
+                        json!({"op":name, "path":"src/lib.rs", "line":9, "diff":"+hi"}),
+                    ))
+                    .unwrap();
+                assert_eq!(
+                    u.effects,
+                    vec![ViewEffect::OpenFile {
+                        path: "src/lib.rs".into(),
+                        line: Some(9),
+                        diff: Some("+hi".into())
+                    }]
+                );
+            }
+        });
+    }
+
+    #[test]
     fn panels_are_bounded_evicting_the_oldest() {
         use serde_json::json;
         on_isolate_stack(|| {

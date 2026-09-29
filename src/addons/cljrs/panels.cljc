@@ -32,6 +32,10 @@
   [id]
   {:op :unpaint :id id})
 
+(defn span
+  [text face]
+  {:text (str text) :face (or face "")})
+
 (defn paint
   "The effect that sets panel `id` as the state holds it."
   [state id]
@@ -39,17 +43,17 @@
     {:op     :paint
      :id     id
      :title  (:title p)
-     :rows   (:rows p)
+     :rows   (if (and (= id (:focused state)) (:cursor? p) (seq (:rows p)))
+               (assoc (:rows p) (:cursor p)
+                      (into [(span "▸ " "cursor")]
+                            (mapv #(assoc % :face "cursor") (nth (:rows p) (:cursor p)))))
+               (:rows p))
      :tail   (boolean (:tail p))
      :offset (:offset p)
      :focus  (= id (:focused state))}))
 
 ;; ---------------------------------------------------------------------------
 ;; Rows
-
-(defn span
-  [text face]
-  {:text (str text) :face (or face "")})
 
 (defn line->row
   "A wire line as a row: a bare string, {:text :face}, or {:face :spans}
@@ -94,15 +98,28 @@
         [cur out] (reduce step [[] []] row)]
     (conj out cur)))
 
-(defn rows-of
-  "The body rows of a show op: its :lines, else its :text."
+(defn row-entries-of
+  "Body rows with parallel id and payload; only the first split row inherits metadata."
   [op]
-  (let [lines (:lines op)
-        raw   (cond
-                (sequential? lines)    (remove nil? (map line->row lines))
-                (string? (:text op))   [(line->row (:text op))]
-                :else                  [])]
-    (vec (mapcat split-row raw))))
+  (let [lines (if (sequential? (:lines op)) (:lines op)
+                  (when (string? (:text op)) [(:text op)]))]
+    (vec (mapcat (fn [line]
+                   (when-let [row (line->row line)]
+                     (map-indexed (fn [i split]
+                                    {:row split
+                                     :id (when (and (zero? i) (map? line)) (:id line))
+                                     :payload (when (and (zero? i) (map? line)) (:payload line))})
+                                  (split-row row))))
+                 lines))))
+
+(defn rows-of [op] (mapv :row (row-entries-of op)))
+
+(defn row-ids-of
+  "Stable identifiers parallel to the rows (only the first split row gets an id)."
+  [op]
+  (mapv :id (row-entries-of op)))
+
+(defn row-payloads-of [op] (mapv :payload (row-entries-of op)))
 
 (defn row-text
   [row]
@@ -144,7 +161,8 @@
 
 (defn clamp-offset
   [p]
-  (assoc p :offset (min (or (:offset p) 0) (max 0 (dec (count (:rows p)))))))
+  (assoc p :offset (min (or (:offset p) 0) (max 0 (dec (count (:rows p)))))
+           :cursor (min (or (:cursor p) 0) (max 0 (dec (count (:rows p)))))))
 
 (defn drop-panel
   [state id]
@@ -163,22 +181,69 @@
           state   (if full? (drop-panel state old) state)
           evicted (if full? [(unpaint old)] [])]
       [(-> state
-           (assoc-in [:panels id] {:title title :rows [] :tail tail :offset 0})
+           (assoc-in [:panels id] {:title title :rows [] :tail tail :offset 0 :cursor 0 :cursor? false :keys {} :row-ids [] :row-payloads [] :payload {}})
            (update :order conj id))
        evicted])))
 
 ;; ---------------------------------------------------------------------------
 ;; Ops
 
+(def chord-names
+  "Wire chords to the names emitted by promote::key_name. Unsupported
+   modified chords cannot be claimed by the panel route."
+  {"enter" "Enter" "return" "Enter" "tab" "Tab"
+   "shift-tab" "BackTab" "backtab" "BackTab"
+   "esc" "Esc" "escape" "Esc"
+   "pgdn" "PgDn" "pagedown" "PgDn" "pagedn" "PgDn"
+   "pgup" "PgUp" "pageup" "PgUp"
+   "up" "Up" "down" "Down" "left" "Left" "right" "Right"
+   "home" "Home" "end" "End"})
+
+(defn normalize-panel-keys
+  "Pure conversion from capabilities chords and invoke declarations to
+   routable names and verbs. Bad entries are omitted."
+  [keys]
+  (into {}
+        (keep (fn [[chord declaration]]
+                (let [spelling (when (or (string? chord) (keyword? chord)) (str/trim (name chord)))
+                      name (when spelling
+                             (or (get chord-names (str/lower-case spelling))
+                                 (when (= 1 (count spelling)) spelling)))
+                      verb (if (string? declaration) declaration
+                               (when (map? declaration) (or (:invoke declaration) (get declaration "invoke"))))]
+                  (when (and name (string? verb) (not (str/blank? verb)))
+                    [name verb]))))
+        (if (map? keys) keys {})))
+
 (defn show-panel
   [state op]
   (if-let [id (panel-id op)]
     (let [title       (title-of op id)
           [state evs] (ensure-panel state id title false)
-          rows        (vec (take max-rows (drop-title-row (rows-of op) title)))
+          entries     (row-entries-of op)
+          all-rows    (mapv :row entries)
+          all-ids     (mapv :id entries)
+          all-payloads (mapv :payload entries)
+          dropped     (- (count all-rows) (count (drop-title-row all-rows title)))
+          rows        (vec (take max-rows (drop dropped all-rows)))
+          row-ids     (vec (take max-rows (drop dropped all-ids)))
+          row-payloads (vec (take max-rows (drop dropped all-payloads)))
+          keys        (normalize-panel-keys (:keys op))
+          malformed   (when (map? (:keys op))
+                        (remove (fn [[chord declaration]]
+                                  (let [single (normalize-panel-keys {chord declaration})]
+                                    (seq single)))
+                                (:keys op)))
           state       (update-in state [:panels id]
-                                 #(clamp-offset (assoc % :title title :rows rows :tail false)))]
-      [state (conj evs (paint state id))])
+                                 #(clamp-offset (assoc % :title title :rows rows :row-ids row-ids :row-payloads row-payloads
+                                                         :payload (if (map? (:payload op)) (:payload op) {})
+                                                         :keys keys
+                                                         :cursor? (true? (:cursor op)) :tail false)))
+          state       (if (or (true? (:cursor op)) (seq keys))
+                        (assoc state :focused id) state)]
+      [state (cond-> (conj evs (paint state id))
+               (seq malformed) (conj {:op :notify :level :warn
+                                      :text "Ignoring malformed panel key declaration"}))])
     [state []]))
 
 (defn close-panel
@@ -214,12 +279,48 @@
                                        (clamp-offset
                                         (assoc p
                                                :rows (if (pos? over) (subvec rows over) rows)
+                                               :row-ids (vec (take max-rows (drop (max over 0)
+                                                                                  (concat (:row-ids p) (repeat (count new) nil)))))
+                                               :row-payloads (vec (take max-rows (drop (max over 0)
+                                                                                       (concat (:row-payloads p) (repeat (count new) nil)))))
                                                ;; A reader scrolled back keeps their place.
                                                :offset (if (pos? (:offset p))
                                                          (+ (:offset p) (count new))
                                                          0))))))]
         [state (conj evs (paint state id))])
       [state []])))
+
+(def scroll-keys {"j" 1 "Down" 1 "k" -1 "Up" -1
+                  "PgDn" 10 "PgUp" -10})
+
+(defn panel-keys [state]
+  (if-let [p (get-in state [:panels (:focused state)])]
+    (vec (sort (distinct (concat ["Esc"] (map name (keys (:keys p)))
+                                (keys scroll-keys)))))
+    []))
+
+(defn key-step
+  "Only the focused panel receives its declared keys. Cursor is a row index;
+   offset counts back from the top, and follows it as it moves."
+  [state {:keys [key panel]}]
+  (let [p (get-in state [:panels panel])
+        verb (or (get (:keys p) key) (get (:keys p) (keyword key)))
+        delta (get scroll-keys key)]
+    (cond
+      (not= panel (:focused state)) [state []]
+      (= key "Esc") (let [state (assoc state :focused nil)]
+                      [state [(paint state panel)]])
+      (and (string? verb) (not (str/blank? verb)))
+      [state [{:op :reply :action "invoke"
+               :payload {:panel panel :verb verb
+                         :row (get (:row-ids p) (:cursor p))
+                         :payload (or (get (:row-payloads p) (:cursor p)) (:payload p) {})}}]]
+      delta (let [state (update-in state [:panels panel]
+                                   (fn [p] (let [cursor (max 0 (min (max 0 (dec (count (:rows p))))
+                                                                        (+ (:cursor p) delta)))]
+                                             (assoc p :cursor cursor :offset cursor))))]
+              [state [(paint state panel)]])
+      :else [state []])))
 
 (def levels
   {"warn" :warn "warning" :warn "error" :error "err" :error})
@@ -238,6 +339,11 @@
   [state _]
   [empty-state (mapv unpaint (:order state))])
 
+(defn open-file [state op]
+  (if (and (string? (:path op)) (not (str/blank? (:path op))))
+    [state [{:op :open-file :path (:path op) :line (:line op) :diff (:diff op)}]]
+    [state []]))
+
 (def ops
   "Feed op name -> (fn [state op] [state' effects]). An op not listed
    is ignored: a newer producer never breaks the view."
@@ -246,6 +352,8 @@
    "ui/focus-tab"   focus-tab
    "ui/append-tab"  append-tab
    "ui/notify"      notify
+   "open-file"      open-file
+   "ui/open-file"   open-file
    "feed/ended"     feed-ended})
 
 (defn step
