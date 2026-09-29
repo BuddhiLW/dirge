@@ -1,16 +1,19 @@
 //! L0 domain: the values command hooks are made of.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::{LazyLock, Mutex};
 
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// Default per-command timeout, in seconds, when a hook declares none.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
-/// The lifecycle moments a hook can be registered for. Closed: an event
-/// name outside this set is carried in config but never fires.
+/// The lifecycle moments a hook can be registered for. The named variants
+/// are the moments dirge fires itself, under Claude Code's names. Any other
+/// name is `Other`: a seam fires it by name ([`HookEvent::named`]) with no
+/// change here, and addons hear it through an open hook key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookEvent {
     PreToolUse,
@@ -20,9 +23,13 @@ pub enum HookEvent {
     UserPromptSubmit,
     Stop,
     SubagentStop,
+    /// An event dirge has no variant for. Build it with [`HookEvent::named`],
+    /// so a known name still lands on its variant.
+    Other(&'static str),
 }
 
 impl HookEvent {
+    /// The events dirge fires itself.
     pub const ALL: [HookEvent; 7] = [
         HookEvent::PreToolUse,
         HookEvent::PostToolUse,
@@ -32,6 +39,20 @@ impl HookEvent {
         HookEvent::Stop,
         HookEvent::SubagentStop,
     ];
+
+    /// The event called `name`: its variant when dirge fires it, `Other`
+    /// otherwise.
+    pub fn named(name: &str) -> HookEvent {
+        HookEvent::ALL
+            .into_iter()
+            .find(|e| e.as_str() == name)
+            .unwrap_or_else(|| HookEvent::Other(intern(name)))
+    }
+
+    /// True for an event outside [`HookEvent::ALL`].
+    pub fn is_open(self) -> bool {
+        matches!(self, HookEvent::Other(_))
+    }
 
     /// The event's name in a `hooks` block and in `hook_event_name`.
     pub fn as_str(self) -> &'static str {
@@ -43,6 +64,7 @@ impl HookEvent {
             HookEvent::UserPromptSubmit => "UserPromptSubmit",
             HookEvent::Stop => "Stop",
             HookEvent::SubagentStop => "SubagentStop",
+            HookEvent::Other(name) => name,
         }
     }
 
@@ -55,6 +77,22 @@ impl HookEvent {
     }
 }
 
+/// `name` as a `&'static str`, kept for the life of the process. Event
+/// names come from config and from the seams that fire them, so the set
+/// stays small; interning keeps [`HookEvent`] `Copy`.
+fn intern(name: &str) -> &'static str {
+    static NAMES: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(Default::default);
+    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    match names.get(name) {
+        Some(interned) => interned,
+        None => {
+            let interned: &'static str = Box::leak(name.into());
+            names.insert(interned);
+            interned
+        }
+    }
+}
+
 impl fmt::Display for HookEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -63,7 +101,10 @@ impl fmt::Display for HookEvent {
 
 /// One `{ "type": "command", "command": ..., "timeout": ... }` entry, or
 /// `{ "type": "addon", "addon": ..., "handler": ..., "timeout": ... }`,
-/// answered by a handler an addon registered instead of a process.
+/// answered by a handler an addon registered instead of a process. The
+/// `type` is open: any other type goes to the runner installed for it
+/// ([`super::boundary::install_runner`]), which reads its own fields from
+/// `extra`.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct HookCommand {
     #[serde(rename = "type", default = "default_kind")]
@@ -79,6 +120,9 @@ pub struct HookCommand {
     /// `type: "addon"`: the handler name within that addon.
     #[serde(default)]
     pub handler: Option<String>,
+    /// Every other field, for the runner of any other `type`.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 fn default_kind() -> String {
@@ -87,12 +131,13 @@ fn default_kind() -> String {
 
 impl HookCommand {
     /// `type: "command"` entries with a non-blank command run, and
-    /// `type: "addon"` entries naming both an addon and a handler.
+    /// `type: "addon"` entries naming both an addon and a handler. An entry
+    /// of any other non-blank type is its runner's to judge.
     pub fn is_runnable(&self) -> bool {
         match self.kind.as_str() {
             "command" => !self.command.trim().is_empty(),
             "addon" => self.addon_target().is_some(),
-            _ => false,
+            kind => !kind.trim().is_empty(),
         }
     }
 
@@ -114,11 +159,13 @@ impl HookCommand {
         Some((addon, handler))
     }
 
-    /// What names this entry in a log line: its command, or `addon:<id>/<handler>`.
+    /// What names this entry in a log line: its command, `addon:<id>/<handler>`,
+    /// or `type:<type>`.
     pub fn label(&self) -> String {
-        match self.addon_target() {
-            Some((addon, handler)) => format!("addon:{addon}/{handler}"),
-            None => self.command.clone(),
+        match (self.kind.as_str(), self.addon_target()) {
+            (_, Some((addon, handler))) => format!("addon:{addon}/{handler}"),
+            ("command", None) => self.command.clone(),
+            (kind, None) => format!("type:{kind}"),
         }
     }
 
@@ -152,8 +199,16 @@ pub struct Exited {
 pub enum HookError {
     SpawnFailed(String),
     TimedOut(u64),
-    NonZeroExit { code: Option<i32>, stderr: String },
-    Unreadable { path: String, detail: String },
+    NonZeroExit {
+        code: Option<i32>,
+        stderr: String,
+    },
+    Unreadable {
+        path: String,
+        detail: String,
+    },
+    /// No runner is installed for the entry's `type`.
+    NoRunner(String),
 }
 
 impl fmt::Display for HookError {
@@ -165,6 +220,7 @@ impl fmt::Display for HookError {
                 write!(f, "exited {code:?}: {}", stderr.trim())
             }
             HookError::Unreadable { path, detail } => write!(f, "{path}: {detail}"),
+            HookError::NoRunner(kind) => write!(f, "no runner answers `type: {kind}` entries"),
         }
     }
 }

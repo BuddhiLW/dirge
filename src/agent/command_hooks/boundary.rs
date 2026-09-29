@@ -1,10 +1,11 @@
 //! L2 boundary: the only code that touches processes and files. Every
 //! function returns a `Result`; failures are values.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
 
 use super::domain::{Exited, HookCommand, HookError};
@@ -77,26 +78,85 @@ impl HookRunner for ShellRunner {
     }
 }
 
-/// Where `type: "addon"` entries go, looked up at each call: the addon host
-/// starts after the hook registry is built, and may be replaced by a reload.
-pub type AddonRunnerSlot = Arc<dyn Fn() -> Option<Arc<dyn HookRunner>> + Send + Sync>;
+/// Port: hears an event outside [`super::domain::HookEvent::ALL`] beside the
+/// entries configured for it. The events dirge fires itself reach addons
+/// through their own hook points instead.
+pub trait HookListener: Send + Sync {
+    /// Whether anything would hear `event`; checked before any payload is
+    /// built.
+    fn listens(&self, event: &str) -> bool;
 
-/// Adapter: each entry to the runner its `type` names. `command` entries to
-/// `shell`; `addon` entries to whatever `addon` yields, failing open (no
-/// verdict, action allowed) when nothing answers them.
+    /// One answer per party that heard `event`, each read like a command's.
+    fn hear(&self, event: &str, payload: &str) -> Vec<Result<Exited, HookError>>;
+}
+
+/// Parts keyed by name, open: a new one is one [`Registry::install`], and
+/// installing under a taken name replaces the part (an addon reload does).
+pub struct Registry<T: ?Sized>(RwLock<BTreeMap<String, Arc<T>>>);
+
+impl<T: ?Sized> Default for Registry<T> {
+    fn default() -> Self {
+        Self(RwLock::new(BTreeMap::new()))
+    }
+}
+
+impl<T: ?Sized> Registry<T> {
+    pub fn install(&self, name: &str, part: Arc<T>) {
+        self.0
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_string(), part);
+    }
+
+    pub fn get(&self, name: &str) -> Option<Arc<T>> {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .cloned()
+    }
+
+    /// Every part with its name, in name order.
+    pub fn all(&self) -> Vec<(String, Arc<T>)> {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(name, part)| (name.clone(), part.clone()))
+            .collect()
+    }
+}
+
+/// Runners by the entry `type` they answer.
+pub type Runners = Registry<dyn HookRunner>;
+/// Listeners for open events, by name.
+pub type Listeners = Registry<dyn HookListener>;
+
+impl Runners {
+    /// `command` entries answered by [`ShellRunner`], and nothing else yet.
+    pub fn with_shell() -> Self {
+        let runners = Self::default();
+        runners.install("command", Arc::new(ShellRunner));
+        runners
+    }
+}
+
+/// Adapter: each entry to the runner installed for its `type`, looked up at
+/// each call: the addon host starts after the hook registry is built, and a
+/// reload may replace its runner. An entry no runner answers fails open (no
+/// verdict, action allowed).
 pub struct DispatchRunner {
-    shell: Arc<dyn HookRunner>,
-    addon: AddonRunnerSlot,
+    runners: Arc<Runners>,
 }
 
 impl DispatchRunner {
-    pub fn new(shell: Arc<dyn HookRunner>, addon: AddonRunnerSlot) -> Self {
-        Self { shell, addon }
+    pub fn new(runners: Arc<Runners>) -> Self {
+        Self { runners }
     }
 
-    /// `ShellRunner` for commands, the process-wide addon runner for addons.
+    /// The process-wide runners.
     pub fn live() -> Self {
-        Self::new(Arc::new(ShellRunner), Arc::new(installed_addon_runner))
+        Self::new(RUNNERS.clone())
     }
 }
 
@@ -107,30 +167,33 @@ impl HookRunner for DispatchRunner {
         payload: &str,
         project_dir: &Path,
     ) -> Result<Exited, HookError> {
-        if cmd.addon_target().is_none() {
-            return self.shell.run(cmd, payload, project_dir);
-        }
-        match (self.addon)() {
+        match self.runners.get(&cmd.kind) {
             Some(runner) => runner.run(cmd, payload, project_dir),
-            None => Err(HookError::SpawnFailed(
-                "no addon host is running to answer this hook".to_string(),
-            )),
+            None => Err(HookError::NoRunner(cmd.kind.clone())),
         }
     }
 }
 
-static ADDON_RUNNER: OnceLock<Arc<dyn HookRunner>> = OnceLock::new();
+static RUNNERS: LazyLock<Arc<Runners>> = LazyLock::new(|| Arc::new(Runners::with_shell()));
+static LISTENERS: LazyLock<Arc<Listeners>> = LazyLock::new(Default::default);
 
-/// Make `runner` the one that answers `type: "addon"` entries in this
-/// process. The first install wins.
+/// Make `runner` answer `type: <kind>` entries in this process, replacing
+/// the one installed before.
 #[cfg_attr(not(feature = "addons"), allow(dead_code))]
-pub fn install_addon_runner(runner: Arc<dyn HookRunner>) {
-    let _ = ADDON_RUNNER.set(runner);
+pub fn install_runner(kind: &str, runner: Arc<dyn HookRunner>) {
+    RUNNERS.install(kind, runner);
 }
 
-/// The addon runner of this process, once one is installed.
-pub fn installed_addon_runner() -> Option<Arc<dyn HookRunner>> {
-    ADDON_RUNNER.get().cloned()
+/// Make `listener` hear open events in this process under `name`,
+/// replacing the one installed before.
+#[cfg_attr(not(feature = "addons"), allow(dead_code))]
+pub fn install_listener(name: &str, listener: Arc<dyn HookListener>) {
+    LISTENERS.install(name, listener);
+}
+
+/// The process-wide listeners.
+pub fn listeners() -> Arc<Listeners> {
+    LISTENERS.clone()
 }
 
 fn drain<R: Read + Send + 'static>(mut r: R) -> std::thread::JoinHandle<String> {

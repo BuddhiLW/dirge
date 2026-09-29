@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use super::boundary::{HookRunner, ShellRunner};
+use super::boundary::{DispatchRunner, HookListener, HookRunner, Listeners, Runners, ShellRunner};
 use super::domain::{
     Exited, HookCommand, HookError, HookEvent, HookMatcher, HookOutcome, HooksConfig, Submission,
 };
@@ -68,6 +68,7 @@ fn cmd(command: &str) -> HookCommand {
         timeout: Some(5),
         addon: None,
         handler: None,
+        extra: Default::default(),
     }
 }
 
@@ -215,21 +216,33 @@ fn settings_hooks_parse_and_absent_block_is_empty() {
 }
 
 #[test]
-fn normalize_drops_non_command_and_blank_entries() {
+fn normalize_drops_blank_and_untyped_entries() {
     let mut cfg = config(&[(HookEvent::Stop, None, &["  "])]);
-    cfg.entry("PreToolUse".into())
-        .or_default()
-        .push(HookMatcher {
+    let mut untyped = cmd("x");
+    untyped.kind = " ".into();
+    cfg.insert(
+        "PreToolUse".into(),
+        vec![HookMatcher {
             matcher: None,
-            hooks: vec![HookCommand {
-                kind: "prompt".into(),
-                command: "x".into(),
-                timeout: None,
-                addon: None,
-                handler: None,
-            }],
-        });
+            hooks: vec![untyped],
+        }],
+    );
     assert!(policy::normalize(cfg).is_empty());
+}
+
+/// Claude Code's `prompt` entries, say: kept for whatever runner answers
+/// the type, and without one they decide nothing.
+#[test]
+fn an_entry_of_a_type_nothing_runs_is_kept_and_fails_open() {
+    let mut prompt = cmd("x");
+    prompt.kind = "prompt".into();
+    let cfg = policy::normalize(one_entry(HookEvent::PreToolUse, prompt.clone()));
+    assert_eq!(cfg["PreToolUse"][0].hooks, vec![prompt.clone()]);
+    assert_eq!(prompt.label(), "type:prompt");
+
+    let hooks = registry(one_entry(HookEvent::PreToolUse, prompt), dispatch(None));
+    let out = hooks.run(HookEvent::PreToolUse, &["Bash"], &json!({}));
+    assert_eq!(out, HookOutcome::default());
 }
 
 // ------------------------------------------------------- addon entries
@@ -241,6 +254,7 @@ fn addon_cmd(addon: &str, handler: &str) -> HookCommand {
         timeout: Some(5),
         addon: Some(addon.into()),
         handler: Some(handler.into()),
+        extra: Default::default(),
     }
 }
 
@@ -303,10 +317,11 @@ impl HookRunner for ScriptedAddon {
 }
 
 fn dispatch(addon: Option<Arc<dyn HookRunner>>) -> Arc<dyn HookRunner> {
-    Arc::new(super::boundary::DispatchRunner::new(
-        Arc::new(ShellRunner),
-        Arc::new(move || addon.clone()),
-    ))
+    let runners = Runners::with_shell();
+    if let Some(addon) = addon {
+        runners.install("addon", addon);
+    }
+    Arc::new(DispatchRunner::new(Arc::new(runners)))
 }
 
 #[test]
@@ -387,6 +402,176 @@ fn addon_and_shell_runners_agree_on_every_answer() {
         .run(event, &["Bash"], &json!({}));
         assert_eq!(via_addon, via_shell, "{event} `{shell}`");
     }
+}
+
+// ------------------------------------------------------ the open seams
+
+#[test]
+fn event_names_land_on_their_variant_and_any_other_name_is_open() {
+    for event in HookEvent::ALL {
+        assert_eq!(HookEvent::named(event.as_str()), event);
+        assert!(!event.is_open());
+    }
+    let open = HookEvent::named("Notification");
+    assert!(open.is_open());
+    assert_eq!(open, HookEvent::named("Notification"));
+    assert_eq!(open.to_string(), "Notification");
+    assert!(!open.stdout_is_context());
+}
+
+#[test]
+fn an_open_event_runs_the_entries_configured_under_its_name() {
+    let mut cfg = config(&[(HookEvent::Stop, None, &["stop"])]);
+    cfg.insert(
+        "Notification".into(),
+        vec![HookMatcher {
+            matcher: Some("idle".into()),
+            hooks: vec![cmd("notify")],
+        }],
+    );
+    let runner = ScriptedRunner::answering(vec![("notify", Ok(exit(2, "", "quiet hours")))]);
+    let hooks = registry(cfg, runner.clone());
+    let event = HookEvent::named("Notification");
+    assert_eq!(hooks.configured_events(), vec![HookEvent::Stop, event]);
+
+    let payload = hooks.payload(event, Some("s1"), json!({ "message": "idle" }));
+    let out = hooks.run_blocking(event, &["idle"], &payload);
+
+    assert_eq!(out, HookOutcome::blocked("quiet hours"));
+    assert_eq!(runner.seen()[0].1["hook_event_name"], "Notification");
+    assert_eq!(runner.seen()[0].1["message"], "idle");
+}
+
+/// Answers an entry with the value of one of its own fields.
+struct EchoField(&'static str);
+
+impl HookRunner for EchoField {
+    fn run(&self, cmd: &HookCommand, _: &str, _: &Path) -> Result<Exited, HookError> {
+        let text = cmd.extra.get(self.0).and_then(Value::as_str).unwrap_or("");
+        Ok(exit(0, &warn_json(text), ""))
+    }
+}
+
+#[test]
+fn an_entry_type_is_answered_by_the_runner_installed_for_it() {
+    let text = r#"{"hooks": {"PreToolUse": [{"hooks": [
+        {"type": "webhook", "url": "https://hooks.example/guard"}
+    ]}]}}"#;
+    let cfg = policy::parse_settings_hooks("t", text).unwrap();
+    let runners = Arc::new(Runners::with_shell());
+    runners.install("webhook", Arc::new(EchoField("url")));
+    let hooks = registry(cfg.clone(), Arc::new(DispatchRunner::new(runners.clone())));
+
+    let out = hooks.run(HookEvent::PreToolUse, &["Bash"], &json!({}));
+    assert_eq!(out.context, vec!["https://hooks.example/guard".to_string()]);
+
+    runners.install("webhook", Arc::new(EchoField("type")));
+    let out = hooks.run(HookEvent::PreToolUse, &["Bash"], &json!({}));
+    assert_eq!(
+        out.context,
+        Vec::<String>::new(),
+        "the later install answers"
+    );
+}
+
+/// Hears the events in `events`, answering each with `answer` and keeping
+/// every payload it was handed.
+struct ScriptedListener {
+    events: Vec<&'static str>,
+    answer: Result<Exited, HookError>,
+    heard: Mutex<Vec<Value>>,
+}
+
+impl ScriptedListener {
+    fn hearing(events: Vec<&'static str>, answer: Result<Exited, HookError>) -> Arc<Self> {
+        Arc::new(Self {
+            events,
+            answer,
+            heard: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+impl HookListener for ScriptedListener {
+    fn listens(&self, event: &str) -> bool {
+        self.events.contains(&event)
+    }
+
+    fn hear(&self, _: &str, payload: &str) -> Vec<Result<Exited, HookError>> {
+        self.heard
+            .lock()
+            .unwrap()
+            .push(serde_json::from_str(payload).unwrap());
+        vec![self.answer.clone()]
+    }
+}
+
+fn listening(listener: Arc<dyn HookListener>) -> Arc<Listeners> {
+    let listeners = Listeners::default();
+    listeners.install("scripted", listener);
+    Arc::new(listeners)
+}
+
+#[test]
+fn a_listener_answers_an_open_event_with_no_entry_configured() {
+    let listener = ScriptedListener::hearing(
+        vec!["Notification", "PreToolUse"],
+        Ok(exit(0, &warn_json("heard it"), "")),
+    );
+    let hooks = CommandHooks::new(HooksConfig::new(), PathBuf::from("/proj"), dispatch(None))
+        .with_listeners(listening(listener.clone()));
+    let event = HookEvent::named("Notification");
+
+    let payload = hooks.payload(event, None, json!({ "message": "idle" }));
+    let out = hooks.run_blocking(event, &[], &payload);
+
+    assert_eq!(out.context_text().as_deref(), Some("heard it"));
+    assert_eq!(listener.heard.lock().unwrap()[0]["message"], "idle");
+}
+
+#[test]
+fn a_listener_never_hears_the_events_dirge_fires_itself() {
+    let listener = ScriptedListener::hearing(
+        vec!["PreToolUse"],
+        Ok(exit(2, "", "listener must not decide this")),
+    );
+    let runner = ScriptedRunner::answering(vec![]);
+    let hooks = CommandHooks::new(
+        config(&[(HookEvent::PreToolUse, None, &["guard"])]),
+        PathBuf::from("/proj"),
+        runner.clone(),
+    )
+    .with_listeners(listening(listener.clone()));
+
+    let out = hooks.run(HookEvent::PreToolUse, &["Bash"], &json!({}));
+
+    assert_eq!(out, HookOutcome::default());
+    assert_eq!(runner.seen().len(), 1);
+    assert!(listener.heard.lock().unwrap().is_empty());
+}
+
+#[test]
+fn entries_and_listeners_of_an_open_event_fold_into_one_outcome() {
+    let listener = ScriptedListener::hearing(
+        vec!["Notification"],
+        Ok(exit(0, &deny_json("listener says no"), "")),
+    );
+    let mut cfg = HooksConfig::new();
+    cfg.insert(
+        "Notification".into(),
+        vec![HookMatcher {
+            matcher: None,
+            hooks: vec![cmd("note")],
+        }],
+    );
+    let runner = ScriptedRunner::answering(vec![("note", Ok(exit(0, &warn_json("noted"), "")))]);
+    let hooks =
+        CommandHooks::new(cfg, PathBuf::from("/proj"), runner).with_listeners(listening(listener));
+
+    let out = hooks.run(HookEvent::named("Notification"), &[], &json!({}));
+
+    assert_eq!(out.block.as_deref(), Some("listener says no"));
+    assert_eq!(out.context, vec!["noted".to_string()]);
 }
 
 #[test]
