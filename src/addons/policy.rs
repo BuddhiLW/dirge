@@ -342,6 +342,18 @@ pub fn texts(replies: &[HookReply]) -> Vec<String> {
         .collect()
 }
 
+/// The first `{:summary text}` answer that `valid` accepts. Failed hooks,
+/// nil, and summaries `valid` rejects are passed over, so the next addon,
+/// and at last dirge's own summarizer, get their turn.
+pub fn summary(replies: &[HookReply], valid: impl Fn(&str) -> bool) -> Option<String> {
+    replies
+        .iter()
+        .filter_map(|r| r.result.as_ref().ok())
+        .filter_map(|v| v.get("summary").and_then(Value::as_str))
+        .find(|s| valid(s))
+        .map(str::to_string)
+}
+
 /// Fold `BeforeToolCall` replies: the first block wins and stops the fold,
 /// contexts accumulate, the last `args` replacement wins.
 pub fn fold_before(replies: &[HookReply]) -> BeforeOutcome {

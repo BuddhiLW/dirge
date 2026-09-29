@@ -9,6 +9,7 @@
 
 pub mod cljrs;
 pub mod command_hooks;
+pub mod compaction;
 pub mod discovery;
 pub mod domain;
 pub mod events;
