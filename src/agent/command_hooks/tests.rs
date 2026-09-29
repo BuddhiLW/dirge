@@ -575,6 +575,41 @@ fn entries_and_listeners_of_an_open_event_fold_into_one_outcome() {
 }
 
 #[test]
+fn an_open_event_reaches_a_listener_when_no_hook_is_configured() {
+    let listener =
+        ScriptedListener::hearing(vec!["PreCompact"], Ok(exit(0, &warn_json("heard it"), "")));
+    let listeners = listening(listener.clone());
+    let hooks = super::open_registry(None, &listeners, || {
+        Arc::new(
+            CommandHooks::new(HooksConfig::new(), PathBuf::from("/proj"), dispatch(None))
+                .with_listeners(listeners.clone()),
+        )
+    })
+    .expect("a registered listener opens the gate");
+    let event = HookEvent::named("PreCompact");
+
+    let payload = hooks.payload(event, None, json!({ "trigger": "auto" }));
+    let out = hooks.run_blocking(event, &[], &payload);
+
+    assert_eq!(out.context_text().as_deref(), Some("heard it"));
+    assert_eq!(listener.heard.lock().unwrap()[0]["trigger"], "auto");
+}
+
+#[test]
+fn the_open_event_gate_prefers_configured_hooks_and_is_shut_without_listeners() {
+    let unbuilt = || -> Arc<CommandHooks> { panic!("no empty registry is built") };
+    assert!(super::open_registry(None, &Listeners::default(), unbuilt).is_none());
+
+    let configured = registry(
+        config(&[(HookEvent::Stop, None, &["stop"])]),
+        ScriptedRunner::answering(vec![]),
+    );
+    let listeners = listening(ScriptedListener::hearing(vec![], Ok(exit(0, "", ""))));
+    let got = super::open_registry(Some(configured.clone()), &listeners, unbuilt).unwrap();
+    assert!(Arc::ptr_eq(&got, &configured));
+}
+
+#[test]
 fn payload_carries_claude_envelope() {
     let p = policy::payload(
         HookEvent::PreToolUse,

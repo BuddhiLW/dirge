@@ -66,16 +66,21 @@ impl HookBinding {
 }
 
 static GLOBAL: OnceLock<Arc<CommandHooks>> = OnceLock::new();
+static LISTENING: OnceLock<Arc<CommandHooks>> = OnceLock::new();
+
+fn project_dir() -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    crate::extras::dirge_paths::project_root(&cwd)
+}
 
 /// Install the process-wide registry from the loaded config. No-op when
 /// no hook is configured or a registry is already installed.
 pub fn install_from_config(cfg: &crate::config::Config) {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let home = dirs::home_dir();
     let hooks = CommandHooks::from_sources(
         cfg.hooks.as_ref(),
         cfg.claude_hooks.unwrap_or(false),
-        crate::extras::dirge_paths::project_root(&cwd),
+        project_dir(),
         home.as_deref(),
         Arc::new(boundary::DispatchRunner::live()),
     );
@@ -93,4 +98,35 @@ pub fn install_from_config(cfg: &crate::config::Config) {
 /// The installed registry, `None` when no hook is configured.
 pub fn global() -> Option<Arc<CommandHooks>> {
     GLOBAL.get().cloned()
+}
+
+/// The registry an open event ([`HookEvent::named`]) is fired on: the
+/// installed one, else, once a listener is registered (the addon host
+/// registers one), a registry with no entries, so the listeners hear it
+/// with no hook configured. `None` when neither exists. The loops keep
+/// [`global`]: this one has no entries for the events they fire.
+#[allow(dead_code)] // no seam fires an open event yet
+pub fn for_open_events() -> Option<Arc<CommandHooks>> {
+    open_registry(global(), &boundary::listeners(), || {
+        LISTENING
+            .get_or_init(|| {
+                Arc::new(CommandHooks::new(
+                    HooksConfig::new(),
+                    project_dir(),
+                    Arc::new(boundary::DispatchRunner::live()),
+                ))
+            })
+            .clone()
+    })
+}
+
+/// `configured` when hooks are, else `empty()` when some listener could
+/// hear an open event, else `None`. Listeners are checked at each call:
+/// the addon host registers its listener after the config is read.
+fn open_registry(
+    configured: Option<Arc<CommandHooks>>,
+    listeners: &boundary::Listeners,
+    empty: impl FnOnce() -> Arc<CommandHooks>,
+) -> Option<Arc<CommandHooks>> {
+    configured.or_else(|| (!listeners.is_empty()).then(empty))
 }
