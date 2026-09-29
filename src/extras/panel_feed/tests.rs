@@ -23,13 +23,25 @@ const TOKEN_QUERY: &str = "token=t0k%26en";
 #[test]
 fn reply_bodies_match_the_wire() {
     assert_eq!(
-        ReplyAction::Focus("w-1".into()).to_json(),
+        ReplyAction::verb_on("focus", "w-1").to_json(),
         r#"{"action":"focus","target":"w-1"}"#
     );
-    assert_eq!(ReplyAction::Unfocus.to_json(), r#"{"action":"unfocus"}"#);
-    assert_eq!(ReplyAction::NextTab.to_json(), r#"{"action":"next-tab"}"#);
-    assert_eq!(ReplyAction::PrevTab.to_json(), r#"{"action":"prev-tab"}"#);
-    assert_eq!(ReplyAction::Refresh.to_json(), r#"{"action":"refresh"}"#);
+    assert_eq!(
+        ReplyAction::verb("unfocus").to_json(),
+        r#"{"action":"unfocus"}"#
+    );
+    assert_eq!(
+        ReplyAction::verb("next-tab").to_json(),
+        r#"{"action":"next-tab"}"#
+    );
+    assert_eq!(
+        ReplyAction::verb("prev-tab").to_json(),
+        r#"{"action":"prev-tab"}"#
+    );
+    assert_eq!(
+        ReplyAction::verb("refresh").to_json(),
+        r#"{"action":"refresh"}"#
+    );
 }
 
 /// One request as the test server saw it.
@@ -223,7 +235,7 @@ async fn feed_routes_ops_cleans_up_reconnects_and_replies() {
         ]
     );
 
-    reply_to(&source, &ReplyAction::Focus("w-1".into()))
+    reply_to(&source, &ReplyAction::verb_on("focus", "w-1"))
         .await
         .expect("reply accepted");
 
@@ -298,7 +310,9 @@ async fn wrong_token_is_retried_and_reply_reports_status() {
             "GET /feed/events?token=wrong&features=spans%2Ckeys%2Ccursor%2Copen-file "
         ));
     }
-    let err = reply_to(&source, &ReplyAction::Refresh).await.unwrap_err();
+    let err = reply_to(&source, &ReplyAction::verb("refresh"))
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, super::client::ReplyError::Status(401)),
         "{err}"
@@ -319,13 +333,16 @@ mod reply_command {
 
     #[test]
     fn parses_every_verb() {
-        let ok = |args: &[&str]| ReplyAction::parse(args).expect("valid");
-        assert_eq!(ok(&["next"]), ReplyAction::NextTab);
-        assert_eq!(ok(&["next-tab"]), ReplyAction::NextTab);
-        assert_eq!(ok(&["prev"]), ReplyAction::PrevTab);
-        assert_eq!(ok(&["refresh"]), ReplyAction::Refresh);
-        assert_eq!(ok(&["unfocus"]), ReplyAction::Unfocus);
-        assert_eq!(ok(&["focus", "w-1"]), ReplyAction::Focus("w-1".into()));
+        let ok = |args: &[&str]| {
+            ReplyAction::parse_among(&crate::extras::panel_feed::default_verbs(), args)
+                .expect("valid")
+        };
+        assert_eq!(ok(&["next"]), ReplyAction::verb("next-tab"));
+        assert_eq!(ok(&["next-tab"]), ReplyAction::verb("next-tab"));
+        assert_eq!(ok(&["prev"]), ReplyAction::verb("prev-tab"));
+        assert_eq!(ok(&["refresh"]), ReplyAction::verb("refresh"));
+        assert_eq!(ok(&["unfocus"]), ReplyAction::verb("unfocus"));
+        assert_eq!(ok(&["focus", "w-1"]), ReplyAction::verb_on("focus", "w-1"));
     }
 
     #[test]
@@ -337,10 +354,13 @@ mod reply_command {
             &["focus", "a", "b"][..],
             &["next", "x"][..],
         ] {
-            let err = ReplyAction::parse(args).expect_err("invalid");
+            let err = ReplyAction::parse_among(&crate::extras::panel_feed::default_verbs(), args)
+                .expect_err("invalid");
             assert!(err.contains("usage: /panel"), "{args:?} -> {err}");
         }
-        let missing = ReplyAction::parse(&["focus"]).unwrap_err();
+        let missing =
+            ReplyAction::parse_among(&crate::extras::panel_feed::default_verbs(), &["focus"])
+                .unwrap_err();
         assert!(missing.contains("needs an item id"), "{missing}");
     }
 
@@ -363,15 +383,22 @@ mod reply_command {
             sent: Mutex::new(Vec::new()),
             answer: || Ok(()),
         };
-        assert!(send_reply(&t, ReplyAction::NextTab).await.is_none());
         assert!(
-            send_reply(&t, ReplyAction::Focus("x".into()))
+            send_reply(&t, ReplyAction::verb("next-tab"))
+                .await
+                .is_none()
+        );
+        assert!(
+            send_reply(&t, ReplyAction::verb_on("focus", "x"))
                 .await
                 .is_none()
         );
         assert_eq!(
             *t.sent.lock().unwrap(),
-            [ReplyAction::NextTab, ReplyAction::Focus("x".into())]
+            [
+                ReplyAction::verb("next-tab"),
+                ReplyAction::verb_on("focus", "x")
+            ]
         );
     }
 
@@ -381,7 +408,7 @@ mod reply_command {
             sent: Mutex::new(Vec::new()),
             answer: || Err(ReplyError::NotRunning),
         };
-        match send_reply(&not_running, ReplyAction::Refresh).await {
+        match send_reply(&not_running, ReplyAction::verb("refresh")).await {
             Some(Notification::Warn(m)) => {
                 assert!(m.contains("refresh") && m.contains("no panel feed"), "{m}")
             }
@@ -391,7 +418,7 @@ mod reply_command {
             sent: Mutex::new(Vec::new()),
             answer: || Err(ReplyError::Status(503)),
         };
-        match send_reply(&refused, ReplyAction::PrevTab).await {
+        match send_reply(&refused, ReplyAction::verb("prev-tab")).await {
             Some(Notification::Error(m)) => {
                 assert!(m.contains("prev-tab") && m.contains("503"), "{m}")
             }
@@ -402,12 +429,182 @@ mod reply_command {
     #[test]
     fn transport_errors_are_errors_and_escape_free() {
         let n = failure_notice(
-            &ReplyAction::NextTab,
+            &ReplyAction::verb("next-tab"),
             &ReplyError::Http("boom \u{1b}[31mred".into()),
         );
         match n {
             Notification::Error(m) => assert!(!m.contains('\u{1b}'), "{m:?}"),
             other => panic!("{other:?}"),
         }
+    }
+}
+
+mod reply_verbs {
+    use super::super::{
+        ReplyAction, ReplyVerb, Target, advertised_verbs, default_verbs, find_verb,
+        global_reply_among, usage,
+    };
+    use crate::extras::panel_feed::discovery::{parse_capabilities, parse_discovery};
+    use crate::ui::notifications::Notification;
+    use serde_json::json;
+
+    fn verb(name: &'static str, target: Target) -> ReplyVerb {
+        ReplyVerb {
+            name: name.into(),
+            target,
+        }
+    }
+
+    #[test]
+    fn global_keys_send_only_verbs_the_producer_accepts() {
+        assert_eq!(
+            global_reply_among(&default_verbs(), "next-tab").ok(),
+            Some(ReplyAction::verb("next-tab")),
+            "the defaults accept the global tab and refresh verbs"
+        );
+        let verbs = advertised_verbs(&["focus".into(), "refresh".into(), "pin".into()]);
+        assert_eq!(
+            global_reply_among(&verbs, "refresh").ok(),
+            Some(ReplyAction::verb("refresh"))
+        );
+        let Err(Notification::Warn(notice)) = global_reply_among(&verbs, "next-tab") else {
+            panic!("a verb the producer does not advertise must not be sent");
+        };
+        assert!(
+            notice.contains("'next-tab'") && notice.contains("pin"),
+            "{notice}"
+        );
+        assert!(
+            global_reply_among(&[verb("next-tab", Target::Required)], "next-tab").is_err(),
+            "a global key carries no target"
+        );
+    }
+
+    #[test]
+    fn verbs_are_opaque_names_on_the_wire() {
+        assert_eq!(
+            ReplyAction::verb("pin").to_json(),
+            r#"{"action":"pin"}"#,
+            "any producer verb serializes like the defaults"
+        );
+        assert_eq!(ReplyAction::verb_on("pin", "w-2").name(), "pin");
+    }
+
+    #[test]
+    fn checked_fits_the_target_to_the_verb() {
+        let verbs = [
+            verb("pin", Target::Required),
+            verb("clear", Target::None),
+            verb("mark", Target::Optional),
+        ];
+        let checked = |n, t| ReplyAction::checked(&verbs, n, t);
+        assert_eq!(
+            checked("pin", Some("a")),
+            Some(ReplyAction::verb_on("pin", "a"))
+        );
+        assert_eq!(checked("pin", None), None);
+        assert_eq!(checked("clear", Some("a")), None);
+        assert_eq!(
+            checked("mark", Some("a")),
+            Some(ReplyAction::verb_on("mark", "a"))
+        );
+        assert_eq!(checked("mark", None), Some(ReplyAction::verb("mark")));
+        assert_eq!(checked("focus", Some("a")), None, "not advertised");
+    }
+
+    #[test]
+    fn aliases_resolve_to_the_default_verbs() {
+        let verbs = default_verbs();
+        assert_eq!(
+            find_verb(&verbs, "next").map(|v| v.name.as_ref()),
+            Some("next-tab")
+        );
+        assert_eq!(
+            find_verb(&verbs, "prev").map(|v| v.name.as_ref()),
+            Some("prev-tab")
+        );
+        assert!(find_verb(&verbs, "pin").is_none());
+    }
+
+    #[test]
+    fn advertised_verbs_keep_known_arity_and_skip_invoke() {
+        let names: Vec<String> = ["focus", "refresh", "pin", "invoke", " "]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            advertised_verbs(&names),
+            vec![
+                verb("focus", Target::Required),
+                verb("refresh", Target::None),
+                verb("pin", Target::Optional),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_among_uses_the_advertised_verbs() {
+        let verbs = advertised_verbs(&["pin".to_string(), "refresh".to_string()]);
+        assert_eq!(
+            ReplyAction::parse_among(&verbs, &["pin", "w-1"]),
+            Ok(ReplyAction::verb_on("pin", "w-1"))
+        );
+        assert_eq!(
+            ReplyAction::parse_among(&verbs, &["pin"]),
+            Ok(ReplyAction::verb("pin"))
+        );
+        let err = ReplyAction::parse_among(&verbs, &["unfocus"]).unwrap_err();
+        assert!(err.contains("unknown /panel action 'unfocus'"), "{err}");
+        assert!(err.contains("pin [id]|refresh"), "{err}");
+        assert_eq!(usage(&default_verbs()), super::super::REPLY_USAGE);
+    }
+
+    #[test]
+    fn discovery_capabilities_are_read_for_version_1_only() {
+        use crate::extras::panel_feed::discovery::{AdvertisedKey, Capabilities};
+        let doc = |caps: serde_json::Value| {
+            parse_discovery(&json!({"url": "http://127.0.0.1:9", "capabilities": caps}).to_string())
+                .unwrap()
+                .capabilities
+        };
+        assert_eq!(
+            doc(json!({"version": 1, "replies": ["focus", "pin", 3, ""],
+                        "invokes": ["open"],
+                        "keys": {"p": "pin", "o": {"invoke": "open"}, "z": 7}})),
+            Some(Capabilities {
+                replies: Some(vec!["focus".to_string(), "pin".to_string()]),
+                invokes: vec!["open".to_string()],
+                keys: Some(vec![
+                    ("p".to_string(), AdvertisedKey::Reply("pin".to_string())),
+                    ("o".to_string(), AdvertisedKey::Invoke("open".to_string())),
+                ]),
+            })
+        );
+        assert_eq!(doc(json!({"version": 2, "replies": ["pin"]})), None);
+        assert_eq!(
+            doc(json!({"version": 1})),
+            Some(Capabilities::default()),
+            "version 1 with nothing advertised: every default"
+        );
+        assert_eq!(
+            parse_capabilities(&json!({"version": 1, "replies": "pin"})).map(|c| c.replies),
+            Some(None)
+        );
+        let plain = parse_discovery(r#"{"url":"http://127.0.0.1:9"}"#).unwrap();
+        assert_eq!(
+            plain.capabilities, None,
+            "no capabilities: today's defaults"
+        );
+    }
+
+    #[test]
+    fn chords_map_onto_grid_key_names() {
+        use crate::extras::panel_feed::grid_key;
+        assert_eq!(grid_key("enter").as_deref(), Some("Enter"));
+        assert_eq!(grid_key("tab").as_deref(), Some("Tab"));
+        assert_eq!(grid_key("shift-tab").as_deref(), Some("BackTab"));
+        assert_eq!(grid_key("backtab").as_deref(), Some("BackTab"));
+        assert_eq!(grid_key("u").as_deref(), Some("u"));
+        assert_eq!(grid_key("ctrl-x"), None, "the grid never sees Ctrl");
+        assert_eq!(grid_key("not a chord"), None);
     }
 }

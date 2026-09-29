@@ -127,6 +127,7 @@ pub async fn run(
         }
         let outcome = match discovery::resolve(&source) {
             Ok(ep) => {
+                super::set_advertised(ep.capabilities.clone());
                 connect_once(
                     &client,
                     &ep,
@@ -346,6 +347,7 @@ mod tests {
         let ep = Endpoint {
             url: "http://127.0.0.1:9/feed".into(),
             token: Some("a b&c".into()),
+            capabilities: None,
         };
         assert_eq!(
             endpoint_url(&ep, "events").unwrap().as_str(),
@@ -354,6 +356,7 @@ mod tests {
         let bare = Endpoint {
             url: "http://127.0.0.1:9".into(),
             token: None,
+            capabilities: None,
         };
         assert_eq!(
             endpoint_url(&bare, "reply").unwrap().as_str(),

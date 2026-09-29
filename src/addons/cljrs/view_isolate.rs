@@ -148,8 +148,8 @@ mod tests {
 
             let u = cljrs
                 .step(&feed(json!({
-                    "op": "ui/show-panel", "panel/id": "cf",
-                    "doc": {"doc/title": "Flow"},
+                    "op": "show", "id": "cf",
+                    "title": "Flow",
                     "lines": [
                         {"text": "Flow", "face": "title"},
                         {"text": "", "face": "plain"},
@@ -175,16 +175,14 @@ mod tests {
             );
 
             let u = cljrs
-                .step(&feed(
-                    json!({"op": "ui/focus-tab", "panel/id": "log", "title": "Log"}),
-                ))
+                .step(&feed(json!({"op": "focus", "id": "log", "title": "Log"})))
                 .unwrap();
             assert!(matches!(
                 &u.effects[..],
                 [ViewEffect::Paint { id, tail: true, focus: true, .. }] if id == "log"
             ));
             let u = cljrs
-                .step(&feed(json!({"op": "ui/append-tab", "panel/id": "log",
+                .step(&feed(json!({"op": "append", "id": "log",
                                    "line": {"text": "x", "face": "warn"}})))
                 .unwrap();
             assert!(matches!(
@@ -194,13 +192,13 @@ mod tests {
 
             let u = cljrs
                 .step(&feed(
-                    json!({"op": "ui/notify", "message": "hi", "level": "warning"}),
+                    json!({"op": "notify", "message": "hi", "level": "warning"}),
                 ))
                 .unwrap();
             assert_eq!(u.effects, vec![ViewEffect::notify(NoticeLevel::Warn, "hi")]);
             assert!(
                 cljrs
-                    .step(&feed(json!({"op": "ui/teleport"})))
+                    .step(&feed(json!({"op": "teleport"})))
                     .unwrap()
                     .effects
                     .is_empty(),
@@ -298,7 +296,7 @@ mod tests {
         on_isolate_stack(|| {
             let mut r = CljrsReducer::boot().unwrap();
             let u = r
-                .step(&feed(json!({"op":"ui/show-panel", "panel/id":"lens",
+                .step(&feed(json!({"op":"show", "id":"lens",
                 "cursor":true, "keys":{"n":"next", "Enter":"open"},
                 "payload":{"scope":"lens"},
                 "lines":[{"text":"alpha", "id":"a"}, {"text":"beta", "id":"b", "payload":{"file":"x"}}]})))
@@ -364,7 +362,8 @@ mod tests {
                 })
                 .unwrap();
             assert!(u.effects.is_empty());
-            for name in ["open-file", "ui/open-file"] {
+            {
+                let name = "open-file";
                 let u = r
                     .step(&feed(
                         json!({"op":name, "path":"src/lib.rs", "line":9, "diff":"+hi"}),
@@ -389,13 +388,11 @@ mod tests {
             let mut cljrs = CljrsReducer::boot().unwrap();
             for i in 0..16 {
                 cljrs
-                    .step(&feed(
-                        json!({"op": "ui/show-panel", "panel/id": format!("p{i}")}),
-                    ))
+                    .step(&feed(json!({"op": "show", "id": format!("p{i}")})))
                     .unwrap();
             }
             let u = cljrs
-                .step(&feed(json!({"op": "ui/show-panel", "panel/id": "new"})))
+                .step(&feed(json!({"op": "show", "id": "new"})))
                 .unwrap();
             assert_eq!(u.effects[0], ViewEffect::Unpaint { id: "p0".into() });
             assert!(matches!(&u.effects[1], ViewEffect::Paint { id, .. } if id == "new"));

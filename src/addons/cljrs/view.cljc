@@ -68,37 +68,40 @@
 ;; ---------------------------------------------------------------------------
 ;; /panel
 
-(def reply-usage "usage: /panel next|prev|refresh|unfocus|focus <id>")
-
-(def reply-verbs
-  {"next" "next-tab" "next-tab" "next-tab"
-   "prev" "prev-tab" "prev-tab" "prev-tab"
-   "refresh" "refresh" "unfocus" "unfocus"})
+(def verb-aliases
+  "Short names `/panel` accepts for a producer verb."
+  {"next" "next-tab" "prev" "prev-tab"})
 
 (def panel-modes
   "Mode word -> which side panels it sets."
   {"on" :both "off" :both "auto" :both "debug" :right})
 
+(defn find-verb
+  "The producer verb named `name` (after aliases), or nil."
+  [replies name]
+  (let [n (get verb-aliases name name)]
+    (first (filter #(= n (:name %)) replies))))
+
 (defn parse-reply
-  "[:ok reply-effect] or [:err message]."
-  [args]
-  (let [verb (if (seq args) (str/trim (first args)) "")
-        more (vec (rest args))]
+  "[:ok reply-effect] or [:err message], among the verbs the producer
+   accepts (`:producer` in the state, told by a `producer` event)."
+  [producer args]
+  (let [usage  (:usage producer)
+        name   (if (seq args) (str/trim (first args)) "")
+        more   (vec (rest args))
+        verb   (find-verb (:replies producer) name)
+        target (:target verb)
+        one    (when (= 1 (count more)) (str/trim (first more)))]
     (cond
-      (= verb "focus")
-      (cond
-        (and (= 1 (count more)) (not (str/blank? (first more))))
-        [:ok (reply "focus" (str/trim (first more)))]
-        (empty? more) [:err (str "/panel focus needs an item id (" reply-usage ")")]
-        :else         [:err (str "/panel focus takes one id (" reply-usage ")")])
-
-      (contains? reply-verbs verb)
-      (if (empty? more)
-        [:ok (reply (get reply-verbs verb))]
-        [:err (str "/panel " verb " takes no argument (" reply-usage ")")])
-
-      (= verb "") [:err reply-usage]
-      :else       [:err (str "unknown /panel action '" verb "' (" reply-usage ")")])))
+      (= name "") [:err usage]
+      (nil? verb) [:err (str "unknown /panel action '" name "' (" usage ")")]
+      (and (contains? #{"required" "optional"} target) one (not (str/blank? one)))
+      [:ok (reply (:name verb) one)]
+      (and (= target "required") (empty? more))
+      [:err (str "/panel " name " needs an item id (" usage ")")]
+      (empty? more) [:ok (reply (:name verb))]
+      (= target "none") [:err (str "/panel " name " takes no argument (" usage ")")]
+      :else [:err (str "/panel " name " takes one id (" usage ")")])))
 
 (defn panel-cmd
   [state args]
@@ -111,7 +114,7 @@
       [state [{:op :panel-mode :scope (get panel-modes arg) :mode arg} status]]
 
       :else
-      (let [[tag v] (parse-reply args)]
+      (let [[tag v] (parse-reply (:producer state) args)]
         (if (= tag :ok)
           [state [v (notify :info (str "panel reply '" (:action v) "' requested"))]]
           [state [(notify :error (str v " (display modes: on|off|auto|debug)"))]])))))
@@ -198,10 +201,9 @@
 
 (def cell-actions
   "Cell kind -> verb -> (fn [state id] [state' effects]). Opening or
-   messaging a subagent leaves the grid, so it closes it. A verb a kind
-   does not list means nothing on that kind of cell."
-  {"panel" {:focus   (fn [state id] [state [(reply "focus" id)]])}
-   "agent" {:focus   (fn [state id] [(assoc state :swarm nil) [{:op :open-agent :id id}]])
+   messaging a subagent leaves the grid, so it closes it. A panel cell
+   has none: its keys are the producer's (`producer-key`)."
+  {"agent" {:focus   (fn [state id] [(assoc state :swarm nil) [{:op :open-agent :id id}]])
             :message (fn [state id] [(assoc state :swarm nil) [{:op :message-agent :id id}]])}})
 
 (defn on-cell
@@ -215,19 +217,17 @@
         [state []]))))
 
 (def grid-verbs
-  "Verb -> (fn [state grid arg] [state' effects])."
+  "Verb -> (fn [state grid arg] [state' effects]). Only dirge's own
+   actions; the producer's come with a `producer` event."
   {:close   (fn [state _ _] [(assoc state :swarm nil) []])
-   :reply   (fn [state _ action] [state [(reply action)]])
    :focus   (on-cell :focus)
    :message (on-cell :message)
    :move    (fn [state g dir] [(select-at state g ((get moves dir) g)) []])
    :nth     (fn [state g i] [(if (< i (:n g)) (select-at state g i) state) []])})
 
 (def grid-keymap
-  "Key name -> [verb arg] while the grid is open."
+  "Key name -> [verb arg] while the grid is open: dirge's own keys."
   {"Esc" [:close] "q" [:close]
-   "Tab" [:reply "next-tab"] "BackTab" [:reply "prev-tab"]
-   "r" [:reply "refresh"] "u" [:reply "unfocus"]
    "Enter" [:focus] "m" [:message]
    "Left" [:move :left] "h" [:move :left]
    "Right" [:move :right] "l" [:move :right]
@@ -237,13 +237,45 @@
    "1" [:nth 0] "2" [:nth 1] "3" [:nth 2] "4" [:nth 3] "5" [:nth 4]
    "6" [:nth 5] "7" [:nth 6] "8" [:nth 7] "9" [:nth 8]})
 
+(defn producer-key
+  "The reply the producer binds to grid `key` on the selected `cell`: a
+   verb that names an item names the selected panel, and an invoke needs
+   one."
+  [state key cell]
+  (let [producer (:producer state)
+        binding  (first (filter #(= key (:key %)) (:keys producer)))
+        panel    (when (= "panel" (:kind cell)) (:id cell))]
+    (cond
+      (nil? binding) [state []]
+
+      (:invoke binding)
+      (if panel
+        [state [{:op :reply :action "invoke"
+                 :payload {:panel panel :verb (:verb binding) :row nil :payload {}}}]]
+        [state []])
+
+      :else
+      (let [verb   (first (filter #(= (:verb binding) (:name %)) (:replies producer)))
+            target (or (:target verb) "none")]
+        (cond
+          (= target "none")                        [state [(reply (:verb binding))]]
+          (and (= target "required") (nil? panel)) [state []]
+          panel                                    [state [(reply (:verb binding) panel)]]
+          :else                                    [state [(reply (:verb binding))]])))))
+
 (defn grid-step
+  "A dirge key runs its verb, except Enter on a panel cell; that key and
+   any other go to the producer's bindings."
   [state event]
-  (let [[verb arg] (get grid-keymap (:key event))
-        f          (get grid-verbs verb)]
-    (if (or (nil? (:swarm state)) (nil? f))
-      [state []]
-      (f state (grid-of state event) arg))))
+  (if (nil? (:swarm state))
+    [state []]
+    (let [g          (grid-of state event)
+          cell       (get (:cells g) (:cur g))
+          [verb arg] (get grid-keymap (:key event))
+          f          (get grid-verbs verb)]
+      (if (or (nil? f) (and (= verb :focus) (= "panel" (:kind cell))))
+        (producer-key state (:key event) cell)
+        (f state g arg)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Registries and entry points
@@ -268,18 +300,21 @@
 
 (def events
   "Event type -> (fn [state event] [state' effects])."
-  {"init"    (fn [state _] [state []])
-   "command" command-step
-   "grid"    grid-step
-   "feed"    feed-step
-   "key"     (fn [state event]
-               (let [[p effects] (panels/key-step (:panels state) event)]
-                 [(assoc state :panels p) effects]))})
+  {"init"     (fn [state _] [state []])
+   "command"  command-step
+   "grid"     grid-step
+   "feed"     feed-step
+   "producer" (fn [state event]
+                [(assoc state :producer (select-keys event [:replies :keys :usage])) []])
+   "key"      (fn [state event]
+                (let [[p effects] (panels/key-step (:panels state) event)]
+                  [(assoc state :panels p) effects]))})
 
 (defn model
   [state]
   {:swarm         (when-let [s (:swarm state)] {:selected (:selected s)})
-   :grid_keys     (vec (sort (keys grid-keymap)))
+   :grid_keys     (vec (sort (distinct (concat (keys grid-keymap)
+                                               (map :key (:keys (:producer state)))))))
    :panel_keys    (panels/panel-keys (:panels state))
    :view_commands (vec (sort (keys commands)))
    :owns_feed     true})
@@ -291,7 +326,9 @@
     (f state event)
     [state [(notify :error (str "unknown view event: " (:type event)))]]))
 
-(def state (atom {:swarm nil :panels panels/empty-state}))
+(def state (atom {:swarm nil
+                  :panels panels/empty-state
+                  :producer {:replies [] :keys [] :usage ""}}))
 
 (defn dispatch!
   "Fold `event` into the view state; {:model :effects}."

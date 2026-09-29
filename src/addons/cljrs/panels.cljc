@@ -148,16 +148,13 @@
 
 (defn panel-id
   [op]
-  (let [id (or (get op :panel/id) (:id op))]
+  (let [id (:id op)]
     (when (and (string? id) (not (str/blank? id)))
       id)))
 
 (defn title-of
   [op id]
-  (or (:title op)
-      (get (:doc op) :doc/title)
-      (:title (:doc op))
-      id))
+  (or (:title op) id))
 
 (defn clamp-offset
   [p]
@@ -346,15 +343,15 @@
 
 (def ops
   "Feed op name -> (fn [state op] [state' effects]). An op not listed
-   is ignored: a newer producer never breaks the view."
-  {"ui/show-panel"  show-panel
-   "ui/close-panel" close-panel
-   "ui/focus-tab"   focus-tab
-   "ui/append-tab"  append-tab
-   "ui/notify"      notify
-   "open-file"      open-file
-   "ui/open-file"   open-file
-   "feed/ended"     feed-ended})
+   is ignored: a newer producer never breaks the view. Names are the
+   neutral ones; core renames a producer's dialect before it gets here."
+  {"show"       show-panel
+   "close"      close-panel
+   "focus"      focus-tab
+   "append"     append-tab
+   "notify"     notify
+   "open-file"  open-file
+   "feed/ended" feed-ended})
 
 (defn step
   "[state' effects] for one feed `op`."

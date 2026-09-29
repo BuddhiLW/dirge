@@ -85,7 +85,7 @@ pub fn grid_event(name: String, cells: Vec<GridCell>, columns: usize) -> ViewEve
 
 /// Generic file-open feed op, independent of the panel producer's schema.
 pub fn open_file_effect(op: &serde_json::Value) -> Option<super::domain::ViewEffect> {
-    if !matches!(op.get("op")?.as_str()?, "open-file" | "ui/open-file") {
+    if op.get("op")?.as_str()? != "open-file" {
         return None;
     }
     Some(super::domain::ViewEffect::OpenFile {
@@ -173,7 +173,7 @@ mod tests {
         use serde_json::json;
         assert_eq!(
             open_file_effect(
-                &json!({"op":"ui/open-file", "path":"src/main.rs", "line":7, "diff":"+x"})
+                &json!({"op":"open-file", "path":"src/main.rs", "line":7, "diff":"+x"})
             ),
             Some(super::super::domain::ViewEffect::OpenFile {
                 path: "src/main.rs".into(),
@@ -190,9 +190,8 @@ mod tests {
             })
         );
         assert_eq!(open_file_effect(&json!({"op":"open-file"})), None);
-        assert_eq!(open_file_effect(&json!({"op":"ui/open-file"})), None);
         assert_eq!(
-            open_file_effect(&json!({"op":"ui/notify", "path":"src/main.rs"})),
+            open_file_effect(&json!({"op":"notify", "path":"src/main.rs"})),
             None
         );
     }

@@ -12,15 +12,12 @@ use super::*;
 #[test]
 fn native_feed_open_file_is_generic() {
     let mut r = NativeReducer::default();
+    // Through the feed's intake, which renames the hive-vessel alias.
     for name in ["open-file", "ui/open-file"] {
+        let data = serde_json::json!({"op":name, "path":"src/main.rs", "line":4}).to_string();
+        let event = crate::extras::panel_feed::ops::feed_event(&data).expect("an object");
         assert_eq!(
-            run(
-                &mut r,
-                ViewEvent::Feed {
-                    op: serde_json::json!({"op":name, "path":"src/main.rs", "line":4})
-                }
-            )
-            .effects,
+            run(&mut r, event).effects,
             vec![ViewEffect::OpenFile {
                 path: "src/main.rs".into(),
                 line: Some(4),
@@ -74,6 +71,9 @@ pub(crate) fn parity_script() -> Vec<ViewEvent> {
     let ids = ["a", "b", "c", "d", "e"];
     let mixed = || vec![panel("a"), agent("t1"), agent("t2")];
     vec![
+        // The engine hears what the producer accepts before anything else
+        // (the defaults: no feed advertised).
+        crate::extras::panel_feed::producer_event(None),
         ViewEvent::Init,
         cmd("swarm", &[]),
         cmd("swarm", &["on"]),
@@ -132,7 +132,97 @@ pub(crate) fn parity_script() -> Vec<ViewEvent> {
         cmd("display", &["center"]),
         cmd("display", &["|"]),
         cmd("quit", &[]),
+        // A producer that advertises its own verbs and keys.
+        custom_producer(),
+        cmd("swarm", &["on"]),
+        grid("p", &ids, 3),
+        grid("o", &ids, 3),
+        grid("Enter", &ids, 3),
+        grid("Tab", &ids, 3),
+        grid_over("End", mixed(), 2),
+        grid_over("p", mixed(), 2),
+        grid_over("o", mixed(), 2),
+        grid_over("Enter", mixed(), 2),
+        cmd("swarm", &["on"]),
+        grid("p", &[], 1),
+        grid("o", &[], 1),
+        cmd("panel", &["pin"]),
+        cmd("panel", &["pin", "a"]),
+        cmd("panel", &["pin", "a", "b"]),
+        cmd("panel", &["unfocus"]),
+        cmd("panel", &["focus"]),
+        cmd("panel", &[]),
+        cmd("panel", &["zap"]),
+        cmd("swarm", &["off"]),
     ]
+}
+
+/// A producer advertising `pin` (optional target), `focus` and an
+/// invoke, bound to p, o and Enter, and no longer `next-tab`.
+pub(crate) fn custom_producer() -> ViewEvent {
+    use crate::extras::panel_feed::discovery::{AdvertisedKey, Capabilities};
+    let caps = Capabilities {
+        replies: Some(vec!["pin".into(), "focus".into(), "invoke".into()]),
+        invokes: vec!["open".into()],
+        keys: Some(vec![
+            ("p".into(), AdvertisedKey::Reply("pin".into())),
+            ("o".into(), AdvertisedKey::Invoke("open".into())),
+            ("enter".into(), AdvertisedKey::Reply("focus".into())),
+            ("tab".into(), AdvertisedKey::Reply("next-tab".into())),
+            ("ctrl-x".into(), AdvertisedKey::Reply("pin".into())),
+            ("x".into(), AdvertisedKey::Invoke("nope".into())),
+        ]),
+    };
+    crate::extras::panel_feed::producer_event(Some(&caps))
+}
+
+#[test]
+fn a_producer_binds_its_own_keys_and_verbs() {
+    let mut r = NativeReducer::default();
+    let u = run(&mut r, custom_producer());
+    assert!(u.model.grid_consumes("p") && u.model.grid_consumes("o"));
+    assert!(!u.model.grid_consumes("Tab"), "next-tab is not advertised");
+    assert!(
+        !u.model.grid_consumes("x"),
+        "invoke of an unadvertised verb"
+    );
+    run(&mut r, cmd("swarm", &["on"]));
+    let ids = ["a", "b"];
+    assert_eq!(
+        run(&mut r, grid("p", &ids, 2)).effects,
+        vec![ViewEffect::Reply {
+            action: "pin".into(),
+            target: Some("a".into()),
+            payload: None
+        }]
+    );
+    assert_eq!(
+        run(&mut r, grid("o", &ids, 2)).effects,
+        vec![ViewEffect::Reply {
+            action: "invoke".into(),
+            target: None,
+            payload: Some(
+                serde_json::json!({"panel": "a", "verb": "open", "row": null, "payload": {}})
+            )
+        }]
+    );
+    assert!(run(&mut r, grid("Tab", &ids, 2)).effects.is_empty());
+    // An optional verb goes out without a panel selected; an invoke does not.
+    assert_eq!(
+        run(&mut r, grid("p", &[], 1)).effects,
+        vec![ViewEffect::Reply {
+            action: "pin".into(),
+            target: None,
+            payload: None
+        }]
+    );
+    assert!(run(&mut r, grid("o", &[], 1)).effects.is_empty());
+    let u = run(&mut r, cmd("panel", &["unfocus"]));
+    assert!(matches!(
+        &u.effects[0],
+        ViewEffect::Notify { level: NoticeLevel::Error, text }
+            if text.contains("unknown /panel action 'unfocus'") && text.contains("pin [id]|focus <id>")
+    ));
 }
 
 #[test]

@@ -7,10 +7,11 @@
 //! row, never an edit to a match.
 
 use super::domain::{
-    GridCell, NoticeLevel, PanelScope, SwarmModel, ViewEffect, ViewEvent, ViewModel, ViewUpdate,
+    GridCell, NoticeLevel, PanelScope, ProducerKey, ProducerVerb, ReplyTarget, SwarmModel,
+    ViewEffect, ViewEvent, ViewModel, ViewUpdate,
 };
 use super::port::Reducer;
-use crate::extras::panel_feed::ReplyAction;
+use crate::extras::panel_feed::{ReplyAction, ReplyVerb};
 use crate::ui::renderer::parse_display_spec;
 use crate::ui::swarm::SwarmCmd;
 
@@ -40,18 +41,18 @@ enum Move {
 /// cell's kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CellVerb {
-    /// A panel: reply `focus`. A subagent: open its chat tab.
+    /// A subagent: open its chat tab. A panel: whatever the producer
+    /// binds to the key.
     Focus,
     /// A subagent: start a `/msg` to it. Nothing on a panel.
     Message,
 }
 
-/// What a grid key does.
+/// What a grid key does. Only dirge's own actions: the producer's are
+/// the [`ProducerKey`]s a [`ViewEvent::Producer`] brings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GridVerb {
     Close,
-    /// Reply to the producer with this wire action.
-    Reply(&'static str),
     OnCell(CellVerb),
     Move(Move),
     /// Select the cell at this index (paint order).
@@ -62,10 +63,6 @@ enum GridVerb {
 const GRID_KEYMAP: &[(&str, GridVerb)] = &[
     ("Esc", GridVerb::Close),
     ("q", GridVerb::Close),
-    ("Tab", GridVerb::Reply("next-tab")),
-    ("BackTab", GridVerb::Reply("prev-tab")),
-    ("r", GridVerb::Reply("refresh")),
-    ("u", GridVerb::Reply("unfocus")),
     ("Enter", GridVerb::OnCell(CellVerb::Focus)),
     ("m", GridVerb::OnCell(CellVerb::Message)),
     ("Left", GridVerb::Move(Move::Left)),
@@ -137,10 +134,26 @@ impl<'a> Grid<'a> {
     }
 }
 
-/// View state: `Some` while the swarm grid is open.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// View state: `Some` while the swarm grid is open, and what the panel
+/// producer accepts.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeReducer {
     swarm: Option<SwarmModel>,
+    replies: Vec<ProducerVerb>,
+    keys: Vec<ProducerKey>,
+}
+
+impl Default for NativeReducer {
+    /// Closed, with the producer defaults (as if no feed advertised).
+    fn default() -> Self {
+        let mut reducer = Self {
+            swarm: None,
+            replies: Vec::new(),
+            keys: Vec::new(),
+        };
+        reducer.producer(&crate::extras::panel_feed::producer_event(None));
+        reducer
+    }
 }
 
 impl Reducer for NativeReducer {
@@ -155,6 +168,7 @@ impl Reducer for NativeReducer {
             } => self.grid(key, cells, *columns),
             ViewEvent::Feed { op } => super::promote::open_file_effect(op).into_iter().collect(),
             ViewEvent::Key { .. } => Vec::new(),
+            ViewEvent::Producer { .. } => self.producer(event),
         };
         Ok(ViewUpdate {
             model: self.model(),
@@ -185,7 +199,16 @@ impl NativeReducer {
     pub fn model(&self) -> ViewModel {
         ViewModel {
             swarm: self.swarm.clone(),
-            grid_keys: sorted(GRID_KEYMAP.iter().map(|(k, _)| *k)),
+            grid_keys: {
+                let mut keys = sorted(
+                    GRID_KEYMAP
+                        .iter()
+                        .map(|(k, _)| *k)
+                        .chain(self.keys.iter().map(|k| k.key.as_str())),
+                );
+                keys.dedup();
+                keys
+            },
             panel_keys: vec![],
             view_commands: sorted(COMMANDS.iter().map(|(n, _)| *n)),
             // The native view leaves feed ops to the UI's own decoder.
@@ -238,14 +261,10 @@ impl NativeReducer {
             "" => vec![ViewEffect::PanelStatus],
             "on" | "off" | "auto" => vec![mode(PanelScope::Both, arg), ViewEffect::PanelStatus],
             "debug" => vec![mode(PanelScope::Right, "debug"), ViewEffect::PanelStatus],
-            _ => match ReplyAction::parse(args) {
+            _ => match ReplyAction::parse_among(&self.reply_verbs(), args) {
                 Ok(action) => {
-                    let target = match &action {
-                        ReplyAction::Focus(id) => Some(id.clone()),
-                        _ => None,
-                    };
                     vec![
-                        reply(action.name(), target),
+                        reply(action.name(), action.target().map(str::to_owned)),
                         notify(
                             NoticeLevel::Info,
                             format!("panel reply '{}' requested", action.name()),
@@ -290,16 +309,21 @@ impl NativeReducer {
         let Some(swarm) = self.swarm.as_ref() else {
             return Vec::new();
         };
-        let Some(verb) = GRID_KEYMAP.iter().find(|(k, _)| *k == key).map(|(_, v)| *v) else {
-            return Vec::new();
-        };
         let grid = Grid::new(cells, swarm.selected.as_ref(), columns);
+        let local = GRID_KEYMAP.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
+        // A local verb wins, except Enter on a panel cell: that is the
+        // producer's.
+        let verb = match (local, grid.current()) {
+            (Some(GridVerb::OnCell(CellVerb::Focus)), Some(GridCell::Panel(_))) | (None, _) => {
+                return self.producer_key(key, grid.current());
+            }
+            (Some(verb), _) => verb,
+        };
         match verb {
             GridVerb::Close => {
                 self.swarm = None;
                 Vec::new()
             }
-            GridVerb::Reply(action) => vec![reply(action, None)],
             GridVerb::OnCell(verb) => self.on_cell(verb, grid.current()),
             GridVerb::Move(m) => {
                 self.select(grid.cell_at(grid.moved(m)));
@@ -318,7 +342,6 @@ impl NativeReducer {
     /// leaves the grid, so it closes it.
     fn on_cell(&mut self, verb: CellVerb, cell: Option<&GridCell>) -> Vec<ViewEffect> {
         match (verb, cell) {
-            (CellVerb::Focus, Some(GridCell::Panel(id))) => vec![reply("focus", Some(id.clone()))],
             (CellVerb::Focus, Some(GridCell::Agent(id))) => {
                 self.swarm = None;
                 vec![ViewEffect::OpenAgent { id: id.clone() }]
@@ -328,6 +351,60 @@ impl NativeReducer {
                 vec![ViewEffect::MessageAgent { id: id.clone() }]
             }
             _ => Vec::new(),
+        }
+    }
+
+    /// Take what the producer accepts from a [`ViewEvent::Producer`].
+    fn producer(&mut self, event: &ViewEvent) -> Vec<ViewEffect> {
+        if let ViewEvent::Producer { replies, keys, .. } = event {
+            self.replies = replies.clone();
+            self.keys = keys.clone();
+        }
+        Vec::new()
+    }
+
+    fn reply_verbs(&self) -> Vec<ReplyVerb> {
+        self.replies
+            .iter()
+            .map(|v| ReplyVerb {
+                name: v.name.clone().into(),
+                target: v.target,
+            })
+            .collect()
+    }
+
+    /// The reply the producer binds to grid `key`, on the selected
+    /// `cell`: a verb that names an item names the selected panel, and
+    /// an invoke needs one.
+    fn producer_key(&self, key: &str, cell: Option<&GridCell>) -> Vec<ViewEffect> {
+        let Some(binding) = self.keys.iter().find(|k| k.key == key) else {
+            return Vec::new();
+        };
+        let panel = match cell {
+            Some(GridCell::Panel(id)) => Some(id.clone()),
+            _ => None,
+        };
+        if binding.invoke {
+            return match panel {
+                Some(id) => vec![ViewEffect::Reply {
+                    action: "invoke".into(),
+                    target: None,
+                    payload: Some(serde_json::json!({
+                        "panel": id, "verb": binding.verb, "row": null, "payload": {}
+                    })),
+                }],
+                None => Vec::new(),
+            };
+        }
+        let target = self
+            .replies
+            .iter()
+            .find(|v| v.name == binding.verb)
+            .map_or(ReplyTarget::None, |v| v.target);
+        match (target, panel) {
+            (ReplyTarget::None, _) => vec![reply(&binding.verb, None)],
+            (ReplyTarget::Required, None) => Vec::new(),
+            (_, panel) => vec![reply(&binding.verb, panel)],
         }
     }
 
