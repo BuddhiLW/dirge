@@ -188,6 +188,33 @@
 ;; ---------------------------------------------------------------------------
 ;; Ops
 
+(def chord-names
+  "Wire chords to the names emitted by promote::key_name. Unsupported
+   modified chords cannot be claimed by the panel route."
+  {"enter" "Enter" "return" "Enter" "tab" "Tab"
+   "shift-tab" "BackTab" "backtab" "BackTab"
+   "esc" "Esc" "escape" "Esc"
+   "pgdn" "PgDn" "pagedown" "PgDn" "pagedn" "PgDn"
+   "pgup" "PgUp" "pageup" "PgUp"
+   "up" "Up" "down" "Down" "left" "Left" "right" "Right"
+   "home" "Home" "end" "End"})
+
+(defn normalize-panel-keys
+  "Pure conversion from capabilities chords and invoke declarations to
+   routable names and verbs. Bad entries are omitted."
+  [keys]
+  (into {}
+        (keep (fn [[chord declaration]]
+                (let [spelling (when (or (string? chord) (keyword? chord)) (str/trim (name chord)))
+                      name (when spelling
+                             (or (get chord-names (str/lower-case spelling))
+                                 (when (= 1 (count spelling)) spelling)))
+                      verb (if (string? declaration) declaration
+                               (when (map? declaration) (or (:invoke declaration) (get declaration "invoke"))))]
+                  (when (and name (string? verb) (not (str/blank? verb)))
+                    [name verb]))))
+        (if (map? keys) keys {})))
+
 (defn show-panel
   [state op]
   (if-let [id (panel-id op)]
@@ -201,14 +228,22 @@
           rows        (vec (take max-rows (drop dropped all-rows)))
           row-ids     (vec (take max-rows (drop dropped all-ids)))
           row-payloads (vec (take max-rows (drop dropped all-payloads)))
+          keys        (normalize-panel-keys (:keys op))
+          malformed   (when (map? (:keys op))
+                        (remove (fn [[chord declaration]]
+                                  (let [single (normalize-panel-keys {chord declaration})]
+                                    (seq single)))
+                                (:keys op)))
           state       (update-in state [:panels id]
                                  #(clamp-offset (assoc % :title title :rows rows :row-ids row-ids :row-payloads row-payloads
                                                          :payload (if (map? (:payload op)) (:payload op) {})
-                                                         :keys (if (map? (:keys op)) (:keys op) {})
+                                                         :keys keys
                                                          :cursor? (true? (:cursor op)) :tail false)))
-          state       (if (or (true? (:cursor op)) (seq (:keys op)))
+          state       (if (or (true? (:cursor op)) (seq keys))
                         (assoc state :focused id) state)]
-      [state (conj evs (paint state id))])
+      [state (cond-> (conj evs (paint state id))
+               (seq malformed) (conj {:op :notify :level :warn
+                                      :text "Ignoring malformed panel key declaration"}))])
     [state []]))
 
 (defn close-panel
