@@ -1015,7 +1015,8 @@ addon whose manifest is found in `.dirge/addons/` or `~/.config/dirge/addons/`.
 | `addons.enabled` | `true` | `false` loads no addons. |
 | `addons.paths` | `[]` | Extra directories searched for `META-INF/addons/*.edn`. |
 | `addons.source_paths` | `[]` | Extra source roots on the addon classpath, before `DIRGE_ADDON_PATH`. |
-| `addons.protocol_ns` | `hive-addon.protocol` | Namespace defining the IAddon protocol functions. |
+| `addons.protocol_ns` | manifests' `:addon/protocol-ns`, else `hive-addon.protocol` (embedded) | Namespace defining the IAddon protocol functions. |
+| `addons.manifest_dirs` | `[]` | Further directory names under `META-INF` holding manifests, beside `addons` and `hive-addons`. |
 
 Reference: [addons.md](addons.md).
 

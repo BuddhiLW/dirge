@@ -2,9 +2,10 @@
 
 dirge can host addons written in Clojure. They run on an embedded
 [clojurust](https://github.com/BuddhiLW/clojurust) interpreter, beside Janet
-plugins, and implement an `IAddon` protocol defined by a small Clojure
-library that dirge loads by namespace. Written as portable `.cljc`, the same
-addon also runs in any JVM host of that protocol.
+plugins, and implement hive-addon's `IAddon` protocol (`hive-addon.protocol`,
+MIT). dirge embeds that namespace unchanged, so an addon needs no protocol
+library on its source path. Written as portable `.cljc`, the same addon also
+runs in any JVM host of that protocol.
 
 Build with the feature enabled:
 
@@ -23,7 +24,8 @@ my-addon/
   resources/META-INF/addons/my-addon.edn
 ```
 
-dirge searches for `META-INF/addons/*.edn` manifests under:
+dirge searches for `META-INF/addons/*.edn` and `META-INF/hive-addons/*.edn`
+(hive-addon's own layout) manifests under:
 
 1. `<project>/.dirge/addons/`
 2. `~/.config/dirge/addons/`
@@ -34,8 +36,12 @@ A symlink to an addon checkout works in any of them.
 The addon's `src/` and `resources/` go on the interpreter's source path, plus
 the `src/` of every `:local/root` dependency named in its `deps.edn`
 (followed transitively). Anything else can be added with `addons.source_paths`
-or the `DIRGE_ADDON_PATH` environment variable (a `:`-separated list). The
+or the `DIRGE_ADDON_PATH` environment variable (a `:`-separated list). An
+addon on the embedded `hive-addon.protocol` needs nothing more; any other
 protocol library's source must be reachable one of these ways.
+
+Manifests in another directory under `META-INF` are read when that directory
+name is listed in `addons.manifest_dirs`.
 
 A manifest whose init namespace has no `.cljc` or `.cljrs` source on that path
 is skipped, so JVM-only addons can share a repository with portable ones.
@@ -45,17 +51,37 @@ is skipped, so JVM-only addons can share a repository with portable ones.
   "addons": {
     "enabled": true,
     "paths": ["~/src/my-addons"],
-    "source_paths": ["~/src/addon-protocol/src"],
-    "protocol_ns": "my.addon-protocol"
+    "manifest_dirs": ["other-host-addons"],
+    "source_paths": ["~/src/addon-protocol/src"]
   }
 }
 ```
 
 ## The protocol
 
-`addons.protocol_ns` names the namespace that defines the protocol. dirge
-resolves these functions from it at startup and refuses to start the host if
-a required one is missing:
+dirge binds one protocol namespace per run, chosen in this order:
+
+1. `addons.protocol_ns` in `config.json`
+2. the `:addon/protocol-ns` a manifest declares (the first one found, when
+   manifests disagree; the others are logged)
+3. `hive-addon.protocol`, embedded in dirge byte for byte from hive-addon
+
+```clojure
+(ns my-addon.core
+  (:require [hive-addon.protocol :as p]))
+
+(defrecord MyAddon []
+  p/IAddon
+  (addon-id [_] "my.addon")
+  (initialize! [_ _] {:success? true :errors []})
+  (shutdown! [_] {:success? true})
+  (tools [_] [])
+  (hooks [_] {})
+  (health [_] {:status :ok}))
+```
+
+dirge resolves these functions from the bound namespace at startup and
+refuses to start the host if a required one is missing:
 
 | Function | Required | Meaning |
 |---|---|---|
@@ -74,6 +100,9 @@ a required one is missing:
  :addon/init-fn "addon-ctor"
  :addon/config  {}}
 ```
+
+`:addon/protocol-ns` is optional: it names the protocol namespace the addon
+implements when that is not `hive-addon.protocol`.
 
 `init-fn` is called with `:addon/config` and must return an addon. dirge then
 calls `initialize!` with `{:addon/id … :addon/config … :dirge/host {…}}`.

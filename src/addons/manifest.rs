@@ -10,7 +10,9 @@
 //!
 //! `:addon/id` names the addon, `:addon/init-ns` is the namespace to load
 //! and `:addon/init-fn` the zero-argument constructor in it that returns
-//! the addon instance. Values may be written as symbols, strings or
+//! the addon instance. An optional `:addon/protocol-ns` names the IAddon
+//! protocol namespace the addon implements, when it is not the embedded
+//! `hive-addon.protocol`. Values may be written as symbols, strings or
 //! keywords. A qualified `:addon/init-fn` (`ns/fn`) is accepted as long as
 //! its namespace matches `:addon/init-ns`. Unknown keys are ignored so
 //! manifests can carry data for other hosts.
@@ -28,6 +30,8 @@ pub struct AddonManifest {
     pub init_ns: String,
     /// Unqualified name of the constructor var in `init_ns`.
     pub init_fn: String,
+    /// The IAddon protocol namespace the addon implements, when declared.
+    pub protocol_ns: Option<String>,
 }
 
 /// Why a manifest could not be used.
@@ -57,6 +61,7 @@ pub enum ManifestError {
 const KEY_ID: &str = "addon/id";
 const KEY_INIT_NS: &str = "addon/init-ns";
 const KEY_INIT_FN: &str = "addon/init-fn";
+const KEY_PROTOCOL_NS: &str = "addon/protocol-ns";
 
 impl AddonManifest {
     /// Parse a manifest from EDN source. `origin` labels read errors.
@@ -73,6 +78,7 @@ impl AddonManifest {
         let id = required(entries, KEY_ID)?;
         let init_ns = required(entries, KEY_INIT_NS)?;
         let init_fn_raw = required(entries, KEY_INIT_FN)?;
+        let protocol_ns = optional(entries, KEY_PROTOCOL_NS)?;
 
         let init_fn = match init_fn_raw.split_once('/') {
             Some((fn_ns, name)) if !fn_ns.is_empty() && !name.is_empty() => {
@@ -92,6 +98,7 @@ impl AddonManifest {
             id,
             init_ns,
             init_fn,
+            protocol_ns,
         })
     }
 
@@ -108,13 +115,20 @@ impl AddonManifest {
 /// Look up `key` (a keyword without the leading colon) in a flat
 /// `[k1 v1 k2 v2 ...]` map body and return its value as text.
 fn required(entries: &[Form], key: &'static str) -> Result<String, ManifestError> {
-    let value = entries
+    optional(entries, key)?.ok_or(ManifestError::Missing(key))
+}
+
+/// [`required`] for a key that may be absent.
+fn optional(entries: &[Form], key: &'static str) -> Result<Option<String>, ManifestError> {
+    let Some(value) = entries
         .as_chunks::<2>()
         .0
         .iter()
         .find(|[k, _]| k.as_keyword() == Some(key))
         .map(|[_, v]| v)
-        .ok_or(ManifestError::Missing(key))?;
+    else {
+        return Ok(None);
+    };
     let text = match &value.kind {
         FormKind::Symbol(s) | FormKind::Str(s) | FormKind::Keyword(s) => s.as_str(),
         _ => return Err(ManifestError::BadValue { key }),
@@ -122,7 +136,7 @@ fn required(entries: &[Form], key: &'static str) -> Result<String, ManifestError
     if text.trim().is_empty() {
         return Err(ManifestError::BadValue { key });
     }
-    Ok(text.to_string())
+    Ok(Some(text.to_string()))
 }
 
 #[cfg(test)]
@@ -145,8 +159,22 @@ mod tests {
                 id: "example.probe".into(),
                 init_ns: "example.probe.addon".into(),
                 init_fn: "addon-ctor".into(),
+                protocol_ns: None,
             }
         );
+    }
+
+    #[test]
+    fn reads_a_declared_protocol_namespace() {
+        let m = parse("{:addon/id a :addon/init-ns a.core :addon/init-fn ctor :addon/protocol-ns other.protocol}")
+            .unwrap();
+        assert_eq!(m.protocol_ns.as_deref(), Some("other.protocol"));
+        assert!(matches!(
+            parse("{:addon/id a :addon/init-ns a.core :addon/init-fn ctor :addon/protocol-ns 1}"),
+            Err(ManifestError::BadValue {
+                key: "addon/protocol-ns"
+            })
+        ));
     }
 
     #[test]
