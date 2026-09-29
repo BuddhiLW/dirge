@@ -1,3 +1,4 @@
+mod addon_seam;
 pub mod config;
 
 use std::sync::Arc;
@@ -236,14 +237,26 @@ pub async fn serve(cli: Cli, cfg: Config, context: ContextFiles) -> anyhow::Resu
             on_receive_notification!(),
         )
         .on_receive_dispatch(
-            |dispatch: Dispatch<AgentRequest, AgentNotification>, _cx: ConnectionTo<Client>| {
+            |dispatch: Dispatch<AgentRequest, AgentNotification>, cx: ConnectionTo<Client>| {
                 async move {
                     // acp 2.0 moved `respond_with_error` off `Dispatch` and onto
                     // the `Responder` that only the request variant carries. A
                     // notification or a stray response has no reply channel, so
                     // there is nothing to answer — dropping it matches what the
                     // old blanket call did for those arms.
+                    //
+                    // ACP's `_`-prefixed extension methods and notifications go
+                    // to the addons (see `addon_seam`); a request no addon
+                    // answers gets method-not-found. Spawned so an addon's
+                    // answer never holds up the connection.
                     match dispatch {
+                        Dispatch::Request(AgentRequest::ExtMethodRequest(ext), responder) => {
+                            cx.spawn(addon_seam::answer_ext_method(ext, responder))
+                        }
+                        Dispatch::Notification(AgentNotification::ExtNotification(notif)) => {
+                            addon_seam::ext_notification(&notif);
+                            Ok(())
+                        }
                         Dispatch::Request(_, responder) => responder.respond_with_error(
                             agent_client_protocol::util::internal_error("Unhandled ACP message"),
                         ),
@@ -269,9 +282,12 @@ async fn handle_initialize(
 
     let caps = AgentCapabilities::new();
 
+    // Addons advertise what they add to ACP (extension methods, say) here.
+    let meta = addon_seam::meta("initialize", None, req.meta.as_ref(), None).await;
     let resp = InitializeResponse::new(req.protocol_version)
         .agent_capabilities(caps)
-        .agent_info(Implementation::new("dirge", "1.0.4"));
+        .agent_info(Implementation::new("dirge", "1.0.4"))
+        .meta(meta);
 
     responder.respond(resp)
 }
@@ -306,7 +322,14 @@ async fn handle_new_session(
         },
     );
 
-    let resp = NewSessionResponse::new(session_id.clone());
+    let meta = addon_seam::meta(
+        "session/new",
+        Some(&session_id.to_string()),
+        req.meta.as_ref(),
+        None,
+    )
+    .await;
+    let resp = NewSessionResponse::new(session_id.clone()).meta(meta);
     responder.respond(resp)?;
 
     // dirge-32k9 (gh#714): announce the slash commands so ACP clients (Zed, etc.) can
@@ -343,16 +366,20 @@ async fn handle_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let request_meta = req.meta;
 
     cx.spawn({
         let cx = cx.clone();
-        async move { run_prompt(&state, &prompt_text, session_id, responder, cx).await }
+        async move {
+            run_prompt(&state, &prompt_text, request_meta, session_id, responder, cx).await
+        }
     })
 }
 
 async fn run_prompt(
     state: &AcpState,
     prompt_text: &str,
+    request_meta: Option<Meta>,
     session_id: SessionId,
     responder: Responder<PromptResponse>,
     cx: ConnectionTo<Client>,
@@ -419,7 +446,9 @@ async fn run_prompt(
         .await
     {
         let _ = cx.send_notification(agent_text_chunk(&session_id, reply));
-        let _ = responder.respond(PromptResponse::new(StopReason::EndTurn));
+        let meta =
+            addon_seam::meta("session/prompt", Some(&id_key), request_meta.as_ref(), None).await;
+        let _ = responder.respond(PromptResponse::new(StopReason::EndTurn).meta(meta));
         return Ok(());
     }
 
@@ -728,7 +757,15 @@ async fn run_prompt(
     } else {
         StopReason::EndTurn
     };
-    let _ = responder.respond(PromptResponse::new(reason).meta(usage.meta(&provider_str)));
+    // Addon `_meta` keys join `usage` and never replace it.
+    let meta = addon_seam::meta(
+        "session/prompt",
+        Some(&id_key),
+        request_meta.as_ref(),
+        usage.meta(&provider_str),
+    )
+    .await;
+    let _ = responder.respond(PromptResponse::new(reason).meta(meta));
     Ok(())
 }
 

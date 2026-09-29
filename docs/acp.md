@@ -41,3 +41,41 @@ ACP's own `usage` field on the prompt response is not stable yet. The ACP
 Rust schema has it only behind the `unstable_end_turn_token_usage` feature.
 dirge uses `_meta` instead, with that field's names, so a client can read
 either one.
+
+## Extending ACP with addons
+
+With the `addons` feature, [Clojure addons](addons.md) can add to the ACP
+surface through three open hook keys. Without the feature, or when no addon
+registers a key, dirge answers as described below for "no addon".
+
+- **Extension methods.** A request whose method starts with `_` (ACP's
+  extension methods, e.g. `_zed.dev/workspace/info`) goes to the
+  `:dirge/acp-ext-method` hook. The first addon that answers with anything
+  but `nil` provides the result. If no addon answers, the client gets
+  JSON-RPC method-not-found (`-32601`). If the addons do not answer within
+  30 seconds, the client gets an internal error (`-32603`).
+- **Extension notifications.** A notification whose method starts with `_`
+  goes to the `:dirge/acp-ext-notification` hook. Nothing waits for the
+  addons.
+- **`_meta`.** Before dirge answers `initialize`, `session/new` or
+  `session/prompt`, the `:dirge/acp-meta` hook gets the request's `_meta` and
+  the `_meta` dirge is about to send. Each key of an addon's answer is added
+  to the response's `_meta`. It never replaces a key dirge set, such as
+  `usage`, and an earlier addon's key is not replaced by a later addon's.
+
+For example, an addon that registers `:dirge/acp-meta` and answers
+`{:zed.dev/panel {:open true}}` for `session/prompt` turns the response above
+into:
+
+```json
+{
+  "stopReason": "end_turn",
+  "_meta": {
+    "usage": { "inputTokens": 9500, "outputTokens": 30, "...": "..." },
+    "zed.dev/panel": { "open": true }
+  }
+}
+```
+
+The hook arguments are listed in
+[addons.md](addons.md#acp-extension-methods-and-_meta).
