@@ -89,6 +89,7 @@ pub fn payload(event: HookEvent, session_id: Option<&str>, cwd: &str, extra: Val
 /// - `null`: exit 0, nothing said;
 /// - anything else (a Claude JSON answer, typically): exit 0 with its
 ///   JSON on stdout.
+#[cfg_attr(not(feature = "addons"), allow(dead_code))]
 pub fn addon_answer(answer: &Value) -> Exited {
     let text = |v: Option<&Value>| v.and_then(Value::as_str).unwrap_or("").to_string();
     match answer {
