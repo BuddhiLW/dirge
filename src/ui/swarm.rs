@@ -9,18 +9,16 @@
 //! sent; a subagent cell shows the `[AGENTS]` preview line and the
 //! tail of the subagent's chat tab.
 //!
-//! This module is the pure half: the cell list ([`swarm_cells`]), the
-//! view state ([`SwarmView`]), the key mapping while the grid is open
-//! ([`grid_key`]), `/swarm` argument parsing ([`SwarmCmd::parse`]) and
-//! the grid geometry ([`grid_geometry`]). The painter lives in
-//! `ui::tui::swarm`; panel replies go through the panel feed's
-//! existing reply channel, subagent actions through the UI loop.
+//! This module is the pure half the painter needs: the cell list
+//! ([`swarm_cells`]), the selection it paints ([`SwarmView`]), `/swarm`
+//! argument parsing ([`SwarmCmd::parse`]) and the grid geometry
+//! ([`grid_geometry`]). The grid's state and keys belong to the view
+//! seam (`ui::view`); the painter lives in `ui::tui::swarm`.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-use crate::extras::panel_feed::ReplyAction;
-use crate::ui::keymap::KeyAction;
 use crate::ui::panels_ext::ExternalPanels;
+
+/// A grid cell, as the view seam's domain names it.
+pub use crate::ui::view::domain::GridCell as SwarmCell;
 
 /// Narrowest grid cell (columns) before the grid drops a column.
 pub const MIN_CELL_W: u16 = 24;
@@ -29,14 +27,6 @@ pub const MIN_CELL_H: u16 = 5;
 
 /// Key hint painted in the grid's header row.
 pub const GRID_HINT: &str = "arrows/1-9 select · Enter focus/open · m msg agent · Tab/S-Tab view · r refresh · u unfocus · Esc close";
-
-/// One grid cell: an external panel (by panel id) or an in-process
-/// subagent (by full task id).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SwarmCell {
-    Panel(String),
-    Agent(String),
-}
 
 /// The grid's cells in paint order: external panels (as the producer
 /// orders them), then subagents (spawn order).
@@ -70,17 +60,23 @@ pub struct SwarmAgent {
     pub tail: Vec<(String, crossterm::style::Color)>,
 }
 
-/// State of the open swarm view. Selection is kept by cell identity so
-/// a producer that reorders its panels (a new focus), or a subagent
-/// that finishes, does not move the highlight to a different cell.
+/// The selection the open grid paints, mirrored from the view model.
+/// Kept by cell identity so a producer that reorders its panels, or a
+/// subagent that finishes, does not move the highlight.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SwarmView {
     selected: Option<SwarmCell>,
 }
 
 impl SwarmView {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The grid with `selected` highlighted (`None`: the first cell).
+    pub fn selecting(selected: Option<SwarmCell>) -> Self {
+        Self { selected }
     }
 
     /// Index of the selected cell in paint order, falling back to the
@@ -93,17 +89,9 @@ impl SwarmView {
     }
 
     /// Select the cell at `index` in paint order (clamped).
+    #[cfg(test)]
     pub fn select_index(&mut self, cells: &[SwarmCell], index: usize) {
-        if cells.is_empty() {
-            self.selected = None;
-            return;
-        }
-        self.selected = Some(cells[index.min(cells.len() - 1)].clone());
-    }
-
-    /// The selected cell, if any cell exists.
-    pub fn selected_cell(&self, cells: &[SwarmCell]) -> Option<SwarmCell> {
-        cells.get(self.selected_index(cells)).cloned()
+        self.selected = cells.get(index.min(cells.len().saturating_sub(1))).cloned();
     }
 }
 
@@ -132,107 +120,6 @@ impl SwarmCmd {
             },
             _ => Err(format!("/swarm takes at most one argument ({SWARM_USAGE})")),
         }
-    }
-}
-
-/// What a key does while the grid is open.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GridKey {
-    /// Close the grid.
-    Close,
-    /// Move the selection to this index (paint order).
-    Select(usize),
-    /// Send this reply to the producer.
-    Reply(ReplyAction),
-    /// Switch to this subagent's chat tab (full task id).
-    OpenAgent(String),
-    /// Start a `/msg` to this subagent (full task id).
-    MessageAgent(String),
-    /// Not a grid key: let the normal dispatch handle it (global
-    /// commands, Ctrl+C).
-    PassThrough,
-    /// Swallow the key (the editor is inert while the grid is open).
-    Swallow,
-}
-
-/// Map `key` to a grid command (pure). Unmodified grid keys win over
-/// the global keymap (Shift+Tab is `cycle_prompt` globally but
-/// prev-tab here); any other key the global keymap resolved (`action`)
-/// passes through, so scrolling, redraw, the panel reply keys and the
-/// swarm toggle keep working, and so does Ctrl+C. `columns` is the
-/// grid's current column count, used by the vertical arrows.
-pub fn grid_key(
-    key: &KeyEvent,
-    action: Option<KeyAction>,
-    view: &SwarmView,
-    cells: &[SwarmCell],
-    columns: usize,
-) -> GridKey {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    if !ctrl
-        && !alt
-        && let Some(g) = plain_grid_key(key.code, view, cells, columns)
-    {
-        return g;
-    }
-    if action.is_some() || (ctrl && key.code == KeyCode::Char('c')) {
-        GridKey::PassThrough
-    } else {
-        GridKey::Swallow
-    }
-}
-
-/// The grid meaning of an unmodified key, `None` when it has none.
-fn plain_grid_key(
-    code: KeyCode,
-    view: &SwarmView,
-    cells: &[SwarmCell],
-    columns: usize,
-) -> Option<GridKey> {
-    let n = cells.len();
-    let cur = view.selected_index(cells);
-    let cols = columns.max(1);
-    let last = n.saturating_sub(1);
-    let select = |i: usize| {
-        Some(if n == 0 {
-            GridKey::Swallow
-        } else {
-            GridKey::Select(i)
-        })
-    };
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => Some(GridKey::Close),
-        KeyCode::Tab => Some(GridKey::Reply(ReplyAction::NextTab)),
-        KeyCode::BackTab => Some(GridKey::Reply(ReplyAction::PrevTab)),
-        KeyCode::Char('r') => Some(GridKey::Reply(ReplyAction::Refresh)),
-        KeyCode::Char('u') => Some(GridKey::Reply(ReplyAction::Unfocus)),
-        KeyCode::Enter => Some(match view.selected_cell(cells) {
-            Some(SwarmCell::Panel(id)) => GridKey::Reply(ReplyAction::Focus(id)),
-            Some(SwarmCell::Agent(id)) => GridKey::OpenAgent(id),
-            None => GridKey::Swallow,
-        }),
-        KeyCode::Char('m') => Some(match view.selected_cell(cells) {
-            Some(SwarmCell::Agent(id)) => GridKey::MessageAgent(id),
-            _ => GridKey::Swallow,
-        }),
-        KeyCode::Left | KeyCode::Char('h') => select(cur.saturating_sub(1)),
-        KeyCode::Right | KeyCode::Char('l') => select((cur + 1).min(last)),
-        KeyCode::Up | KeyCode::Char('k') => select(cur.saturating_sub(cols)),
-        KeyCode::Down | KeyCode::Char('j') => {
-            select(if cur + cols <= last { cur + cols } else { cur })
-        }
-        KeyCode::Home => select(0),
-        KeyCode::End => select(last),
-        KeyCode::Char(c @ '1'..='9') => {
-            let i = (c as usize) - ('1' as usize);
-            Some(if i < n {
-                GridKey::Select(i)
-            } else {
-                GridKey::Swallow
-            })
-        }
-        _ => None,
     }
 }
 
@@ -295,18 +182,6 @@ mod tests {
         s
     }
 
-    fn cells(ids: &[&str]) -> Vec<SwarmCell> {
-        swarm_cells(&panels(ids), [])
-    }
-
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
-    }
-
-    fn panel(id: &str) -> Option<SwarmCell> {
-        Some(SwarmCell::Panel(id.into()))
-    }
-
     #[test]
     fn swarm_args_parse() {
         assert_eq!(SwarmCmd::parse(&[]), Ok(SwarmCmd::Toggle));
@@ -333,129 +208,29 @@ mod tests {
     }
 
     #[test]
-    fn selection_follows_the_cell() {
+    fn the_painted_selection_follows_the_cell() {
         let mut s = panels(&["a", "b", "c"]);
-        let mut v = SwarmView::new();
-        let c = swarm_cells(&s, []);
-        assert_eq!(v.selected_index(&c), 0);
-        v.select_index(&c, 2);
-        assert_eq!(v.selected_cell(&c), panel("c"));
+        assert_eq!(SwarmView::new().selected_index(&swarm_cells(&s, [])), 0);
+        let v = SwarmView::selecting(Some(SwarmCell::Panel("c".into())));
+        assert_eq!(v.selected_index(&swarm_cells(&s, [])), 2);
         // A producer focus moves `c` first; the highlight stays on it.
         s.apply(PanelOp::FocusTab {
             id: "c".into(),
             title: "C".into(),
         });
-        let c = swarm_cells(&s, []);
-        assert_eq!(v.selected_index(&c), 0);
-        assert_eq!(v.selected_cell(&c), panel("c"));
-        // A closed panel falls back to the first one.
+        assert_eq!(v.selected_index(&swarm_cells(&s, [])), 0);
+        // A closed panel falls back to the first cell.
         s.apply(PanelOp::Close { id: "c".into() });
-        let c = swarm_cells(&s, []);
-        assert_eq!(v.selected_cell(&c), panel("a"));
-        v.select_index(&c, 99);
-        assert_eq!(v.selected_cell(&c), panel("b"));
+        assert_eq!(v.selected_index(&swarm_cells(&s, [])), 0);
     }
 
     #[test]
     fn agent_selection_survives_a_sibling_finishing() {
         let s = panels(&["a"]);
-        let mut v = SwarmView::new();
-        v.select_index(&swarm_cells(&s, ["t1", "t2"]), 2);
+        let v = SwarmView::selecting(Some(SwarmCell::Agent("t2".into())));
+        assert_eq!(v.selected_index(&swarm_cells(&s, ["t1", "t2"])), 2);
         // t1 completes and drops out; the highlight stays on t2.
-        let c = swarm_cells(&s, ["t2"]);
-        assert_eq!(v.selected_index(&c), 1);
-        assert_eq!(v.selected_cell(&c), Some(SwarmCell::Agent("t2".into())));
-    }
-
-    #[test]
-    fn grid_keys_reply_through_the_feed() {
-        let c = cells(&["a", "b"]);
-        let mut v = SwarmView::new();
-        v.select_index(&c, 1);
-        let k = |code| grid_key(&key(code), None, &v, &c, 2);
-        assert_eq!(k(KeyCode::Tab), GridKey::Reply(ReplyAction::NextTab));
-        assert_eq!(k(KeyCode::BackTab), GridKey::Reply(ReplyAction::PrevTab));
-        assert_eq!(k(KeyCode::Char('r')), GridKey::Reply(ReplyAction::Refresh));
-        assert_eq!(k(KeyCode::Char('u')), GridKey::Reply(ReplyAction::Unfocus));
-        assert_eq!(
-            k(KeyCode::Enter),
-            GridKey::Reply(ReplyAction::Focus("b".into()))
-        );
-        // `m` only means something on a subagent cell.
-        assert_eq!(k(KeyCode::Char('m')), GridKey::Swallow);
-        assert_eq!(k(KeyCode::Esc), GridKey::Close);
-        assert_eq!(k(KeyCode::Char('q')), GridKey::Close);
-        assert_eq!(k(KeyCode::Char('z')), GridKey::Swallow);
-    }
-
-    #[test]
-    fn agent_cells_open_and_message() {
-        let c = swarm_cells(&panels(&["a"]), ["task-1"]);
-        let mut v = SwarmView::new();
-        v.select_index(&c, 1);
-        let k = |code| grid_key(&key(code), None, &v, &c, 2);
-        assert_eq!(k(KeyCode::Enter), GridKey::OpenAgent("task-1".into()));
-        assert_eq!(
-            k(KeyCode::Char('m')),
-            GridKey::MessageAgent("task-1".into())
-        );
-        assert_eq!(k(KeyCode::Char('2')), GridKey::Select(1));
-    }
-
-    #[test]
-    fn grid_keys_move_the_selection() {
-        let c = cells(&["a", "b", "c", "d", "e"]);
-        let mut v = SwarmView::new();
-        v.select_index(&c, 1);
-        let k = |code, v: &SwarmView| grid_key(&key(code), None, v, &c, 3);
-        assert_eq!(k(KeyCode::Right, &v), GridKey::Select(2));
-        assert_eq!(k(KeyCode::Left, &v), GridKey::Select(0));
-        assert_eq!(k(KeyCode::Down, &v), GridKey::Select(4));
-        assert_eq!(k(KeyCode::Up, &v), GridKey::Select(0));
-        assert_eq!(k(KeyCode::Char('3'), &v), GridKey::Select(2));
-        assert_eq!(k(KeyCode::Char('9'), &v), GridKey::Swallow);
-        assert_eq!(k(KeyCode::End, &v), GridKey::Select(4));
-        v.select_index(&c, 2);
-        // No cell below the last row's end: stay put.
-        assert_eq!(k(KeyCode::Down, &v), GridKey::Select(2));
-    }
-
-    #[test]
-    fn global_commands_and_ctrl_c_pass_through() {
-        let c = cells(&["a"]);
-        let v = SwarmView::new();
-        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(grid_key(&ctrl_c, None, &v, &c, 1), GridKey::PassThrough);
-        let alt_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT);
-        assert_eq!(
-            grid_key(&alt_s, Some(KeyAction::ToggleSwarm), &v, &c, 1),
-            GridKey::PassThrough
-        );
-        let ctrl_w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
-        assert_eq!(grid_key(&ctrl_w, None, &v, &c, 1), GridKey::Swallow);
-        // Shift+Tab is `cycle_prompt` globally; in the grid it is prev-tab.
-        let back = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
-        assert_eq!(
-            grid_key(&back, Some(KeyAction::CyclePrompt), &v, &c, 1),
-            GridKey::Reply(ReplyAction::PrevTab)
-        );
-        // Unbound unmodified keys never reach the (hidden) editor.
-        assert_eq!(
-            grid_key(&key(KeyCode::Char('x')), None, &v, &c, 1),
-            GridKey::Swallow
-        );
-    }
-
-    #[test]
-    fn empty_grid_only_closes_and_replies() {
-        let c: Vec<SwarmCell> = Vec::new();
-        let v = SwarmView::new();
-        let k = |code| grid_key(&key(code), None, &v, &c, 1);
-        assert_eq!(k(KeyCode::Right), GridKey::Swallow);
-        assert_eq!(k(KeyCode::Enter), GridKey::Swallow);
-        assert_eq!(k(KeyCode::Char('m')), GridKey::Swallow);
-        assert_eq!(k(KeyCode::Char('r')), GridKey::Reply(ReplyAction::Refresh));
-        assert_eq!(k(KeyCode::Esc), GridKey::Close);
+        assert_eq!(v.selected_index(&swarm_cells(&s, ["t2"])), 1);
     }
 
     #[test]
