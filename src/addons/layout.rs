@@ -130,6 +130,20 @@ pub fn namespace_in(roots: &[PathBuf], file: &Path) -> Option<String> {
         .map(|(_, ns)| ns)
 }
 
+/// Where a source root extends dirge's builtin Clojure host: the forms of
+/// this file are evaluated in `dirge.addon.host` after the builtin ones, so
+/// host policy changes without a rebuild.
+pub const HOST_OVERLAY: &str = "dirge/addon/host.cljc";
+
+/// Every host overlay under `roots`, in root order.
+pub fn host_overlays(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .map(|root| root.join(HOST_OVERLAY))
+        .filter(|path| path.is_file())
+        .collect()
+}
+
 /// Sorted, de-duplicated source roots.
 pub fn merge_roots<I: IntoIterator<Item = PathBuf>>(roots: I) -> Vec<PathBuf> {
     roots
@@ -247,6 +261,24 @@ mod tests {
             PathBuf::from("/w/my-addon/../proto/src")
         );
         assert_eq!(dependency_root(repo, "/abs/y"), PathBuf::from("/abs/y/src"));
+    }
+
+    #[test]
+    fn host_overlays_are_found_on_the_roots_in_order() {
+        let base = std::env::temp_dir().join(format!("dirge-overlays-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (a, b, none) = (base.join("a"), base.join("b"), base.join("none"));
+        for root in [&a, &b] {
+            let file = root.join(HOST_OVERLAY);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "(ns dirge.addon.host)").unwrap();
+        }
+        std::fs::create_dir_all(&none).unwrap();
+        assert_eq!(
+            host_overlays(&[b.clone(), none, a.clone()]),
+            vec![b.join(HOST_OVERLAY), a.join(HOST_OVERLAY)]
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The classpath is a function of the SET of roots, never of the order

@@ -402,6 +402,36 @@ answer is ignored and nothing waits for it: events are queued to the addon
 runtime and run in order after whatever it is doing, and when more than 256
 are waiting new ones are dropped.
 
+### Extending the host: `dirge/addon/host.cljc`
+
+The Clojure half of the addon host, `dirge.addon.host`, is built into dirge.
+It decides how an addon's hooks map becomes tools, commands and hook keys,
+how a hook's context reaches it, and how answers come back. A source root
+can extend it without a rebuild: when a root holds `dirge/addon/host.cljc`,
+its forms are evaluated in `dirge.addon.host` after the built-in ones, so
+the file only needs the definitions it changes.
+
+```clojure
+;; <root>/dirge/addon/host.cljc
+(ns dirge.addon.host)
+
+(defn tool-view [tool]
+  (assoc (select-keys tool [:name :inputSchema])
+         :description (str "[team] " (:description tool))))
+```
+
+Overlays load at start and again on each `/addons reload`. The built-in host
+is evaluated first each time, so a form removed from the overlay goes back
+to the built-in one. With several roots holding an overlay, each is
+evaluated over the ones before it, in root order.
+
+dirge calls `use-protocol!`, `load-addon!`, `shutdown-addon!`,
+`reload-sources!`, `refresh!`, `call-tool`, `run-command`, `run-hook`,
+`run-hook-handler` and `shutdown-all!`. An overlay may redefine any of them,
+but each must still be a function afterwards. An overlay that fails to load,
+or that leaves one of them without a function, is undone whole, and the
+reason is logged at start and listed among the reload's source errors.
+
 ## Example
 
 `tests/fixtures/addons/` holds a minimal protocol namespace and an addon

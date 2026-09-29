@@ -39,6 +39,21 @@ const HOST_SRC: &str = include_str!("host.cljc");
 /// replace it with the upstream file and update the pin in the tests below.
 pub(crate) const PROTOCOL_SRC: &str = include_str!("vendor/hive_addon/protocol.cljc");
 
+/// The `dirge.addon.host` functions dirge calls. A host overlay may
+/// redefine any of them but must leave each one a function.
+const HOST_CONTRACT: [&str; 10] = [
+    "use-protocol!",
+    "load-addon!",
+    "shutdown-addon!",
+    "reload-sources!",
+    "refresh!",
+    "call-tool",
+    "run-command",
+    "run-hook",
+    "run-hook-handler",
+    "shutdown-all!",
+];
+
 /// Private namespace through which a call's arguments reach Clojure.
 const BRIDGE_NS: &str = "dirge.bridge";
 
@@ -542,6 +557,8 @@ struct Interp {
     /// Set by `dirge.harness/refresh!`: re-read the addons once the current
     /// work is done.
     refresh_requested: Rc<Cell<bool>>,
+    /// The host overlays evaluated over the builtin host, in order.
+    overlays: Vec<PathBuf>,
     stopped: bool,
 }
 
@@ -572,11 +589,15 @@ impl Interp {
             inbox,
             caller_on_runtime,
             refresh_requested,
+            overlays: Vec::new(),
             stopped: false,
         };
         interp
             .eval_str(&format!("(require '{HOST_NS})"))
             .map_err(|e| format!("cannot load {HOST_NS}: {e}"))?;
+        for (overlay, error) in interp.apply_overlays() {
+            tracing::warn!(target: "dirge::addon", overlay = %overlay.display(), %error, "host overlay not applied");
+        }
         interp
             .call("use-protocol!", vec![protocol_ns.into()])
             .and_then(|answer| policy::tool_reply(&answer))
@@ -711,10 +732,14 @@ impl Interp {
         self.roots = roots;
     }
 
-    /// Evaluate `files` again, each named by the most specific root holding
-    /// it (null when none does); the ones that failed, with why. Files left
-    /// alone because nothing loaded their namespace are logged.
+    /// Evaluate the host overlays, then `files` again, each named by the
+    /// most specific root holding it (null when none does); the ones that
+    /// failed, with why. Files left alone because nothing loaded their
+    /// namespace are logged.
     fn reload_sources(&mut self, files: &[PathBuf]) -> Vec<(PathBuf, String)> {
+        let mut failed = self.apply_overlays();
+        let overlays = layout::host_overlays(&self.roots);
+        let files: Vec<&PathBuf> = files.iter().filter(|f| !overlays.contains(f)).collect();
         let sources: Vec<Json> = files
             .iter()
             .map(|file| {
@@ -730,9 +755,83 @@ impl Interp {
                 for (file, why) in skipped {
                     tracing::warn!(target: "dirge::addon", file = %file.display(), %why, "addon source not reloaded");
                 }
-                errors
+                failed.extend(errors);
             }
-            Err(e) => files.iter().map(|f| (f.clone(), e.clone())).collect(),
+            Err(e) => failed.extend(files.iter().map(|f| ((*f).clone(), e.clone()))),
+        }
+        failed
+    }
+
+    /// Evaluate every host overlay on the roots over the builtin host, in
+    /// root order, each checked against [`HOST_CONTRACT`]. The builtin host
+    /// is evaluated again first, so a form an overlay no longer defines
+    /// reverts. An overlay that fails to load or breaks the contract is
+    /// undone and the ones before it kept. Answers the overlays not applied,
+    /// with why.
+    fn apply_overlays(&mut self) -> Vec<(PathBuf, String)> {
+        let wanted = layout::host_overlays(&self.roots);
+        let mut failed = Vec::new();
+        if wanted.is_empty() && self.overlays.is_empty() {
+            return failed;
+        }
+        let mut applied = Vec::new();
+        self.restore_builtin_host(&applied);
+        for overlay in wanted {
+            match self.load_file(&overlay).and_then(|()| self.check_contract()) {
+                Ok(()) => applied.push(overlay),
+                Err(error) => {
+                    self.restore_builtin_host(&applied);
+                    failed.push((overlay, error));
+                }
+            }
+        }
+        self.overlays = applied;
+        failed
+    }
+
+    /// Evaluate the builtin host again, then `overlays` over it.
+    fn restore_builtin_host(&mut self, overlays: &[PathBuf]) {
+        if let Err(error) = eval_source(&mut self.env, HOST_SRC).and_then(|_| self.in_user_ns()) {
+            tracing::error!(target: "dirge::addon", %error, "cannot evaluate the builtin addon host again");
+        }
+        for overlay in overlays {
+            if let Err(error) = self.load_file(overlay) {
+                tracing::warn!(target: "dirge::addon", overlay = %overlay.display(), %error, "host overlay failed to load again");
+            }
+        }
+    }
+
+    /// `load-file` `path`, back in the `user` namespace afterwards.
+    fn load_file(&mut self, path: &Path) -> Result<(), String> {
+        *self.inbox.borrow_mut() = vec![Json::String(path.display().to_string())];
+        let out = self.eval_str(&format!("(apply load-file ({BRIDGE_NS}/args))"));
+        self.inbox.borrow_mut().clear();
+        let back = self.in_user_ns();
+        out.and(back)
+    }
+
+    fn in_user_ns(&mut self) -> Result<(), String> {
+        self.eval_str("(in-ns 'user)").map(|_| ())
+    }
+
+    /// Ok when every [`HOST_CONTRACT`] function is still a function.
+    fn check_contract(&mut self) -> Result<(), String> {
+        let names: Vec<String> = HOST_CONTRACT.iter().map(|n| format!("{n:?}")).collect();
+        let broken = self.eval_str(&format!(
+            "(vec (remove (fn [n] (fn? (some-> (resolve (symbol \"{HOST_NS}\" n)) deref))) [{}]))",
+            names.join(" ")
+        ))?;
+        match broken.as_array() {
+            Some(broken) if broken.is_empty() => Ok(()),
+            Some(broken) => Err(format!(
+                "leaves {HOST_NS}/{} without a function",
+                broken
+                    .iter()
+                    .filter_map(Json::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            None => Err(format!("contract check answered {broken}")),
         }
     }
 
