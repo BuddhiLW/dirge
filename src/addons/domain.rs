@@ -13,13 +13,15 @@ pub enum HookPoint {
     /// system prompt. `ctx` = `{:cwd :session-id}`.
     SystemPrompt,
     /// `(fn [ctx] -> string|nil)`, text prepended to each submitted prompt as
-    /// a system reminder. `ctx` = `{:prompt :session-id :first-prompt?}`.
+    /// a system reminder. `ctx` = `{:prompt :session-id :first-prompt?
+    /// :tokens :ctx-max :pressure}`.
     OnPrompt,
     /// `(fn [ctx] -> nil|{:block reason}|{:context text}|{:args map})` before
     /// every tool call. `ctx` = `{:tool :args :tool-call-id}`.
     BeforeToolCall,
     /// `(fn [ctx] -> nil|{:context text})` after every tool call.
-    /// `ctx` = `{:tool :args :result :error?}`.
+    /// `ctx` = `{:tool :args :result :error? :tool-use-id :tokens :ctx-max
+    /// :pressure}`.
     AfterToolCall,
     /// `(fn [ctx] -> string|{:context text}|nil)` once per session, before its
     /// first turn in this process, once the MCP servers have connected. The
@@ -30,16 +32,26 @@ pub enum HookPoint {
     /// bounded by a timeout, answer ignored.
     /// `ctx` = `{:session-id :cwd :reason}`, `:reason` is `exit` or `swap`.
     SessionEnd,
+    /// `(fn [ctx] -> nil|{:summary text})` when a fold is about to summarize
+    /// a span of the conversation; a summary that validates replaces the
+    /// built-in one. `ctx` = `{:span :tokens :reason :focus :ctx-max
+    /// :pressure :session-id}`.
+    Compact,
+    /// `(fn [ctx] -> any)` when a fold is about to run; answer ignored.
+    /// `ctx` = `{:count :tokens :reason :ctx-max :pressure :session-id}`.
+    BeforeCompact,
 }
 
 impl HookPoint {
-    pub const ALL: [HookPoint; 6] = [
+    pub const ALL: [HookPoint; 8] = [
         HookPoint::SystemPrompt,
         HookPoint::OnPrompt,
         HookPoint::BeforeToolCall,
         HookPoint::AfterToolCall,
         HookPoint::SessionStart,
         HookPoint::SessionEnd,
+        HookPoint::Compact,
+        HookPoint::BeforeCompact,
     ];
 
     /// The keyword (without the colon) an addon uses as its `hooks` key.
@@ -51,6 +63,8 @@ impl HookPoint {
             HookPoint::AfterToolCall => "dirge/after-tool-call",
             HookPoint::SessionStart => "dirge/session-start",
             HookPoint::SessionEnd => "dirge/session-end",
+            HookPoint::Compact => "dirge/compact",
+            HookPoint::BeforeCompact => "dirge/before-compact",
         }
     }
 

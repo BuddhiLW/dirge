@@ -672,6 +672,9 @@ pub struct AddonsConfig {
     /// Seconds dirge waits for `:dirge/session-end` before it goes on (and,
     /// on exit, closes the MCP servers). Default 10.
     pub session_end_timeout_secs: Option<u64>,
+    /// Seconds a fold waits for `:dirge/compact` or `:dirge/before-compact`
+    /// before it goes on without the answer. Default 60.
+    pub compact_timeout_secs: Option<u64>,
 }
 
 /// Prompt-compression engine config. Disabled → no compression. Enabled with

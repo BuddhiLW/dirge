@@ -738,6 +738,11 @@ pub(super) async fn finalize_executed_tool_call(
             args: args.clone(),
             result: result.clone(),
             is_error,
+            usage: Some(super::context_manager::ContextUsage::estimate(
+                &context.system_prompt,
+                &context.messages,
+                config.model_name.as_deref(),
+            )),
         };
         // Pi catches hook errors and turns them into an error
         // tool result (agent-loop.ts:697-700). Our hook signature
@@ -754,11 +759,6 @@ pub(super) async fn finalize_executed_tool_call(
             is_error = after.is_error.unwrap_or(is_error);
         }
     }
-
-    // `context` is unused for now (pi passes it for symmetry with
-    // beforeToolCall). Marker-binding to silence the warning until
-    // a future hook impl uses it.
-    let _ = context;
 
     // F6 (tier 2): feed the verifier gate the finished call + its result
     // so it knows, at finalization, whether code was edited and whether a

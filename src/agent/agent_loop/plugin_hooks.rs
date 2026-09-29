@@ -530,78 +530,82 @@ pub fn compaction_hooks_from_plugin_manager(
     // (blocking). Run them on a blocking thread with a timeout so a slow
     // plugin can't stall a tokio worker / hold the PM mutex through a fold.
     const COMPACT_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-    let on_before: super::types::OnBeforeCompactFn = Arc::new(move |count: usize, tokens: u64| {
-        let pm = pm_before.clone();
-        Box::pin(async move {
-            let ctx = format!("@{{:message-count {count} :tokens {tokens}}}");
-            let fut = tokio::task::spawn_blocking(move || {
-                pm.lock_ignore_poison()
-                    .dispatch("on-before-compact", &ctx)
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-            });
-            match tokio::time::timeout(COMPACT_HOOK_TIMEOUT, fut).await {
-                Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(e))) => tracing::warn!(
-                    target: "dirge::plugin",
-                    error = %e,
-                    "on-before-compact hook error (observe-only; fold proceeds)",
-                ),
-                Ok(Err(join_err)) => tracing::warn!(
-                    target: "dirge::plugin", error = %join_err,
-                    "on-before-compact hook panicked (observe-only; fold proceeds)",
-                ),
-                Err(_) => tracing::warn!(
-                    target: "dirge::plugin",
-                    "on-before-compact hook timed out (observe-only; fold proceeds)",
-                ),
-            }
-        })
-    });
-
-    let on_compact: super::types::OnCompactFn = Arc::new(move |middle: Vec<serde_json::Value>| {
-        let pm = pm.clone();
-        Box::pin(async move {
-            let Ok(middle_json) = serde_json::to_string(&middle) else {
-                return None;
-            };
-            let ctx = format!(
-                "@{{:messages \"{}\"}}",
-                crate::plugin::escape_janet_string(&middle_json)
-            );
-            let fut = tokio::task::spawn_blocking(move || {
-                let mut mgr = pm.lock_ignore_poison();
-                match mgr.dispatch("on-compact", &ctx) {
-                    Ok(_) => Ok(mgr.take_compact_summary()),
-                    Err(e) => Err(e.to_string()),
-                }
-            });
-            match tokio::time::timeout(COMPACT_HOOK_TIMEOUT, fut).await {
-                Ok(Ok(Ok(v))) => v,
-                Ok(Ok(Err(e))) => {
-                    tracing::warn!(
-                        target: "dirge::plugin", error = %e,
-                        "on-compact hook error — falling back to LLM summarizer",
-                    );
-                    None
-                }
-                Ok(Err(join_err)) => {
-                    tracing::warn!(
-                        target: "dirge::plugin", error = %join_err,
-                        "on-compact hook panicked — falling back to LLM summarizer",
-                    );
-                    None
-                }
-                Err(_) => {
-                    tracing::warn!(
+    let on_before: super::types::OnBeforeCompactFn = Arc::new(
+        move |count: usize, tokens: u64, _: super::types::CompactionFacts| {
+            let pm = pm_before.clone();
+            Box::pin(async move {
+                let ctx = format!("@{{:message-count {count} :tokens {tokens}}}");
+                let fut = tokio::task::spawn_blocking(move || {
+                    pm.lock_ignore_poison()
+                        .dispatch("on-before-compact", &ctx)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                });
+                match tokio::time::timeout(COMPACT_HOOK_TIMEOUT, fut).await {
+                    Ok(Ok(Ok(()))) => {}
+                    Ok(Ok(Err(e))) => tracing::warn!(
                         target: "dirge::plugin",
-                        "on-compact hook timed out — falling back to LLM summarizer",
-                    );
-                    None
+                        error = %e,
+                        "on-before-compact hook error (observe-only; fold proceeds)",
+                    ),
+                    Ok(Err(join_err)) => tracing::warn!(
+                        target: "dirge::plugin", error = %join_err,
+                        "on-before-compact hook panicked (observe-only; fold proceeds)",
+                    ),
+                    Err(_) => tracing::warn!(
+                        target: "dirge::plugin",
+                        "on-before-compact hook timed out (observe-only; fold proceeds)",
+                    ),
                 }
-            }
-        })
-    });
+            })
+        },
+    );
+
+    let on_compact: super::types::OnCompactFn = Arc::new(
+        move |middle: Vec<serde_json::Value>, _: super::types::CompactionFacts| {
+            let pm = pm.clone();
+            Box::pin(async move {
+                let Ok(middle_json) = serde_json::to_string(&middle) else {
+                    return None;
+                };
+                let ctx = format!(
+                    "@{{:messages \"{}\"}}",
+                    crate::plugin::escape_janet_string(&middle_json)
+                );
+                let fut = tokio::task::spawn_blocking(move || {
+                    let mut mgr = pm.lock_ignore_poison();
+                    match mgr.dispatch("on-compact", &ctx) {
+                        Ok(_) => Ok(mgr.take_compact_summary()),
+                        Err(e) => Err(e.to_string()),
+                    }
+                });
+                match tokio::time::timeout(COMPACT_HOOK_TIMEOUT, fut).await {
+                    Ok(Ok(Ok(v))) => v,
+                    Ok(Ok(Err(e))) => {
+                        tracing::warn!(
+                            target: "dirge::plugin", error = %e,
+                            "on-compact hook error — falling back to LLM summarizer",
+                        );
+                        None
+                    }
+                    Ok(Err(join_err)) => {
+                        tracing::warn!(
+                            target: "dirge::plugin", error = %join_err,
+                            "on-compact hook panicked — falling back to LLM summarizer",
+                        );
+                        None
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            target: "dirge::plugin",
+                            "on-compact hook timed out — falling back to LLM summarizer",
+                        );
+                        None
+                    }
+                }
+            })
+        },
+    );
 
     super::types::CompactionHooks {
         on_before,
@@ -669,6 +673,7 @@ mod tests {
             args: json!({}),
             result,
             is_error,
+            usage: None,
         }
     }
 

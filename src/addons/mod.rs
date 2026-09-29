@@ -8,6 +8,7 @@
 //! docs/addons.md.
 
 pub mod cljrs;
+pub mod compaction;
 pub mod discovery;
 pub mod domain;
 pub mod host;

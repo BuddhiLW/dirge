@@ -806,6 +806,11 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
 
     if let Some(addons) = &cfg.addon_hooks {
         addons.install_tool_hooks(&mut loop_config);
+        // After the plugin's: a plugin summary that validates wins.
+        loop_config.compaction_hooks = super::types::compose_compaction_hooks(
+            loop_config.compaction_hooks.take(),
+            addons.compaction_hooks(loop_config.session_id.clone()),
+        );
     }
 
     let mut context = Context {
@@ -868,10 +873,17 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         // must not.
         let initial_text = match open_run {
             Some(open) => {
+                let usage = super::context_manager::ContextUsage::estimate(
+                    &context.system_prompt,
+                    &context.messages,
+                    loop_config.model_name.as_deref(),
+                )
+                .plus_text(&initial_prompt);
                 let opening = open(super::hooks::RunOpening {
                     system_prompt: std::mem::take(&mut context.system_prompt),
                     prompt: initial_prompt,
                     reminders: Vec::new(),
+                    usage: Some(usage),
                 })
                 .await;
                 context.system_prompt = opening.system_prompt.clone();
@@ -1736,6 +1748,12 @@ mod tests {
                 _: Option<String>,
                 _: bool,
             ) -> Option<crate::agent::agent_loop::hooks::OpenRunFn> {
+                None
+            }
+            fn compaction_hooks(
+                &self,
+                _: Option<String>,
+            ) -> Option<crate::agent::agent_loop::types::CompactionHooks> {
                 None
             }
         }

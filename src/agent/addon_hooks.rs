@@ -1,13 +1,13 @@
 //! The port the agent reaches addons through: their tools, their tool-call
-//! hooks, and the step that opens a run with their prompt hooks. The
-//! composition root installs the one this process uses; a build or a
-//! process without one gets nothing from any of them.
+//! and compaction hooks, and the step that opens a run with their prompt
+//! hooks. The composition root installs the one this process uses; a build
+//! or a process without one gets nothing from any of them.
 
 use std::sync::{Arc, OnceLock};
 
 use crate::agent::agent_loop::LoopTool;
 use crate::agent::agent_loop::hooks::OpenRunFn;
-use crate::agent::agent_loop::types::LoopConfig;
+use crate::agent::agent_loop::types::{CompactionHooks, LoopConfig};
 use crate::permission::ask::AskSender;
 use crate::permission::checker::PermCheck;
 
@@ -27,6 +27,10 @@ pub trait AddonHooks: Send + Sync + 'static {
     /// The step that runs the addons' prompt hooks as a run of `session_id`
     /// opens. `None` when no addon listens on them.
     fn open_run(&self, session_id: Option<String>, first_prompt: bool) -> Option<OpenRunFn>;
+
+    /// The addons' compaction hooks for the runs of `session_id`. `None`
+    /// when no addon listens on them.
+    fn compaction_hooks(&self, session_id: Option<String>) -> Option<CompactionHooks>;
 }
 
 static INSTALLED: OnceLock<Arc<dyn AddonHooks>> = OnceLock::new();
