@@ -2752,15 +2752,13 @@ pub async fn run_interactive(
                                     ) => {
                                         // Reply to the external panel producer; a
                                         // failure arrives as a notification.
-                                        crate::extras::panel_feed::spawn_reply(match a {
-                                            KeyAction::PanelNextTab => {
-                                                crate::extras::panel_feed::ReplyAction::NextTab
-                                            }
-                                            KeyAction::PanelPrevTab => {
-                                                crate::extras::panel_feed::ReplyAction::PrevTab
-                                            }
-                                            _ => crate::extras::panel_feed::ReplyAction::Refresh,
-                                        });
+                                        crate::extras::panel_feed::spawn_reply(
+                                            crate::extras::panel_feed::ReplyAction::verb(match a {
+                                                KeyAction::PanelNextTab => "next-tab",
+                                                KeyAction::PanelPrevTab => "prev-tab",
+                                                _ => "refresh",
+                                            }),
+                                        );
                                         continue;
                                     }
                                     Some(KeyAction::ToggleSwarm) => {

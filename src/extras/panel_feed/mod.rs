@@ -33,17 +33,17 @@ use discovery::{PanelFeedConfig, Source};
 /// endpoint (a restarted producer has a new port and token).
 static ACTIVE: Mutex<Option<Source>> = Mutex::new(None);
 
-/// One reply the user can send back to the producer.
+/// One reply the user can send back to the producer. The verbs are the
+/// producer's: dirge carries them as opaque names and knows only which
+/// ones need a target ([`DEFAULT_VERBS`] until the producer advertises
+/// its own).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplyAction {
-    /// Focus the item `target` (an id the producer showed).
-    Focus(String),
-    /// Leave the focused view.
-    Unfocus,
-    NextTab,
-    PrevTab,
-    /// Ask the producer to repaint everything it shows.
-    Refresh,
+    /// A producer reply verb, with the item it names when it takes one.
+    Verb {
+        action: String,
+        target: Option<String>,
+    },
     /// A producer-defined verb on a panel and optional row.
     Invoke {
         panel: String,
@@ -53,45 +53,114 @@ pub enum ReplyAction {
     },
 }
 
+/// A reply verb the producer accepts, and whether it names an item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplyVerb {
+    pub name: &'static str,
+    pub takes_target: bool,
+}
+
+/// The reply verbs assumed when the producer advertises none: the ones
+/// every panel-feed producer so far has accepted.
+pub const DEFAULT_VERBS: &[ReplyVerb] = &[
+    ReplyVerb {
+        name: "focus",
+        takes_target: true,
+    },
+    ReplyVerb {
+        name: "unfocus",
+        takes_target: false,
+    },
+    ReplyVerb {
+        name: "next-tab",
+        takes_target: false,
+    },
+    ReplyVerb {
+        name: "prev-tab",
+        takes_target: false,
+    },
+    ReplyVerb {
+        name: "refresh",
+        takes_target: false,
+    },
+];
+
+/// Short names `/panel` accepts for a verb.
+const VERB_ALIASES: &[(&str, &str)] = &[("next", "next-tab"), ("prev", "prev-tab")];
+
 /// Usage line for the reply verbs of `/panel`.
 pub const REPLY_USAGE: &str = "usage: /panel next|prev|refresh|unfocus|focus <id>";
 
+/// The verb named `name` (after aliases) among `verbs`.
+pub fn find_verb<'a>(verbs: &'a [ReplyVerb], name: &str) -> Option<&'a ReplyVerb> {
+    let name = VERB_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == name)
+        .map_or(name, |(_, verb)| verb);
+    verbs.iter().find(|v| v.name == name)
+}
+
 impl ReplyAction {
+    /// The reply `verb` with no target.
+    pub fn verb(action: &str) -> Self {
+        Self::Verb {
+            action: action.to_string(),
+            target: None,
+        }
+    }
+
+    /// The reply `verb` naming the item `target`.
+    pub fn verb_on(action: &str, target: &str) -> Self {
+        Self::Verb {
+            action: action.to_string(),
+            target: Some(target.to_string()),
+        }
+    }
+
+    /// `name` as a reply when `verbs` has it and `target` fits it: a
+    /// verb that takes a target needs one, and one that does not takes
+    /// none.
+    pub fn checked(verbs: &[ReplyVerb], name: &str, target: Option<&str>) -> Option<Self> {
+        let verb = find_verb(verbs, name)?;
+        match (verb.takes_target, target) {
+            (true, Some(t)) if !t.trim().is_empty() => Some(Self::verb_on(verb.name, t.trim())),
+            (false, None) => Some(Self::verb(verb.name)),
+            _ => None,
+        }
+    }
+
     /// Parse the words after `/panel` into a reply (pure). `Err`
     /// carries a user-facing usage message.
     pub fn parse(args: &[&str]) -> Result<Self, String> {
-        let verb = args.first().map(|s| s.trim()).unwrap_or("");
+        let name = args.first().map(|s| s.trim()).unwrap_or("");
         let rest = &args[args.len().min(1)..];
-        let action = match verb {
-            "next" | "next-tab" => Self::NextTab,
-            "prev" | "prev-tab" => Self::PrevTab,
-            "refresh" => Self::Refresh,
-            "unfocus" => Self::Unfocus,
-            "focus" => {
-                return match rest {
-                    [id] if !id.trim().is_empty() => Ok(Self::Focus(id.trim().to_string())),
-                    [] => Err(format!("/panel focus needs an item id ({REPLY_USAGE})")),
-                    _ => Err(format!("/panel focus takes one id ({REPLY_USAGE})")),
-                };
-            }
-            "" => return Err(REPLY_USAGE.to_string()),
-            other => return Err(format!("unknown /panel action '{other}' ({REPLY_USAGE})")),
+        if name.is_empty() {
+            return Err(REPLY_USAGE.to_string());
+        }
+        let Some(verb) = find_verb(DEFAULT_VERBS, name) else {
+            return Err(format!("unknown /panel action '{name}' ({REPLY_USAGE})"));
         };
-        if rest.is_empty() {
-            Ok(action)
-        } else {
-            Err(format!("/panel {verb} takes no argument ({REPLY_USAGE})"))
+        match (verb.takes_target, rest) {
+            (true, [id]) if !id.trim().is_empty() => Ok(Self::verb_on(verb.name, id.trim())),
+            (true, []) => Err(format!("/panel {name} needs an item id ({REPLY_USAGE})")),
+            (true, _) => Err(format!("/panel {name} takes one id ({REPLY_USAGE})")),
+            (false, []) => Ok(Self::verb(verb.name)),
+            (false, _) => Err(format!("/panel {name} takes no argument ({REPLY_USAGE})")),
+        }
+    }
+
+    /// The item a verb reply names, if any.
+    pub fn target(&self) -> Option<&str> {
+        match self {
+            Self::Verb { target, .. } => target.as_deref(),
+            Self::Invoke { .. } => None,
         }
     }
 
     /// The wire name of the action.
-    pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> &str {
         match self {
-            Self::Focus(_) => "focus",
-            Self::Unfocus => "unfocus",
-            Self::NextTab => "next-tab",
-            Self::PrevTab => "prev-tab",
-            Self::Refresh => "refresh",
+            Self::Verb { action, .. } => action,
             Self::Invoke { .. } => "invoke",
         }
     }
@@ -99,11 +168,14 @@ impl ReplyAction {
     /// The JSON body POSTed to `<url>/reply` (pure).
     pub fn to_json(&self) -> String {
         let value = match self {
-            Self::Focus(target) => json!({"action": "focus", "target": target}),
-            Self::Unfocus => json!({"action": "unfocus"}),
-            Self::NextTab => json!({"action": "next-tab"}),
-            Self::PrevTab => json!({"action": "prev-tab"}),
-            Self::Refresh => json!({"action": "refresh"}),
+            Self::Verb {
+                action,
+                target: Some(target),
+            } => json!({"action": action, "target": target}),
+            Self::Verb {
+                action,
+                target: None,
+            } => json!({"action": action}),
             Self::Invoke {
                 panel,
                 verb,

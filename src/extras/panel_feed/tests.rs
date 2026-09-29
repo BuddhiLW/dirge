@@ -23,13 +23,25 @@ const TOKEN_QUERY: &str = "token=t0k%26en";
 #[test]
 fn reply_bodies_match_the_wire() {
     assert_eq!(
-        ReplyAction::Focus("w-1".into()).to_json(),
+        ReplyAction::verb_on("focus", "w-1").to_json(),
         r#"{"action":"focus","target":"w-1"}"#
     );
-    assert_eq!(ReplyAction::Unfocus.to_json(), r#"{"action":"unfocus"}"#);
-    assert_eq!(ReplyAction::NextTab.to_json(), r#"{"action":"next-tab"}"#);
-    assert_eq!(ReplyAction::PrevTab.to_json(), r#"{"action":"prev-tab"}"#);
-    assert_eq!(ReplyAction::Refresh.to_json(), r#"{"action":"refresh"}"#);
+    assert_eq!(
+        ReplyAction::verb("unfocus").to_json(),
+        r#"{"action":"unfocus"}"#
+    );
+    assert_eq!(
+        ReplyAction::verb("next-tab").to_json(),
+        r#"{"action":"next-tab"}"#
+    );
+    assert_eq!(
+        ReplyAction::verb("prev-tab").to_json(),
+        r#"{"action":"prev-tab"}"#
+    );
+    assert_eq!(
+        ReplyAction::verb("refresh").to_json(),
+        r#"{"action":"refresh"}"#
+    );
 }
 
 /// One request as the test server saw it.
@@ -223,7 +235,7 @@ async fn feed_routes_ops_cleans_up_reconnects_and_replies() {
         ]
     );
 
-    reply_to(&source, &ReplyAction::Focus("w-1".into()))
+    reply_to(&source, &ReplyAction::verb_on("focus", "w-1"))
         .await
         .expect("reply accepted");
 
@@ -298,7 +310,9 @@ async fn wrong_token_is_retried_and_reply_reports_status() {
             "GET /feed/events?token=wrong&features=spans%2Ckeys%2Ccursor%2Copen-file "
         ));
     }
-    let err = reply_to(&source, &ReplyAction::Refresh).await.unwrap_err();
+    let err = reply_to(&source, &ReplyAction::verb("refresh"))
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, super::client::ReplyError::Status(401)),
         "{err}"
@@ -320,12 +334,12 @@ mod reply_command {
     #[test]
     fn parses_every_verb() {
         let ok = |args: &[&str]| ReplyAction::parse(args).expect("valid");
-        assert_eq!(ok(&["next"]), ReplyAction::NextTab);
-        assert_eq!(ok(&["next-tab"]), ReplyAction::NextTab);
-        assert_eq!(ok(&["prev"]), ReplyAction::PrevTab);
-        assert_eq!(ok(&["refresh"]), ReplyAction::Refresh);
-        assert_eq!(ok(&["unfocus"]), ReplyAction::Unfocus);
-        assert_eq!(ok(&["focus", "w-1"]), ReplyAction::Focus("w-1".into()));
+        assert_eq!(ok(&["next"]), ReplyAction::verb("next-tab"));
+        assert_eq!(ok(&["next-tab"]), ReplyAction::verb("next-tab"));
+        assert_eq!(ok(&["prev"]), ReplyAction::verb("prev-tab"));
+        assert_eq!(ok(&["refresh"]), ReplyAction::verb("refresh"));
+        assert_eq!(ok(&["unfocus"]), ReplyAction::verb("unfocus"));
+        assert_eq!(ok(&["focus", "w-1"]), ReplyAction::verb_on("focus", "w-1"));
     }
 
     #[test]
@@ -363,15 +377,22 @@ mod reply_command {
             sent: Mutex::new(Vec::new()),
             answer: || Ok(()),
         };
-        assert!(send_reply(&t, ReplyAction::NextTab).await.is_none());
         assert!(
-            send_reply(&t, ReplyAction::Focus("x".into()))
+            send_reply(&t, ReplyAction::verb("next-tab"))
+                .await
+                .is_none()
+        );
+        assert!(
+            send_reply(&t, ReplyAction::verb_on("focus", "x"))
                 .await
                 .is_none()
         );
         assert_eq!(
             *t.sent.lock().unwrap(),
-            [ReplyAction::NextTab, ReplyAction::Focus("x".into())]
+            [
+                ReplyAction::verb("next-tab"),
+                ReplyAction::verb_on("focus", "x")
+            ]
         );
     }
 
@@ -381,7 +402,7 @@ mod reply_command {
             sent: Mutex::new(Vec::new()),
             answer: || Err(ReplyError::NotRunning),
         };
-        match send_reply(&not_running, ReplyAction::Refresh).await {
+        match send_reply(&not_running, ReplyAction::verb("refresh")).await {
             Some(Notification::Warn(m)) => {
                 assert!(m.contains("refresh") && m.contains("no panel feed"), "{m}")
             }
@@ -391,7 +412,7 @@ mod reply_command {
             sent: Mutex::new(Vec::new()),
             answer: || Err(ReplyError::Status(503)),
         };
-        match send_reply(&refused, ReplyAction::PrevTab).await {
+        match send_reply(&refused, ReplyAction::verb("prev-tab")).await {
             Some(Notification::Error(m)) => {
                 assert!(m.contains("prev-tab") && m.contains("503"), "{m}")
             }
@@ -402,12 +423,64 @@ mod reply_command {
     #[test]
     fn transport_errors_are_errors_and_escape_free() {
         let n = failure_notice(
-            &ReplyAction::NextTab,
+            &ReplyAction::verb("next-tab"),
             &ReplyError::Http("boom \u{1b}[31mred".into()),
         );
         match n {
             Notification::Error(m) => assert!(!m.contains('\u{1b}'), "{m:?}"),
             other => panic!("{other:?}"),
         }
+    }
+}
+
+mod reply_verbs {
+    use super::super::{DEFAULT_VERBS, ReplyAction, ReplyVerb, find_verb};
+
+    #[test]
+    fn verbs_are_opaque_names_on_the_wire() {
+        assert_eq!(
+            ReplyAction::verb("pin").to_json(),
+            r#"{"action":"pin"}"#,
+            "any producer verb serializes like the defaults"
+        );
+        assert_eq!(ReplyAction::verb_on("pin", "w-2").name(), "pin");
+    }
+
+    #[test]
+    fn checked_fits_the_target_to_the_verb() {
+        let verbs = [
+            ReplyVerb {
+                name: "pin",
+                takes_target: true,
+            },
+            ReplyVerb {
+                name: "clear",
+                takes_target: false,
+            },
+        ];
+        assert_eq!(
+            ReplyAction::checked(&verbs, "pin", Some("a")),
+            Some(ReplyAction::verb_on("pin", "a"))
+        );
+        assert_eq!(ReplyAction::checked(&verbs, "pin", None), None);
+        assert_eq!(ReplyAction::checked(&verbs, "clear", Some("a")), None);
+        assert_eq!(
+            ReplyAction::checked(&verbs, "focus", Some("a")),
+            None,
+            "not advertised"
+        );
+    }
+
+    #[test]
+    fn aliases_resolve_to_the_default_verbs() {
+        assert_eq!(
+            find_verb(DEFAULT_VERBS, "next").map(|v| v.name),
+            Some("next-tab")
+        );
+        assert_eq!(
+            find_verb(DEFAULT_VERBS, "prev").map(|v| v.name),
+            Some("prev-tab")
+        );
+        assert!(find_verb(DEFAULT_VERBS, "pin").is_none());
     }
 }

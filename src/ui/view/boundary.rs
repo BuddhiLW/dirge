@@ -150,11 +150,6 @@ pub fn reply_action(
     payload: Option<&serde_json::Value>,
 ) -> Option<ReplyAction> {
     Some(match (action, target) {
-        ("focus", Some(id)) => ReplyAction::Focus(id.to_string()),
-        ("unfocus", _) => ReplyAction::Unfocus,
-        ("next-tab", _) => ReplyAction::NextTab,
-        ("prev-tab", _) => ReplyAction::PrevTab,
-        ("refresh", _) => ReplyAction::Refresh,
         ("invoke", _) => {
             let p = payload?.as_object()?;
             ReplyAction::Invoke {
@@ -167,7 +162,15 @@ pub fn reply_action(
                     .unwrap_or_else(|| serde_json::json!({})),
             }
         }
-        _ => return None,
+        (verb, target) => {
+            // A target the verb does not take is dropped, as before.
+            let takes = panel_feed::find_verb(panel_feed::DEFAULT_VERBS, verb)?.takes_target;
+            ReplyAction::checked(
+                panel_feed::DEFAULT_VERBS,
+                verb,
+                if takes { target } else { None },
+            )?
+        }
     })
 }
 
@@ -245,24 +248,24 @@ mod tests {
     fn reply_effects_name_producer_replies() {
         assert_eq!(
             reply_action("focus", Some("a"), None),
-            Some(ReplyAction::Focus("a".into()))
+            Some(ReplyAction::verb_on("focus", "a"))
         );
         assert_eq!(reply_action("focus", None, None), None);
         assert_eq!(
             reply_action("next-tab", None, None),
-            Some(ReplyAction::NextTab)
+            Some(ReplyAction::verb("next-tab"))
         );
         assert_eq!(
             reply_action("prev-tab", None, None),
-            Some(ReplyAction::PrevTab)
+            Some(ReplyAction::verb("prev-tab"))
         );
         assert_eq!(
             reply_action("refresh", None, None),
-            Some(ReplyAction::Refresh)
+            Some(ReplyAction::verb("refresh"))
         );
         assert_eq!(
             reply_action("unfocus", None, None),
-            Some(ReplyAction::Unfocus)
+            Some(ReplyAction::verb("unfocus"))
         );
         assert_eq!(reply_action("warp", None, None), None);
     }
@@ -281,18 +284,14 @@ mod tests {
     #[test]
     fn every_wire_reply_round_trips() {
         for action in [
-            ReplyAction::Focus("x".into()),
-            ReplyAction::Unfocus,
-            ReplyAction::NextTab,
-            ReplyAction::PrevTab,
-            ReplyAction::Refresh,
+            ReplyAction::verb_on("focus", "x"),
+            ReplyAction::verb("unfocus"),
+            ReplyAction::verb("next-tab"),
+            ReplyAction::verb("prev-tab"),
+            ReplyAction::verb("refresh"),
         ] {
-            let target = match &action {
-                ReplyAction::Focus(id) => Some(id.as_str()),
-                _ => None,
-            };
             assert_eq!(
-                reply_action(action.name(), target, None),
+                reply_action(action.name(), action.target(), None),
                 Some(action.clone())
             );
         }

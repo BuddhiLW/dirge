@@ -240,12 +240,8 @@ impl NativeReducer {
             "debug" => vec![mode(PanelScope::Right, "debug"), ViewEffect::PanelStatus],
             _ => match ReplyAction::parse(args) {
                 Ok(action) => {
-                    let target = match &action {
-                        ReplyAction::Focus(id) => Some(id.clone()),
-                        _ => None,
-                    };
                     vec![
-                        reply(action.name(), target),
+                        reply(action.name(), action.target().map(str::to_owned)),
                         notify(
                             NoticeLevel::Info,
                             format!("panel reply '{}' requested", action.name()),
