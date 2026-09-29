@@ -808,8 +808,9 @@ impl Interp {
     }
 
     /// Evaluate `src` form by form in the host namespace, whatever its own
-    /// ns form says, and return to `user`. cljrs's `load-file` does not
-    /// switch the namespace its defs land in, so an overlay goes through
+    /// ns form says, and return to `user`. `load-file` of an overlay (a file
+    /// declaring the builtin-source `dirge.addon.host`) was measured to
+    /// leave the host's definitions unchanged, so overlays come through
     /// here rather than through it.
     fn eval_in_host(&mut self, src: &str) -> Result<(), String> {
         let out = self
