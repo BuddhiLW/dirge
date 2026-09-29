@@ -136,9 +136,10 @@ fn posted_events_reach_the_event_hook_in_order() {
     }
 
     // Commands run in the order they were queued, so the posts ran first.
+    // `turn-start` is heard as it serializes, its `:index` included.
     assert_eq!(
         tool_text(&host, "heard", json!({})),
-        "turn-start,tool-call,done"
+        "turn-start:0,tool-call,done"
     );
 }
 

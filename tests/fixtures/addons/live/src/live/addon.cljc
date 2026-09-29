@@ -23,7 +23,10 @@
 
 (defn- heard
   [_]
-  (text (apply str (interpose "," (map (fn [e] (clojure.core/name (:event e))) @!heard)))))
+  (text (apply str (interpose "," (map (fn [{:keys [event index]}]
+                                         (cond-> (clojure.core/name event)
+                                           index (str ":" index)))
+                                       @!heard)))))
 
 (defn- extra-tool
   [n]
