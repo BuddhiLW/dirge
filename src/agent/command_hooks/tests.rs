@@ -66,6 +66,8 @@ fn cmd(command: &str) -> HookCommand {
         kind: "command".into(),
         command: command.into(),
         timeout: Some(5),
+        addon: None,
+        handler: None,
     }
 }
 
@@ -223,9 +225,168 @@ fn normalize_drops_non_command_and_blank_entries() {
                 kind: "prompt".into(),
                 command: "x".into(),
                 timeout: None,
+                addon: None,
+                handler: None,
             }],
         });
     assert!(policy::normalize(cfg).is_empty());
+}
+
+// ------------------------------------------------------- addon entries
+
+fn addon_cmd(addon: &str, handler: &str) -> HookCommand {
+    HookCommand {
+        kind: "addon".into(),
+        command: String::new(),
+        timeout: Some(5),
+        addon: Some(addon.into()),
+        handler: Some(handler.into()),
+    }
+}
+
+fn one_entry(event: HookEvent, hook: HookCommand) -> HooksConfig {
+    let mut cfg = HooksConfig::new();
+    cfg.insert(
+        event.as_str().to_string(),
+        vec![HookMatcher {
+            matcher: None,
+            hooks: vec![hook],
+        }],
+    );
+    cfg
+}
+
+#[test]
+fn addon_entries_parse_and_survive_normalize() {
+    let text = r#"{"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
+        {"type": "addon", "addon": "hive.dirge", "handler": "guard", "timeout": 10},
+        {"type": "addon", "addon": "hive.dirge"},
+        {"type": "addon", "addon": " ", "handler": "guard"}
+    ]}]}}"#;
+    let cfg = policy::normalize(policy::parse_settings_hooks("t", text).unwrap());
+    let hooks = &cfg["PreToolUse"][0].hooks;
+    assert_eq!(
+        hooks.len(),
+        1,
+        "an addon entry needs both addon and handler"
+    );
+    assert_eq!(hooks[0].addon_target(), Some(("hive.dirge", "guard")));
+    assert_eq!(hooks[0].timeout_secs(), 10);
+    assert_eq!(hooks[0].label(), "addon:hive.dirge/guard");
+}
+
+#[test]
+fn addon_answers_read_as_the_process_they_stand_in_for() {
+    let answer = json!({"hookSpecificOutput": {"permissionDecision": "deny"}});
+    assert_eq!(
+        policy::addon_answer(&answer),
+        exit(0, &answer.to_string(), "")
+    );
+    assert_eq!(
+        policy::addon_answer(&json!({"exit": 2, "stderr": "no"})),
+        exit(2, "", "no")
+    );
+    assert_eq!(policy::addon_answer(&Value::Null), exit(0, "", ""));
+    assert_eq!(policy::addon_answer(&json!("ctx")), exit(0, "ctx", ""));
+    assert_eq!(policy::addon_answer(&json!({})), exit(0, "{}", ""));
+}
+
+/// Stands in for the live addon runner: the handler's value, read by
+/// `policy::addon_answer`, or an error as the live runner reports it.
+struct ScriptedAddon(Result<Value, HookError>);
+
+impl HookRunner for ScriptedAddon {
+    fn run(&self, cmd: &HookCommand, _: &str, _: &Path) -> Result<Exited, HookError> {
+        assert!(cmd.addon_target().is_some());
+        self.0.clone().map(|v| policy::addon_answer(&v))
+    }
+}
+
+fn dispatch(addon: Option<Arc<dyn HookRunner>>) -> Arc<dyn HookRunner> {
+    Arc::new(super::boundary::DispatchRunner::new(
+        Arc::new(ShellRunner),
+        Arc::new(move || addon.clone()),
+    ))
+}
+
+#[test]
+fn an_addon_entry_without_an_addon_runner_fails_open() {
+    let hooks = registry(
+        one_entry(HookEvent::PreToolUse, addon_cmd("hive.dirge", "guard")),
+        dispatch(None),
+    );
+    let out = hooks.run(HookEvent::PreToolUse, &["Bash"], &json!({}));
+    assert_eq!(out, HookOutcome::default());
+}
+
+#[test]
+fn dispatch_sends_command_entries_to_the_shell() {
+    let hooks = registry(
+        one_entry(HookEvent::PreToolUse, cmd("echo nope >&2; exit 2")),
+        dispatch(Some(Arc::new(ScriptedAddon(Ok(Value::Null))))),
+    );
+    let out = hooks.run(HookEvent::PreToolUse, &["Bash"], &json!({}));
+    assert_eq!(out, HookOutcome::blocked("nope"));
+}
+
+/// The same answer through `sh` and through an addon lands on the same
+/// outcome: one decoder, `policy::interpret`, reads both.
+#[test]
+fn addon_and_shell_runners_agree_on_every_answer() {
+    let deny = deny_json("rule R1");
+    let warn = warn_json("careful");
+    let stop = json!({"decision": "block", "reason": "not yet"}).to_string();
+    let cases: Vec<(HookEvent, String, Result<Value, HookError>)> = vec![
+        (
+            HookEvent::PreToolUse,
+            format!("printf '%s' '{deny}'"),
+            Ok(serde_json::from_str(&deny).unwrap()),
+        ),
+        (
+            HookEvent::PreToolUse,
+            format!("printf '%s' '{warn}'"),
+            Ok(serde_json::from_str(&warn).unwrap()),
+        ),
+        (
+            HookEvent::Stop,
+            format!("printf '%s' '{stop}'"),
+            Ok(serde_json::from_str(&stop).unwrap()),
+        ),
+        (HookEvent::PreToolUse, "printf '{}'".into(), Ok(json!({}))),
+        (HookEvent::PreToolUse, "true".into(), Ok(Value::Null)),
+        (
+            HookEvent::PreToolUse,
+            "echo blocked >&2; exit 2".into(),
+            Ok(json!({"exit": 2, "stderr": "blocked\n"})),
+        ),
+        (
+            HookEvent::PreToolUse,
+            "echo broken >&2; exit 3".into(),
+            Ok(json!({"exit": 3, "stderr": "broken\n"})),
+        ),
+        (
+            HookEvent::SessionStart,
+            "printf 'plain context'".into(),
+            Ok(json!("plain context")),
+        ),
+        (
+            HookEvent::PreToolUse,
+            "sleep 5".into(),
+            Err(HookError::TimedOut(1)),
+        ),
+    ];
+    for (event, shell, addon) in cases {
+        let mut shell_cmd = cmd(&shell);
+        shell_cmd.timeout = Some(1);
+        let via_shell =
+            registry(one_entry(event, shell_cmd), dispatch(None)).run(event, &["Bash"], &json!({}));
+        let via_addon = registry(
+            one_entry(event, addon_cmd("hive.dirge", "guard")),
+            dispatch(Some(Arc::new(ScriptedAddon(addon)))),
+        )
+        .run(event, &["Bash"], &json!({}));
+        assert_eq!(via_addon, via_shell, "{event} `{shell}`");
+    }
 }
 
 #[test]

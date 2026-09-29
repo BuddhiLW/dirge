@@ -82,6 +82,39 @@ pub fn payload(event: HookEvent, session_id: Option<&str>, cwd: &str, extra: Val
     Value::Object(obj)
 }
 
+/// An addon handler's answer, read as the process it stands in for, so
+/// [`interpret`] decodes both the same way:
+/// - `{"exit": n, "stdout": s, "stderr": s}`: that exit, verbatim;
+/// - a string: exit 0 with it on stdout;
+/// - `null`: exit 0, nothing said;
+/// - anything else (a Claude JSON answer, typically): exit 0 with its
+///   JSON on stdout.
+pub fn addon_answer(answer: &Value) -> Exited {
+    let text = |v: Option<&Value>| v.and_then(Value::as_str).unwrap_or("").to_string();
+    match answer {
+        Value::Object(fields) if fields.get("exit").is_some_and(Value::is_i64) => Exited {
+            code: fields.get("exit").and_then(Value::as_i64).map(|c| c as i32),
+            stdout: text(fields.get("stdout")),
+            stderr: text(fields.get("stderr")),
+        },
+        Value::Null => Exited {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        },
+        Value::String(s) => Exited {
+            code: Some(0),
+            stdout: s.clone(),
+            stderr: String::new(),
+        },
+        other => Exited {
+            code: Some(0),
+            stdout: other.to_string(),
+            stderr: String::new(),
+        },
+    }
+}
+
 /// Claude Code's reading of a finished command: exit 2 blocks with
 /// stderr, exit 0 may carry a JSON answer (or, for some events, plain
 /// context), anything else is a failure.
