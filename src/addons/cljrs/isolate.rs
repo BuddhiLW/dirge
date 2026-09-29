@@ -791,7 +791,7 @@ impl Interp {
 
     /// Evaluate the builtin host again, then `overlays` over it.
     fn restore_builtin_host(&mut self, overlays: &[PathBuf]) {
-        if let Err(error) = eval_source(&mut self.env, HOST_SRC).and_then(|_| self.in_user_ns()) {
+        if let Err(error) = self.eval_in_host(HOST_SRC) {
             tracing::error!(target: "dirge::addon", %error, "cannot evaluate the builtin addon host again");
         }
         for overlay in overlays {
@@ -801,13 +801,22 @@ impl Interp {
         }
     }
 
-    /// `load-file` `path`, back in the `user` namespace afterwards.
+    /// Evaluate the forms of the file at `path` in the host namespace.
     fn load_file(&mut self, path: &Path) -> Result<(), String> {
-        *self.inbox.borrow_mut() = vec![Json::String(path.display().to_string())];
-        let out = self.eval_str(&format!("(apply load-file ({BRIDGE_NS}/args))"));
-        self.inbox.borrow_mut().clear();
+        let src = std::fs::read_to_string(path).map_err(|e| format!("cannot read it: {e}"))?;
+        self.eval_in_host(&src)
+    }
+
+    /// Evaluate `src` form by form in the host namespace, whatever its own
+    /// ns form says, and return to `user`. cljrs's `load-file` does not
+    /// switch the namespace its defs land in, so an overlay goes through
+    /// here rather than through it.
+    fn eval_in_host(&mut self, src: &str) -> Result<(), String> {
+        let out = self
+            .eval_str(&format!("(in-ns '{HOST_NS})"))
+            .and_then(|_| eval_source(&mut self.env, src));
         let back = self.in_user_ns();
-        out.and(back)
+        out.map(|_| ()).and(back)
     }
 
     fn in_user_ns(&mut self) -> Result<(), String> {
