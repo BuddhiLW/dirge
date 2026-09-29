@@ -32,6 +32,10 @@
   [id]
   {:op :unpaint :id id})
 
+(defn span
+  [text face]
+  {:text (str text) :face (or face "")})
+
 (defn paint
   "The effect that sets panel `id` as the state holds it."
   [state id]
@@ -39,9 +43,10 @@
     {:op     :paint
      :id     id
      :title  (:title p)
-     :rows   (if (and (:cursor? p) (seq (:rows p)))
+     :rows   (if (and (= id (:focused state)) (:cursor? p) (seq (:rows p)))
                (assoc (:rows p) (:cursor p)
-                      (mapv #(assoc % :face "cursor") (nth (:rows p) (:cursor p))))
+                      (into [(span "▸ " "cursor")]
+                            (mapv #(assoc % :face "cursor") (nth (:rows p) (:cursor p)))))
                (:rows p))
      :tail   (boolean (:tail p))
      :offset (:offset p)
@@ -49,10 +54,6 @@
 
 ;; ---------------------------------------------------------------------------
 ;; Rows
-
-(defn span
-  [text face]
-  {:text (str text) :face (or face "")})
 
 (defn line->row
   "A wire line as a row: a bare string, {:text :face}, or {:face :spans}
@@ -259,7 +260,7 @@
 
 (defn panel-keys [state]
   (if-let [p (get-in state [:panels (:focused state)])]
-    (vec (sort (distinct (concat (map name (keys (:keys p)))
+    (vec (sort (distinct (concat ["Esc"] (map name (keys (:keys p)))
                                 (keys scroll-keys)))))
     []))
 
@@ -272,6 +273,8 @@
         delta (get scroll-keys key)]
     (cond
       (not= panel (:focused state)) [state []]
+      (= key "Esc") (let [state (assoc state :focused nil)]
+                      [state [(paint state panel)]])
       (and (string? verb) (not (str/blank? verb)))
       [state [{:op :reply :action "invoke"
                :payload {:panel panel :verb verb

@@ -55,6 +55,7 @@ pub fn key_name(key: &KeyEvent) -> Option<String> {
 /// Ctrl+C.
 pub fn route_key(model: &ViewModel, key: &KeyEvent, action: Option<KeyAction>) -> KeyRoute {
     if let Some(name) = key_name(key)
+        && model.swarm_open()
         && model.grid_consumes(&name)
     {
         return KeyRoute::Grid(name);
@@ -232,6 +233,29 @@ mod tests {
             route_key(&m, &key(KeyCode::Char('c'), KeyModifiers::CONTROL), None),
             KeyRoute::PassThrough
         );
+    }
+
+    #[test]
+    fn closed_grid_does_not_steal_panel_scroll_and_esc_releases_typing() {
+        let mut m = model(false);
+        m.panel_keys = vec!["Esc".into(), "j".into(), "n".into()];
+        assert_eq!(
+            route_key(&m, &key(KeyCode::Char('j'), KeyModifiers::NONE), None),
+            KeyRoute::Panel("j".into())
+        );
+        assert_eq!(
+            route_key(&m, &key(KeyCode::Esc, KeyModifiers::NONE), None),
+            KeyRoute::Panel("Esc".into())
+        );
+        m.panel_keys.clear();
+        // With no panel focused these keys are no longer claimed by the
+        // view; the UI's ordinary input path must handle them.
+        for letter in ['j', 'n'] {
+            assert_ne!(
+                route_key(&m, &key(KeyCode::Char(letter), KeyModifiers::NONE), None),
+                KeyRoute::Panel(letter.to_string())
+            );
+        }
     }
 
     #[test]

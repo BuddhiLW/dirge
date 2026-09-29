@@ -218,6 +218,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn paint_boundary_preserves_styled_spans_and_cursor_marker() {
+        let line = paint_line(&[
+            PaintSpan {
+                text: "▸ ".into(),
+                face: "cursor".into(),
+            },
+            PaintSpan {
+                text: "alpha ".into(),
+                face: "heading".into(),
+            },
+            PaintSpan {
+                text: "first".into(),
+                face: "muted".into(),
+            },
+        ]);
+        assert_eq!(line.text, "▸ alpha first");
+        let segments = line.segments();
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0], ("▸ ", PanelFace::Accent));
+        assert_eq!(segments[1], ("alpha ", PanelFace::Accent));
+        assert_eq!(segments[2], ("first", PanelFace::Dim));
+    }
+
+    #[test]
     fn reply_effects_name_producer_replies() {
         assert_eq!(
             reply_action("focus", Some("a"), None),

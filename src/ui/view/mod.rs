@@ -97,6 +97,9 @@ pub fn start(sink: UpdateSink) -> ViewModel {
             Ok((engine, model)) => {
                 tracing::info!(target: "dirge::view", engine = name, "view engine started");
                 let _ = ENGINE.set(Box::new(engine));
+                // The feed may deliver its first SSE event immediately on
+                // subscription; publish ownership before starting that task.
+                set_owns_feed(model.owns_feed);
                 return model;
             }
             Err(error) => {

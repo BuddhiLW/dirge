@@ -1650,15 +1650,14 @@ pub async fn run_interactive(
     // first use, so producers that fired before this point have their
     // ops queued and drained on the first iterations below.
     let mut panel_rx = crate::ui::panels_ext::take_receiver();
-    // Optional external panel feed (`panel_feed` config, off by
-    // default). The handle lives for the whole loop; dropping it on
-    // any exit path stops the subscription task.
-    let _panel_feed = crate::extras::panel_feed::start(cfg.panel_feed.as_ref());
     // View engine (`ui::view`): the view commands and the swarm grid run
     // off this loop and apart from the agent. Updates arrive on `view_rx`;
     // the latest model decides locally which keys and commands it owns.
     let (view_tx, mut view_rx) = mpsc::unbounded_channel::<crate::ui::view::ViewUpdate>();
     let mut view_model = crate::ui::view::start(view_tx);
+    // Optional external panel feed (off by default). Its handle lives for
+    // the loop; dropping it on exit stops the subscription task.
+    let _panel_feed = crate::extras::panel_feed::start(cfg.panel_feed.as_ref());
 
     let (user_tx, mut user_rx) = mpsc::unbounded_channel::<UserEvent>();
     input_reader::spawn_input_reader(user_tx.clone());

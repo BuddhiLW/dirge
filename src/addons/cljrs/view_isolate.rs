@@ -231,10 +231,10 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 u.model.panel_keys,
-                vec!["Down", "Enter", "PgDn", "PgUp", "Up", "j", "k", "n"]
+                vec!["Down", "Enter", "Esc", "PgDn", "PgUp", "Up", "j", "k", "n"]
             );
             assert!(
-                matches!(&u.effects[0], ViewEffect::Paint {rows, ..} if rows[0][0].face == "cursor")
+                matches!(&u.effects[0], ViewEffect::Paint {rows, focus: true, ..} if rows[0][0] == span("▸ ", "cursor") && rows[0][1] == span("alpha", "cursor"))
             );
             let u = r
                 .step(&ViewEvent::Key {
@@ -243,7 +243,7 @@ mod tests {
                 })
                 .unwrap();
             assert!(
-                matches!(&u.effects[0], ViewEffect::Paint {offset:1, rows, ..} if rows[1][0].face == "cursor")
+                matches!(&u.effects[0], ViewEffect::Paint {offset:1, rows, ..} if rows[1][0] == span("▸ ", "cursor") && rows[1][1] == span("beta", "cursor"))
             );
             let u = r
                 .step(&ViewEvent::Key {
@@ -263,11 +263,33 @@ mod tests {
             );
             let u = r
                 .step(&ViewEvent::Key {
+                    key: "Esc".into(),
+                    panel: "lens".into(),
+                })
+                .unwrap();
+            assert!(
+                u.model.panel_keys.is_empty(),
+                "release focus in the published model"
+            );
+            assert!(matches!(
+                &u.effects[..],
+                [ViewEffect::Paint { focus: false, rows, .. }] if rows[1] == vec![span("beta", "")]
+            ));
+            let u = r
+                .step(&ViewEvent::Key {
+                    key: "Enter".into(),
+                    panel: "lens".into(),
+                })
+                .unwrap();
+            assert!(u.effects.is_empty(), "released panel cannot invoke");
+            // Unfocused panels ignore scroll events as well as invocations.
+            let u = r
+                .step(&ViewEvent::Key {
                     key: "PgUp".into(),
                     panel: "lens".into(),
                 })
                 .unwrap();
-            assert!(matches!(&u.effects[0], ViewEffect::Paint { offset: 0, .. }));
+            assert!(u.effects.is_empty());
             for name in ["open-file", "ui/open-file"] {
                 let u = r
                     .step(&feed(
