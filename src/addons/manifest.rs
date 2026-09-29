@@ -11,8 +11,8 @@
 //! `:addon/id` names the addon, `:addon/init-ns` is the namespace to load
 //! and `:addon/init-fn` the zero-argument constructor in it that returns
 //! the addon instance. An optional `:addon/protocol-ns` names the IAddon
-//! protocol namespace the addon implements, when it is not dirge's own
-//! `dirge.addon.protocol`. Values may be written as symbols, strings or
+//! protocol namespace the addon implements, when it is not the embedded
+//! `hive-addon.protocol`. Values may be written as symbols, strings or
 //! keywords. A qualified `:addon/init-fn` (`ns/fn`) is accepted as long as
 //! its namespace matches `:addon/init-ns`. Unknown keys are ignored so
 //! manifests can carry data for other hosts.

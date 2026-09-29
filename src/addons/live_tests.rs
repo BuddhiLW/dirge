@@ -33,7 +33,7 @@ fn live_plan(addons: &Path) -> AddonPlan {
     discovery::plan(
         &[addons.to_path_buf()],
         &[fixtures().join("protocol/src")],
-        &[super::layout::MANIFEST_DIR.to_string()],
+        &super::layout::default_manifest_dirs(),
     )
 }
 

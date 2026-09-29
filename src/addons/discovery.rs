@@ -154,7 +154,7 @@ mod tests {
     }
 
     fn dirge_dirs() -> Vec<String> {
-        vec![layout::MANIFEST_DIR.to_string()]
+        layout::default_manifest_dirs()
     }
 
     struct TempDir(PathBuf);

@@ -9,9 +9,15 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// The directory under `META-INF` that holds dirge's manifests. Others
+/// Directories under `META-INF` that hold manifests by default: dirge's
+/// `addons` and hive-addon's own `hive-addons` (its mount layout). Others
 /// are added by `addons.manifest_dirs`.
-pub const MANIFEST_DIR: &str = "addons";
+pub const MANIFEST_DIRS: [&str; 2] = ["addons", "hive-addons"];
+
+/// [`MANIFEST_DIRS`] as the owned list [`is_manifest`] takes.
+pub fn default_manifest_dirs() -> Vec<String> {
+    MANIFEST_DIRS.iter().map(|d| d.to_string()).collect()
+}
 
 /// True when `path` is `.../META-INF/<one of manifest_dirs>/<name>.edn`.
 pub fn is_manifest(path: &Path, manifest_dirs: &[String]) -> bool {
@@ -168,8 +174,12 @@ mod tests {
 
     #[test]
     fn recognizes_only_manifests_under_meta_inf() {
-        let dirs = [MANIFEST_DIR.to_string()];
+        let dirs = default_manifest_dirs();
         assert!(is_manifest(Path::new(MANIFEST), &dirs));
+        assert!(is_manifest(
+            Path::new("/w/x/META-INF/hive-addons/a.edn"),
+            &dirs
+        ));
         assert!(!is_manifest(
             Path::new("/w/x/resources/addons/a.edn"),
             &dirs
@@ -182,8 +192,9 @@ mod tests {
     #[test]
     fn another_hosts_manifest_dir_counts_only_when_configured() {
         let other = Path::new("/w/x/META-INF/other-addons/a.edn");
-        assert!(!is_manifest(other, &[MANIFEST_DIR.to_string()]));
-        let dirs = [MANIFEST_DIR.to_string(), "other-addons".to_string()];
+        assert!(!is_manifest(other, &default_manifest_dirs()));
+        let mut dirs = default_manifest_dirs();
+        dirs.push("other-addons".to_string());
         assert!(is_manifest(other, &dirs));
         assert!(is_manifest(Path::new(MANIFEST), &dirs));
     }

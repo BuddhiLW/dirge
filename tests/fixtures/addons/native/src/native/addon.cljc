@@ -1,7 +1,7 @@
 (ns native.addon
-  "An addon implementing dirge's built-in protocol, with no protocol
-   library on its source roots."
-  (:require [dirge.addon.protocol :as p]))
+  "An addon implementing hive-addon's IAddon, which dirge embeds, with no
+   protocol library on its source roots."
+  (:require [hive-addon.protocol :as p]))
 
 (defrecord NativeAddon []
   p/IAddon

@@ -43,8 +43,9 @@ use host::{AddonHost, LoadSet};
 use port::Harness;
 
 /// Protocol namespace used when neither `addons.protocol_ns` nor a
-/// manifest's `:addon/protocol-ns` names one: dirge's own, built in.
-pub const DEFAULT_PROTOCOL_NS: &str = "dirge.addon.protocol";
+/// manifest's `:addon/protocol-ns` names one: hive-addon's IAddon, which
+/// dirge embeds, so it resolves with no library on the source roots.
+pub const DEFAULT_PROTOCOL_NS: &str = "hive-addon.protocol";
 
 static HOST: OnceLock<Arc<AddonHost>> = OnceLock::new();
 
@@ -390,11 +391,10 @@ fn search_dirs(settings: &crate::config::AddonsConfig) -> Vec<PathBuf> {
     dirs
 }
 
-/// Directory names under `META-INF` that hold manifests: `addons`, then
-/// configured `addons.manifest_dirs` (another host's convention, e.g. one
-/// whose addons also load in dirge).
+/// Directory names under `META-INF` that hold manifests: `addons` and
+/// `hive-addons`, then configured `addons.manifest_dirs`.
 fn manifest_dirs(settings: &crate::config::AddonsConfig) -> Vec<String> {
-    let mut names = vec![layout::MANIFEST_DIR.to_string()];
+    let mut names = layout::default_manifest_dirs();
     for name in &settings.manifest_dirs {
         if !name.is_empty() && !names.contains(name) {
             names.push(name.clone());
@@ -479,7 +479,7 @@ mod protocol_choice_tests {
     }
 
     #[test]
-    fn no_declaration_binds_dirges_own_protocol() {
+    fn no_declaration_binds_hive_addons_protocol() {
         assert_eq!(declared_protocol(&[]), DEFAULT_PROTOCOL_NS);
     }
 
@@ -490,11 +490,14 @@ mod protocol_choice_tests {
     }
 
     #[test]
-    fn manifest_dirs_start_with_dirges_own_and_skip_repeats() {
+    fn manifest_dirs_start_with_the_defaults_and_skip_repeats() {
         let settings = crate::config::AddonsConfig {
             manifest_dirs: vec!["addons".into(), "other".into(), "".into(), "other".into()],
             ..Default::default()
         };
-        assert_eq!(manifest_dirs(&settings), vec!["addons", "other"]);
+        assert_eq!(
+            manifest_dirs(&settings),
+            vec!["addons", "hive-addons", "other"]
+        );
     }
 }
