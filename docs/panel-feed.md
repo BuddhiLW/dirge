@@ -280,9 +280,10 @@ without sending a reply. Declared keys send the selected row id (or null):
 ```
 
 The five existing focus/unfocus/next-tab/prev-tab/refresh replies remain
-valid aliases. `ui/open-file` accepts `path`, optional 1-based `line`, and
+valid aliases. `open-file` accepts `path`, optional 1-based `line`, and
 optional unified `diff`. The path must resolve to an existing regular file
 inside the current project root, including after symlink resolution. dirge
 opens it in the configured external editor, or previews its content in a
 panel; if `diff` is present it previews the supplied diff instead. A refused
-path produces a notice, never an editor launch.
+path produces a notice, never an editor launch. `ui/open-file` remains an
+alias for compatibility.

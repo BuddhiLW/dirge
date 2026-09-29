@@ -2073,10 +2073,11 @@ pub async fn run_interactive(
                                 // stays inert, other global commands and
                                 // Ctrl+C pass through. Decided from the model
                                 // alone; the loop never waits on the engine.
-                                if !from_sequence && view_model.swarm_open() {
+                                if !from_sequence {
                                     use crate::ui::view::promote::{KeyRoute, grid_event, route_key};
+                                    let grid_open = view_model.swarm_open();
                                     match route_key(&view_model, &key, action) {
-                                        KeyRoute::Grid(name) => {
+                                        KeyRoute::Grid(name) if grid_open => {
                                             crate::ui::view::submit(grid_event(
                                                 name,
                                                 renderer.swarm_cells(),
@@ -2087,20 +2088,12 @@ pub async fn run_interactive(
                                         KeyRoute::Panel(name) => {
                                             if let Some(panel) = renderer.focused_external_panel_id() {
                                                 crate::ui::view::submit(crate::ui::view::ViewEvent::Key { key: name, panel });
+                                                continue;
                                             }
-                                            continue;
+                                            if grid_open { continue; }
                                         }
-                                        KeyRoute::Swallow => continue,
-                                        KeyRoute::PassThrough => {}
-                                    }
-                                }
-                                if !from_sequence && !view_model.swarm_open() {
-                                    use crate::ui::view::promote::{KeyRoute, route_key};
-                                    if let KeyRoute::Panel(name) = route_key(&view_model, &key, action)
-                                        && let Some(panel) = renderer.focused_external_panel_id()
-                                    {
-                                        crate::ui::view::submit(crate::ui::view::ViewEvent::Key { key: name, panel });
-                                        continue;
+                                        KeyRoute::Swallow if grid_open => continue,
+                                        _ => {}
                                     }
                                 }
                                 let is_ctrl_c = !from_sequence
@@ -4982,33 +4975,10 @@ pub async fn run_interactive(
                                     input.set_text(&format!("/msg {id} "));
                                 }
                                 Handoff::OpenFile { path, line, diff } => {
-                                    let cwd = std::path::Path::new(session.working_dir.as_str());
-                                    match editor_follow::project_file(&path, cwd) {
-                                        Ok(file) => {
-                                            if let Some(diff) = diff {
-                                                renderer.apply_external_panel_op(crate::ui::panels_ext::PanelOp::Show {
-                                                    id: "file-preview".into(),
-                                                    title: file.display().to_string(),
-                                                    lines: diff.lines().take(1000).map(|text| {
-                                                        crate::ui::panels_ext::PanelLine::new(text, crate::extras::panel_feed::ops::face_of(
-                                                            Some(if text.starts_with('+') { "added" } else if text.starts_with('-') { "removed" } else { "code" })))
-                                                    }).collect(),
-                                                });
-                                            } else if let Some(template) = cfg.editor_open_command.as_deref().filter(|s| !s.trim().is_empty()) {
-                                                let argv = editor_follow::build_editor_open_argv(template, &file.to_string_lossy(), line);
-                                                editor_follow::spawn_editor_follow(&argv);
-                                            } else {
-                                                let content = std::fs::read_to_string(&file).unwrap_or_else(|e| format!("cannot preview file: {e}"));
-                                                renderer.apply_external_panel_op(crate::ui::panels_ext::PanelOp::Show {
-                                                    id: "file-preview".into(),
-                                                    title: file.display().to_string(),
-                                                    lines: content.lines().skip(line.unwrap_or(1).saturating_sub(1)).take(1000)
-                                                        .map(|s| crate::ui::panels_ext::PanelLine::new(s, crate::ui::panels_ext::PanelFace::Normal)).collect(),
-                                                });
-                                            }
-                                        }
-                                        Err(e) => crate::ui::notifications::notify_send(crate::ui::notifications::Notification::Warn(format!("open file refused: {e}"))),
-                                    }
+                                    editor_follow::open_file(
+                                        &mut renderer, cfg, std::path::Path::new(session.working_dir.as_str()),
+                                        &path, line, diff.as_deref(),
+                                    );
                                 }
                             }
                         }

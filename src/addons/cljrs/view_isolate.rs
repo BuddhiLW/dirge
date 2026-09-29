@@ -268,19 +268,21 @@ mod tests {
                 })
                 .unwrap();
             assert!(matches!(&u.effects[0], ViewEffect::Paint { offset: 0, .. }));
-            let u = r
-                .step(&feed(
-                    json!({"op":"ui/open-file", "path":"src/lib.rs", "line":9, "diff":"+hi"}),
-                ))
-                .unwrap();
-            assert_eq!(
-                u.effects,
-                vec![ViewEffect::OpenFile {
-                    path: "src/lib.rs".into(),
-                    line: Some(9),
-                    diff: Some("+hi".into())
-                }]
-            );
+            for name in ["open-file", "ui/open-file"] {
+                let u = r
+                    .step(&feed(
+                        json!({"op":name, "path":"src/lib.rs", "line":9, "diff":"+hi"}),
+                    ))
+                    .unwrap();
+                assert_eq!(
+                    u.effects,
+                    vec![ViewEffect::OpenFile {
+                        path: "src/lib.rs".into(),
+                        line: Some(9),
+                        diff: Some("+hi".into())
+                    }]
+                );
+            }
         });
     }
 

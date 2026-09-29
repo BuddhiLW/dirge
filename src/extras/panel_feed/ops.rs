@@ -234,7 +234,7 @@ pub fn decode(data: &str) -> Result<FeedEffect, Skip> {
 /// opened when the stream ends) or `None`.
 pub fn route(data: &str, sink: &dyn FeedSink) -> Option<String> {
     if let Some(event @ ViewEvent::Feed { .. }) = feed_event(data)
-        && matches!(&event, ViewEvent::Feed { op } if op.get("op").and_then(Value::as_str) == Some("ui/open-file"))
+        && matches!(&event, ViewEvent::Feed { op } if matches!(op.get("op").and_then(Value::as_str), Some("open-file" | "ui/open-file")))
     {
         crate::ui::view::submit(event);
         return None;

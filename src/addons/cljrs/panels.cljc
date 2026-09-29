@@ -97,35 +97,28 @@
         [cur out] (reduce step [[] []] row)]
     (conj out cur)))
 
+(defn row-entries-of
+  "Body rows with parallel id and payload; only the first split row inherits metadata."
+  [op]
+  (let [lines (if (sequential? (:lines op)) (:lines op)
+                  (when (string? (:text op)) [(:text op)]))]
+    (vec (mapcat (fn [line]
+                   (when-let [row (line->row line)]
+                     (map-indexed (fn [i split]
+                                    {:row split
+                                     :id (when (and (zero? i) (map? line)) (:id line))
+                                     :payload (when (and (zero? i) (map? line)) (:payload line))})
+                                  (split-row row))))
+                 lines))))
+
+(defn rows-of [op] (mapv :row (row-entries-of op)))
+
 (defn row-ids-of
   "Stable identifiers parallel to the rows (only the first split row gets an id)."
   [op]
-  (let [lines (if (sequential? (:lines op)) (:lines op)
-                  (when (string? (:text op)) [(:text op)]))]
-    (vec (mapcat (fn [line]
-                   (let [row (line->row line)
-                         n (count (split-row row))]
-                     (concat [(when (map? line) (:id line))] (repeat (dec n) nil))))
-                 (filter #(some? (line->row %)) lines)))))
+  (mapv :id (row-entries-of op)))
 
-(defn row-payloads-of
-  [op]
-  (let [lines (if (sequential? (:lines op)) (:lines op)
-                  (when (string? (:text op)) [(:text op)]))]
-    (vec (mapcat (fn [line]
-                   (let [n (count (split-row (line->row line)))]
-                     (concat [(when (map? line) (:payload line))] (repeat (dec n) nil))))
-                 (filter #(some? (line->row %)) lines)))))
-
-(defn rows-of
-  "The body rows of a show op: its :lines, else its :text."
-  [op]
-  (let [lines (:lines op)
-        raw   (cond
-                (sequential? lines)    (remove nil? (map line->row lines))
-                (string? (:text op))   [(line->row (:text op))]
-                :else                  [])]
-    (vec (mapcat split-row raw))))
+(defn row-payloads-of [op] (mapv :payload (row-entries-of op)))
 
 (defn row-text
   [row]
@@ -199,9 +192,10 @@
   (if-let [id (panel-id op)]
     (let [title       (title-of op id)
           [state evs] (ensure-panel state id title false)
-          all-rows    (rows-of op)
-          all-ids     (row-ids-of op)
-          all-payloads (row-payloads-of op)
+          entries     (row-entries-of op)
+          all-rows    (mapv :row entries)
+          all-ids     (mapv :id entries)
+          all-payloads (mapv :payload entries)
           dropped     (- (count all-rows) (count (drop-title-row all-rows title)))
           rows        (vec (take max-rows (drop dropped all-rows)))
           row-ids     (vec (take max-rows (drop dropped all-ids)))
@@ -320,6 +314,7 @@
    "ui/focus-tab"   focus-tab
    "ui/append-tab"  append-tab
    "ui/notify"      notify
+   "open-file"      open-file
    "ui/open-file"   open-file
    "feed/ended"     feed-ended})
 

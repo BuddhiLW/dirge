@@ -84,7 +84,7 @@ pub fn grid_event(name: String, cells: Vec<GridCell>, columns: usize) -> ViewEve
 
 /// Generic file-open feed op, independent of the panel producer's schema.
 pub fn open_file_effect(op: &serde_json::Value) -> Option<super::domain::ViewEffect> {
-    if op.get("op")?.as_str()? != "ui/open-file" {
+    if !matches!(op.get("op")?.as_str()?, "open-file" | "ui/open-file") {
         return None;
     }
     Some(super::domain::ViewEffect::OpenFile {
@@ -180,11 +180,36 @@ mod tests {
                 diff: Some("+x".into())
             })
         );
+        assert_eq!(
+            open_file_effect(&json!({"op":"open-file", "path":"src/main.rs"})),
+            Some(super::super::domain::ViewEffect::OpenFile {
+                path: "src/main.rs".into(),
+                line: None,
+                diff: None,
+            })
+        );
+        assert_eq!(open_file_effect(&json!({"op":"open-file"})), None);
         assert_eq!(open_file_effect(&json!({"op":"ui/open-file"})), None);
         assert_eq!(
             open_file_effect(&json!({"op":"ui/notify", "path":"src/main.rs"})),
             None
         );
+    }
+
+    #[test]
+    fn focused_panel_claims_keys_with_grid_open_or_closed() {
+        for open in [false, true] {
+            let mut m = model(open);
+            m.panel_keys = vec!["n".into()];
+            assert_eq!(
+                route_key(
+                    &m,
+                    &key(KeyCode::Char('n'), KeyModifiers::NONE),
+                    Some(KeyAction::ToggleSwarm)
+                ),
+                KeyRoute::Panel("n".into())
+            );
+        }
     }
 
     #[test]
