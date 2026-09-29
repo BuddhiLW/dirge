@@ -12,6 +12,8 @@ use crate::ui::keymap::KeyAction;
 pub enum KeyRoute {
     /// A grid key, by name.
     Grid(String),
+    /// A key claimed by the focused panel.
+    Panel(String),
     /// Not a grid key: the normal dispatch handles it (global commands,
     /// Ctrl+C).
     PassThrough,
@@ -39,6 +41,8 @@ pub fn key_name(key: &KeyEvent) -> Option<String> {
         KeyCode::Down => "Down",
         KeyCode::Home => "Home",
         KeyCode::End => "End",
+        KeyCode::PageUp => "PgUp",
+        KeyCode::PageDown => "PgDn",
         KeyCode::Char(c) => return Some(c.to_string()),
         _ => return None,
     };
@@ -54,6 +58,11 @@ pub fn route_key(model: &ViewModel, key: &KeyEvent, action: Option<KeyAction>) -
         && model.grid_consumes(&name)
     {
         return KeyRoute::Grid(name);
+    }
+    if let Some(name) = key_name(key)
+        && model.panel_consumes(&name)
+    {
+        return KeyRoute::Panel(name);
     }
     let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
     if action.is_some() || ctrl_c {
@@ -71,6 +80,18 @@ pub fn grid_event(name: String, cells: Vec<GridCell>, columns: usize) -> ViewEve
         cells,
         columns,
     }
+}
+
+/// Generic file-open feed op, independent of the panel producer's schema.
+pub fn open_file_effect(op: &serde_json::Value) -> Option<super::domain::ViewEffect> {
+    if op.get("op")?.as_str()? != "ui/open-file" {
+        return None;
+    }
+    Some(super::domain::ViewEffect::OpenFile {
+        path: op.get("path")?.as_str()?.to_owned(),
+        line: op.get("line").and_then(|n| n.as_u64()).map(|n| n as usize),
+        diff: op.get("diff").and_then(|d| d.as_str()).map(str::to_owned),
+    })
 }
 
 /// The event for `text` when it is a slash command the view owns.
@@ -93,6 +114,7 @@ mod tests {
         ViewModel {
             swarm: open.then(Default::default),
             grid_keys: vec!["BackTab".into(), "Esc".into(), "q".into()],
+            panel_keys: vec![],
             view_commands: vec!["panel".into(), "swarm".into()],
             owns_feed: false,
         }
@@ -142,6 +164,48 @@ mod tests {
         assert_eq!(
             route_key(&m, &key(KeyCode::Char('x'), KeyModifiers::NONE), None),
             KeyRoute::Swallow
+        );
+    }
+
+    #[test]
+    fn open_file_op_only_promotes_valid_path() {
+        use serde_json::json;
+        assert_eq!(
+            open_file_effect(
+                &json!({"op":"ui/open-file", "path":"src/main.rs", "line":7, "diff":"+x"})
+            ),
+            Some(super::super::domain::ViewEffect::OpenFile {
+                path: "src/main.rs".into(),
+                line: Some(7),
+                diff: Some("+x".into())
+            })
+        );
+        assert_eq!(open_file_effect(&json!({"op":"ui/open-file"})), None);
+        assert_eq!(
+            open_file_effect(&json!({"op":"ui/notify", "path":"src/main.rs"})),
+            None
+        );
+    }
+
+    #[test]
+    fn focused_panel_claims_keys_before_global_actions() {
+        let mut m = model(false);
+        m.panel_keys = vec!["n".into(), "PgDn".into()];
+        assert_eq!(
+            route_key(
+                &m,
+                &key(KeyCode::Char('n'), KeyModifiers::NONE),
+                Some(KeyAction::ToggleSwarm)
+            ),
+            KeyRoute::Panel("n".into())
+        );
+        assert_eq!(
+            route_key(&m, &key(KeyCode::PageDown, KeyModifiers::NONE), None),
+            KeyRoute::Panel("PgDn".into())
+        );
+        assert_eq!(
+            route_key(&m, &key(KeyCode::Char('c'), KeyModifiers::CONTROL), None),
+            KeyRoute::PassThrough
         );
     }
 

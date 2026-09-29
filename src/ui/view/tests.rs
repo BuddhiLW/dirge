@@ -9,6 +9,25 @@ use super::native::NativeReducer;
 use super::port::Reducer;
 use super::*;
 
+#[test]
+fn native_feed_open_file_is_generic() {
+    let mut r = NativeReducer::default();
+    assert_eq!(
+        run(
+            &mut r,
+            ViewEvent::Feed {
+                op: serde_json::json!({"op":"ui/open-file", "path":"src/main.rs", "line":4})
+            }
+        )
+        .effects,
+        vec![ViewEffect::OpenFile {
+            path: "src/main.rs".into(),
+            line: Some(4),
+            diff: None
+        }]
+    );
+}
+
 fn panel(id: &str) -> GridCell {
     GridCell::Panel(id.into())
 }
@@ -165,6 +184,7 @@ fn grid_keys_move_the_selection_by_cell() {
         u.effects,
         vec![ViewEffect::Reply {
             action: "focus".into(),
+            payload: None,
             target: Some("c".into())
         }]
     );
@@ -174,6 +194,7 @@ fn grid_keys_move_the_selection_by_cell() {
         u.effects,
         vec![ViewEffect::Reply {
             action: "focus".into(),
+            payload: None,
             target: Some("x".into())
         }]
     );
@@ -231,7 +252,8 @@ fn grid_keys_do_nothing_while_closed_or_empty() {
         run(&mut r, grid("r", &[], 1)).effects,
         vec![ViewEffect::Reply {
             action: "refresh".into(),
-            target: None
+            target: None,
+            payload: None
         }]
     );
 }
@@ -258,6 +280,7 @@ fn panel_sets_modes_and_replies() {
         vec![
             ViewEffect::Reply {
                 action: "focus".into(),
+                payload: None,
                 target: Some("a1".into())
             },
             info("panel reply 'focus' requested")

@@ -233,6 +233,12 @@ pub fn decode(data: &str) -> Result<FeedEffect, Skip> {
 /// `FocusTab` / `AppendTab` touched (so the caller can close what it
 /// opened when the stream ends) or `None`.
 pub fn route(data: &str, sink: &dyn FeedSink) -> Option<String> {
+    if let Some(event @ ViewEvent::Feed { .. }) = feed_event(data)
+        && matches!(&event, ViewEvent::Feed { op } if op.get("op").and_then(Value::as_str) == Some("ui/open-file"))
+    {
+        crate::ui::view::submit(event);
+        return None;
+    }
     match decode(data) {
         Ok(effect) => {
             let touched = match &effect {

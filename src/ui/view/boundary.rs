@@ -22,6 +22,11 @@ pub enum Handoff {
     OpenAgent(String),
     /// Start `/msg <id> ` in the editor.
     MessageAgent(String),
+    OpenFile {
+        path: String,
+        line: Option<usize>,
+        diff: Option<String>,
+    },
 }
 
 /// What applying an update leaves for the UI loop.
@@ -57,7 +62,11 @@ pub fn apply(renderer: &mut Renderer, update: &ViewUpdate) -> Applied {
 fn interpret(renderer: &mut Renderer, effect: &ViewEffect) -> Outcome {
     match effect {
         ViewEffect::Notify { level, text } => Outcome::Line((text.clone(), notice_color(*level))),
-        ViewEffect::Reply { action, target } => match reply_action(action, target.as_deref()) {
+        ViewEffect::Reply {
+            action,
+            target,
+            payload,
+        } => match reply_action(action, target.as_deref(), payload.as_ref()) {
             Some(reply) => {
                 panel_feed::spawn_reply(reply);
                 Outcome::Done
@@ -103,6 +112,11 @@ fn interpret(renderer: &mut Renderer, effect: &ViewEffect) -> Outcome {
             });
             Outcome::Done
         }
+        ViewEffect::OpenFile { path, line, diff } => Outcome::Handoff(Handoff::OpenFile {
+            path: path.clone(),
+            line: *line,
+            diff: diff.clone(),
+        }),
         ViewEffect::Unpaint { id } => {
             renderer.apply_external_panel_op(PanelOp::Close { id: id.clone() });
             Outcome::Done
@@ -130,13 +144,29 @@ fn paint_line(row: &[PaintSpan]) -> PanelLine {
 
 /// The producer reply a `reply` effect names; `None` for an unknown
 /// action or a `focus` without a target.
-pub fn reply_action(action: &str, target: Option<&str>) -> Option<ReplyAction> {
+pub fn reply_action(
+    action: &str,
+    target: Option<&str>,
+    payload: Option<&serde_json::Value>,
+) -> Option<ReplyAction> {
     Some(match (action, target) {
         ("focus", Some(id)) => ReplyAction::Focus(id.to_string()),
         ("unfocus", _) => ReplyAction::Unfocus,
         ("next-tab", _) => ReplyAction::NextTab,
         ("prev-tab", _) => ReplyAction::PrevTab,
         ("refresh", _) => ReplyAction::Refresh,
+        ("invoke", _) => {
+            let p = payload?.as_object()?;
+            ReplyAction::Invoke {
+                panel: p.get("panel")?.as_str()?.to_owned(),
+                verb: p.get("verb")?.as_str()?.to_owned(),
+                row: p.get("row").and_then(|v| v.as_str()).map(str::to_owned),
+                payload: p
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({})),
+            }
+        }
         _ => return None,
     })
 }
@@ -190,15 +220,38 @@ mod tests {
     #[test]
     fn reply_effects_name_producer_replies() {
         assert_eq!(
-            reply_action("focus", Some("a")),
+            reply_action("focus", Some("a"), None),
             Some(ReplyAction::Focus("a".into()))
         );
-        assert_eq!(reply_action("focus", None), None);
-        assert_eq!(reply_action("next-tab", None), Some(ReplyAction::NextTab));
-        assert_eq!(reply_action("prev-tab", None), Some(ReplyAction::PrevTab));
-        assert_eq!(reply_action("refresh", None), Some(ReplyAction::Refresh));
-        assert_eq!(reply_action("unfocus", None), Some(ReplyAction::Unfocus));
-        assert_eq!(reply_action("warp", None), None);
+        assert_eq!(reply_action("focus", None, None), None);
+        assert_eq!(
+            reply_action("next-tab", None, None),
+            Some(ReplyAction::NextTab)
+        );
+        assert_eq!(
+            reply_action("prev-tab", None, None),
+            Some(ReplyAction::PrevTab)
+        );
+        assert_eq!(
+            reply_action("refresh", None, None),
+            Some(ReplyAction::Refresh)
+        );
+        assert_eq!(
+            reply_action("unfocus", None, None),
+            Some(ReplyAction::Unfocus)
+        );
+        assert_eq!(reply_action("warp", None, None), None);
+    }
+
+    #[test]
+    fn invoke_reply_has_exact_wire_shape() {
+        let payload =
+            serde_json::json!({"panel":"lens", "verb":"next", "row":null, "payload":{"x":1}});
+        let reply = reply_action("invoke", None, Some(&payload)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&reply.to_json()).unwrap(),
+            serde_json::json!({"action":"invoke", "panel":"lens", "verb":"next", "row":null, "payload":{"x":1}})
+        );
     }
 
     #[test]
@@ -214,7 +267,10 @@ mod tests {
                 ReplyAction::Focus(id) => Some(id.as_str()),
                 _ => None,
             };
-            assert_eq!(reply_action(action.name(), target), Some(action.clone()));
+            assert_eq!(
+                reply_action(action.name(), target, None),
+                Some(action.clone())
+            );
         }
     }
 

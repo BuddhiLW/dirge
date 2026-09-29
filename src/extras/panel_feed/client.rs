@@ -19,6 +19,9 @@ use crate::ui::panels_ext::PanelOp;
 
 const LOG: &str = "dirge::panel_feed";
 
+/// Panel feed capabilities (wire v2); sent on every SSE subscription.
+pub const FEATURES: &str = "spans,keys,cursor,open-file";
+
 /// Loop tuning. Production uses [`FeedOptions::default`]; tests
 /// shrink the timings.
 #[derive(Debug, Clone)]
@@ -74,6 +77,9 @@ fn endpoint_url(ep: &Endpoint, path: &str) -> Result<reqwest::Url, String> {
         .map_err(|e| format!("bad feed url: {e}"))?;
     if let Some(token) = &ep.token {
         url.query_pairs_mut().append_pair("token", token);
+    }
+    if path == "events" {
+        url.query_pairs_mut().append_pair("features", FEATURES);
     }
     Ok(url)
 }
@@ -343,7 +349,7 @@ mod tests {
         };
         assert_eq!(
             endpoint_url(&ep, "events").unwrap().as_str(),
-            "http://127.0.0.1:9/feed/events?token=a+b%26c"
+            "http://127.0.0.1:9/feed/events?token=a+b%26c&features=spans%2Ckeys%2Ccursor%2Copen-file"
         );
         let bare = Endpoint {
             url: "http://127.0.0.1:9".into(),

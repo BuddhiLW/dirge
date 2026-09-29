@@ -244,8 +244,9 @@ async fn feed_routes_ops_cleans_up_reconnects_and_replies() {
     }
     for r in &events {
         assert!(
-            r.request_line()
-                .starts_with(&format!("GET /feed/events?{TOKEN_QUERY} ")),
+            r.request_line().starts_with(&format!(
+                "GET /feed/events?{TOKEN_QUERY}&features=spans%2Ckeys%2Ccursor%2Copen-file "
+            )),
             "{}",
             r.request_line()
         );
@@ -293,10 +294,9 @@ async fn wrong_token_is_retried_and_reply_reports_status() {
             .await
             .expect("attempt")
             .expect("request");
-        assert!(
-            r.request_line()
-                .starts_with("GET /feed/events?token=wrong ")
-        );
+        assert!(r.request_line().starts_with(
+            "GET /feed/events?token=wrong&features=spans%2Ckeys%2Ccursor%2Copen-file "
+        ));
     }
     let err = reply_to(&source, &ReplyAction::Refresh).await.unwrap_err();
     assert!(

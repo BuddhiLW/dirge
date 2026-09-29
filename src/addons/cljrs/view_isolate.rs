@@ -219,6 +219,72 @@ mod tests {
     }
 
     #[test]
+    fn panel_cursor_scroll_invoke_and_open_file() {
+        use serde_json::json;
+        on_isolate_stack(|| {
+            let mut r = CljrsReducer::boot().unwrap();
+            let u = r
+                .step(&feed(json!({"op":"ui/show-panel", "panel/id":"lens",
+                "cursor":true, "keys":{"n":"next", "Enter":"open"},
+                "payload":{"scope":"lens"},
+                "lines":[{"text":"alpha", "id":"a"}, {"text":"beta", "id":"b", "payload":{"file":"x"}}]})))
+                .unwrap();
+            assert_eq!(
+                u.model.panel_keys,
+                vec!["Down", "Enter", "PgDn", "PgUp", "Up", "j", "k", "n"]
+            );
+            assert!(
+                matches!(&u.effects[0], ViewEffect::Paint {rows, ..} if rows[0][0].face == "cursor")
+            );
+            let u = r
+                .step(&ViewEvent::Key {
+                    key: "j".into(),
+                    panel: "lens".into(),
+                })
+                .unwrap();
+            assert!(
+                matches!(&u.effects[0], ViewEffect::Paint {offset:1, rows, ..} if rows[1][0].face == "cursor")
+            );
+            let u = r
+                .step(&ViewEvent::Key {
+                    key: "Enter".into(),
+                    panel: "lens".into(),
+                })
+                .unwrap();
+            assert_eq!(
+                u.effects,
+                vec![ViewEffect::Reply {
+                    action: "invoke".into(),
+                    target: None,
+                    payload: Some(
+                        json!({"panel":"lens", "verb":"open", "row":"b", "payload":{"file":"x"}})
+                    )
+                }]
+            );
+            let u = r
+                .step(&ViewEvent::Key {
+                    key: "PgUp".into(),
+                    panel: "lens".into(),
+                })
+                .unwrap();
+            assert!(matches!(&u.effects[0], ViewEffect::Paint { offset: 0, .. }));
+            let u = r
+                .step(&feed(
+                    json!({"op":"ui/open-file", "path":"src/lib.rs", "line":9, "diff":"+hi"}),
+                ))
+                .unwrap();
+            assert_eq!(
+                u.effects,
+                vec![ViewEffect::OpenFile {
+                    path: "src/lib.rs".into(),
+                    line: Some(9),
+                    diff: Some("+hi".into())
+                }]
+            );
+        });
+    }
+
+    #[test]
     fn panels_are_bounded_evicting_the_oldest() {
         use serde_json::json;
         on_isolate_stack(|| {

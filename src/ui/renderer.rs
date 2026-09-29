@@ -1466,6 +1466,10 @@ impl Renderer {
 
     /// The swarm grid's cells in paint order: external panels, then
     /// subagents.
+    pub fn focused_external_panel_id(&self) -> Option<String> {
+        self.external_panels.focused().map(str::to_string)
+    }
+
     pub fn swarm_cells(&self) -> Vec<crate::ui::swarm::SwarmCell> {
         crate::ui::swarm::swarm_cells(
             &self.external_panels,

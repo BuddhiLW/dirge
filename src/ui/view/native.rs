@@ -153,7 +153,8 @@ impl Reducer for NativeReducer {
                 cells,
                 columns,
             } => self.grid(key, cells, *columns),
-            ViewEvent::Feed { .. } => Vec::new(),
+            ViewEvent::Feed { op } => super::promote::open_file_effect(op).into_iter().collect(),
+            ViewEvent::Key { .. } => Vec::new(),
         };
         Ok(ViewUpdate {
             model: self.model(),
@@ -176,6 +177,7 @@ fn reply(action: &str, target: Option<String>) -> ViewEffect {
     ViewEffect::Reply {
         action: action.to_string(),
         target,
+        payload: None,
     }
 }
 
@@ -184,6 +186,7 @@ impl NativeReducer {
         ViewModel {
             swarm: self.swarm.clone(),
             grid_keys: sorted(GRID_KEYMAP.iter().map(|(k, _)| *k)),
+            panel_keys: vec![],
             view_commands: sorted(COMMANDS.iter().map(|(n, _)| *n)),
             // The native view leaves feed ops to the UI's own decoder.
             owns_feed: false,

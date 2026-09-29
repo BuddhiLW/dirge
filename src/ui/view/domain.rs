@@ -45,6 +45,8 @@ pub enum ViewEvent {
     /// through undecoded; only an engine whose model `owns_feed` gets
     /// these. `feed/ended` is sent when the feed's stream ends.
     Feed { op: serde_json::Value },
+    /// Key consumed by a focused external panel.
+    Key { key: String, panel: String },
 }
 
 impl ViewEvent {
@@ -73,6 +75,9 @@ pub struct ViewModel {
     /// Key names the open grid consumes, sorted.
     #[serde(default)]
     pub grid_keys: Vec<String>,
+    /// Keys claimed by the focused panel (published by the reducer).
+    #[serde(default)]
+    pub panel_keys: Vec<String>,
     /// Slash command names (no slash) the view owns, sorted. They run
     /// whether or not the agent is busy.
     #[serde(default)]
@@ -91,6 +96,10 @@ impl ViewModel {
 
     pub fn owns_command(&self, name: &str) -> bool {
         self.view_commands.iter().any(|c| c == name)
+    }
+
+    pub fn panel_consumes(&self, key: &str) -> bool {
+        self.panel_keys.iter().any(|k| k == key)
     }
 
     pub fn grid_consumes(&self, key: &str) -> bool {
@@ -126,6 +135,8 @@ pub enum ViewEffect {
         action: String,
         #[serde(default)]
         target: Option<String>,
+        #[serde(default)]
+        payload: Option<serde_json::Value>,
     },
     /// Set side-panel mode(s): `on`, `off`, `auto` or `debug`.
     PanelMode { scope: PanelScope, mode: String },
@@ -159,6 +170,14 @@ pub enum ViewEffect {
     },
     /// Remove external panel `id`.
     Unpaint { id: String },
+    /// Ask the UI to open a project-local file (or preview a supplied diff).
+    OpenFile {
+        path: String,
+        #[serde(default)]
+        line: Option<usize>,
+        #[serde(default)]
+        diff: Option<String>,
+    },
 }
 
 /// One styled run of a painted row; `face` is a wire face name

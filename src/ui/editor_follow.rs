@@ -7,6 +7,22 @@
 //! returns errors to the caller, and is a no-op when the config key
 //! is absent.
 
+/// Resolve only existing regular files under the canonical project root.
+/// Canonicalization rejects symlink escapes and `..` traversal alike.
+pub fn project_file(path: &str, cwd: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let root = crate::extras::dirge_paths::project_root(cwd)
+        .canonicalize()
+        .map_err(|e| format!("project root: {e}"))?;
+    let candidate = cwd
+        .join(path)
+        .canonicalize()
+        .map_err(|e| format!("file unavailable: {e}"))?;
+    if !candidate.starts_with(&root) || !candidate.is_file() {
+        return Err("file is outside the project or not a regular file".into());
+    }
+    Ok(candidate)
+}
+
 /// Split `template` on whitespace into argv tokens, replacing `{path}`
 /// and `{line}` in each token. Returns an empty vec when `template` is
 /// blank.
@@ -117,6 +133,17 @@ pub fn spawn_editor_follow(argv: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_file_rejects_escape_and_accepts_local_file() {
+        let root = std::env::temp_dir().join(format!("dirge-file-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("inside"), "ok").unwrap();
+        assert!(project_file("inside", &root).is_ok());
+        assert!(project_file("../outside", &root).is_err());
+        assert!(project_file("missing", &root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     // ── build_editor_open_argv ──────────────────────────────────────
 
