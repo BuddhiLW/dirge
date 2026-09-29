@@ -163,6 +163,91 @@ fn fixture_addon_loads_runs_hooks_and_notifies() {
     assert!(host.call_tool(&tool, &json!({})).is_err());
 }
 
+/// A directory of its own under the system temp dir, emptied first.
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("dirge-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn write_overlay(root: &Path, src: &str) -> PathBuf {
+    let path = root.join(super::layout::HOST_OVERLAY);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, src).unwrap();
+    path
+}
+
+const ECHO_TOOL: &str = "Counts the rows it is handed";
+
+#[test]
+fn a_host_overlay_changes_host_policy_and_reload_undoes_a_broken_one() {
+    let root = scratch("host-overlay");
+    let overlay = write_overlay(
+        &root,
+        r#"(ns dirge.addon.host)
+(defn tool-view [tool]
+  (assoc (select-keys tool [:name :inputSchema])
+         :description (str "overlaid: " (:description tool))))"#,
+    );
+    let plan = discovery::plan(
+        &[fixtures().join("echo")],
+        &[fixtures().join("protocol/src"), root.clone()],
+        &super::layout::default_manifest_dirs(),
+    );
+    let settings_plan = plan.clone();
+    let host = super::start(
+        plan,
+        Harness::with_sink(Arc::new(RecordingSink::default())),
+        PROTOCOL,
+    )
+    .expect("host starts");
+    assert_eq!(
+        host.tools()[0].description,
+        format!("overlaid: {ECHO_TOOL}")
+    );
+
+    // An overlay that leaves run-hook without a function is undone whole,
+    // its tool-view included, and named as a source error.
+    write_overlay(
+        &root,
+        r#"(ns dirge.addon.host)
+(def run-hook 42)
+(defn tool-view [tool] (assoc (select-keys tool [:name]) :description "broken"))"#,
+    );
+    let report = host.reload(super::load_set(&settings_plan, true));
+    let errors: Vec<_> = report
+        .source_errors
+        .iter()
+        .filter(|e| e.manifest == overlay)
+        .collect();
+    assert_eq!(errors.len(), 1, "{:?}", report.source_errors);
+    assert!(errors[0].error.contains("run-hook"), "{}", errors[0].error);
+    assert_eq!(host.tools()[0].description, ECHO_TOOL);
+    assert_eq!(
+        host.texts(HookPoint::SystemPrompt, &json!({})),
+        vec!["echo addon active".to_string()]
+    );
+
+    // A working overlay applies again, and deleting it reverts its forms:
+    // with no overlay left, the builtin host runs alone.
+    write_overlay(
+        &root,
+        r#"(ns dirge.addon.host)
+(defn tool-view [tool] (assoc (select-keys tool [:name]) :description "again"))"#,
+    );
+    let report = host.reload(super::load_set(&settings_plan, true));
+    assert!(report.source_errors.is_empty(), "{:?}", report.source_errors);
+    assert_eq!(host.tools()[0].description, "again");
+    std::fs::remove_file(&overlay).unwrap();
+    let report = host.reload(super::load_set(&settings_plan, true));
+    assert!(report.source_errors.is_empty(), "{:?}", report.source_errors);
+    assert_eq!(host.tools()[0].description, ECHO_TOOL);
+
+    host.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn an_unknown_protocol_namespace_stops_the_host() {
     let plan = echo_plan(&fixtures().join("echo"));
