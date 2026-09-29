@@ -83,7 +83,7 @@ impl McpTool {
 /// `Cancelled` (user-driven abort) intentionally fall through to the
 /// surface-as-is path. Reconnecting on those would mask real bugs or
 /// tear down healthy connections mid-run.
-fn is_transport_failure(err: &ServiceError) -> bool {
+pub(crate) fn is_transport_failure(err: &ServiceError) -> bool {
     matches!(
         err,
         ServiceError::TransportSend(_) | ServiceError::TransportClosed

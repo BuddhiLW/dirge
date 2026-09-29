@@ -339,8 +339,8 @@ pub enum Retrieval {
 /// the builtin backend opens and migrates a SQLite database, so async
 /// callers run it on the blocking pool.
 ///
-/// A reserved backend is an error, not a fallback: memory the user pointed
-/// somewhere else must not quietly land in the builtin store.
+/// A backend that cannot be built is an error, not a fallback: memory the
+/// user pointed somewhere else must not quietly land in the builtin store.
 pub fn build(
     cfg: &crate::config::MemoryConfig,
     scope: MemoryScope<'_>,
@@ -348,13 +348,61 @@ pub fn build(
 ) -> Result<std::sync::Arc<dyn MemoryProvider>, String> {
     match cfg.provider.unwrap_or_default() {
         crate::config::MemoryBackend::Sqlite => build_sqlite(cfg, scope, retrieval),
-        backend @ (crate::config::MemoryBackend::Mcp | crate::config::MemoryBackend::Addon) => {
-            Err(format!(
-                "memory.provider \"{}\" is not available yet; only \"sqlite\" is",
-                backend.as_str()
-            ))
-        }
+        crate::config::MemoryBackend::Mcp => build_mcp(cfg, scope),
+        backend @ crate::config::MemoryBackend::Addon => Err(format!(
+            "memory.provider \"{}\" is not available yet",
+            backend.as_str()
+        )),
     }
+}
+
+/// `memory.provider = "mcp"`: tool calls on the `mcp_servers` entry
+/// `memory.mcp.server` names. The connection opens on the first call, so
+/// building never blocks on the server. Hybrid retrieval does not apply:
+/// search is whatever the server's search tool does.
+#[cfg(feature = "mcp")]
+fn build_mcp(
+    cfg: &crate::config::MemoryConfig,
+    scope: MemoryScope<'_>,
+) -> Result<std::sync::Arc<dyn MemoryProvider>, String> {
+    let mcp = cfg
+        .mcp
+        .as_ref()
+        .ok_or("memory.provider \"mcp\" needs a memory.mcp block naming the server")?;
+    if mcp.server.trim().is_empty() {
+        return Err("memory.mcp.server is empty".to_string());
+    }
+    let server_config = mcp.server_config.clone().ok_or_else(|| {
+        format!(
+            "memory.mcp.server {:?} is not an entry in mcp_servers",
+            mcp.server
+        )
+    })?;
+    let scope = match scope {
+        MemoryScope::Project(paths) => super::memory_mcp::Scope {
+            name: "project",
+            project_root: Some(paths.root.clone()),
+        },
+        MemoryScope::Global => super::memory_mcp::Scope {
+            name: "global",
+            project_root: None,
+        },
+    };
+    let caller = std::sync::Arc::new(super::memory_mcp::LiveCaller::new(
+        mcp.server.clone(),
+        server_config,
+    ));
+    Ok(std::sync::Arc::new(
+        super::memory_mcp::McpMemoryProvider::new(mcp, scope, caller)?,
+    ))
+}
+
+#[cfg(not(feature = "mcp"))]
+fn build_mcp(
+    _cfg: &crate::config::MemoryConfig,
+    _scope: MemoryScope<'_>,
+) -> Result<std::sync::Arc<dyn MemoryProvider>, String> {
+    Err("memory.provider \"mcp\" needs a dirge built with the `mcp` feature".to_string())
 }
 
 fn build_sqlite(
@@ -744,24 +792,79 @@ mod tests {
     }
 
     #[test]
-    fn factory_refuses_reserved_backends_instead_of_falling_back() {
+    fn factory_refuses_the_addon_backend_instead_of_falling_back() {
         use crate::config::{MemoryBackend, MemoryConfig};
         use crate::extras::dirge_paths::ProjectPaths;
         let dir = factory_temp_project();
         let paths = ProjectPaths::new(&dir);
-        for backend in [MemoryBackend::Mcp, MemoryBackend::Addon] {
-            let cfg = MemoryConfig {
-                provider: Some(backend),
-                ..Default::default()
-            };
-            let err = build(&cfg, MemoryScope::Project(&paths), Retrieval::Plain)
-                .err()
-                .expect("a reserved backend must not build");
-            assert!(err.contains(backend.as_str()), "{err}");
-            assert!(err.contains("not available"), "{err}");
-        }
+        let cfg = MemoryConfig {
+            provider: Some(MemoryBackend::Addon),
+            ..Default::default()
+        };
+        let err = build(&cfg, MemoryScope::Project(&paths), Retrieval::Plain)
+            .err()
+            .expect("the addon backend must not build yet");
+        assert!(err.contains("addon"), "{err}");
+        assert!(err.contains("not available"), "{err}");
         // Refusing must not have created the builtin database either.
         assert!(!dir.join(".dirge").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A misconfigured `mcp` backend is refused, never served by sqlite.
+    #[test]
+    fn factory_refuses_an_unresolved_mcp_backend() {
+        use crate::config::Config;
+        use crate::extras::dirge_paths::ProjectPaths;
+        let dir = factory_temp_project();
+        let paths = ProjectPaths::new(&dir);
+        for (json, expect) in [
+            (r#"{"memory":{"provider":"mcp"}}"#, "memory.mcp block"),
+            (
+                r#"{"memory":{"provider":"mcp","mcp":{"server":"notes"}}}"#,
+                "not an entry in mcp_servers",
+            ),
+        ] {
+            let cfg: Config = serde_json::from_str(json).unwrap();
+            let err = build(
+                &cfg.memory_config(),
+                MemoryScope::Project(&paths),
+                Retrieval::AsConfigured,
+            )
+            .err()
+            .expect("an unresolved mcp backend must not build");
+            assert!(err.contains(expect), "{err}");
+        }
+        assert!(!dir.join(".dirge").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With the server resolved, the factory builds the mcp provider for
+    /// both scopes without connecting (the connection opens on first call).
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn factory_builds_the_mcp_provider_for_both_scopes() {
+        use crate::config::Config;
+        use crate::extras::dirge_paths::ProjectPaths;
+        let dir = factory_temp_project();
+        let paths = ProjectPaths::new(&dir);
+        let cfg: Config = serde_json::from_str(
+            r#"{
+                "mcp_servers": { "notes": { "command": "dirge-nonexistent-mcp-binary" } },
+                "memory": { "provider": "mcp", "mcp": {
+                    "server": "notes",
+                    "operations": { "add": { "tool": "remember", "arguments": { "text": "{content}" } } }
+                } }
+            }"#,
+        )
+        .unwrap();
+        let memory = cfg.memory_config();
+        for scope in [MemoryScope::Project(&paths), MemoryScope::Global] {
+            let provider = build(&memory, scope, Retrieval::AsConfigured).unwrap();
+            assert_eq!(provider.name(), "mcp");
+            assert_eq!(provider.format_for_system_prompt(), "");
+        }
+        assert!(!dir.join(".dirge").exists(), "no sqlite store is opened");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -157,7 +157,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
     // `Err(_) => None` branch (and now bounding how long a stuck DB can
     // wedge `/prompt <name>`).
     let paths_for_mem = paths.clone();
-    let project_cfg = cfg.memory.clone().unwrap_or_default();
+    let project_cfg = cfg.memory_config();
     let memory_load_result = spawn_blocking_with_timeout(DB_LOAD_TIMEOUT, move || {
         crate::extras::memory_provider::build(
             &project_cfg,
@@ -207,7 +207,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
     // distinct header, so durable user preferences reach the prompt
     // regardless of which project this is. Best-effort: a load failure just
     // omits the global block.
-    let global_cfg = cfg.memory.clone().unwrap_or_default();
+    let global_cfg = cfg.memory_config();
     if let Ok(global_provider) = spawn_blocking_with_timeout(DB_LOAD_TIMEOUT, move || {
         crate::extras::memory_provider::build(
             &global_cfg,
