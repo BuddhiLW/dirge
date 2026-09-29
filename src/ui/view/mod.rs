@@ -26,6 +26,8 @@ pub(crate) mod engine;
 pub(crate) mod native;
 pub(crate) mod port;
 pub(crate) mod promote;
+/// Only engines that speak plain data use the codec (the cljrs one).
+#[cfg(any(feature = "addons", test))]
 pub(crate) mod wire;
 
 #[cfg(test)]

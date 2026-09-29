@@ -32,6 +32,7 @@ pub struct SwarmView {
 }
 
 impl SwarmView {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
