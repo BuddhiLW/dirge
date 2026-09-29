@@ -253,15 +253,22 @@ pub fn unregister_subagent_abort(id: &str) {
 pub type SubagentSteeringQueue =
     std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
 
+/// One in-flight tooled subagent's steering state: the queue its loop
+/// drains, plus every message sent to it, so the completion report can tell
+/// the parent agent what the user asked for mid-run.
+struct SteeringEntry {
+    queue: SubagentSteeringQueue,
+    sent: Vec<String>,
+}
+
 /// Process-global map from in-flight tooled subagent id to its steering
-/// queue. Keyed like [`SUBAGENT_ABORT_REGISTRY`], so the UI can resolve a
+/// state. Keyed like [`SUBAGENT_ABORT_REGISTRY`], so the UI can resolve a
 /// focused tab (or a `/msg` prefix) to the same id it kills with. Tool-less
 /// subagents are a single completion call and never register here.
-static SUBAGENT_STEERING_REGISTRY: std::sync::OnceLock<
-    Mutex<HashMap<String, SubagentSteeringQueue>>,
-> = std::sync::OnceLock::new();
+static SUBAGENT_STEERING_REGISTRY: std::sync::OnceLock<Mutex<HashMap<String, SteeringEntry>>> =
+    std::sync::OnceLock::new();
 
-fn steering_registry() -> &'static Mutex<HashMap<String, SubagentSteeringQueue>> {
+fn steering_registry() -> &'static Mutex<HashMap<String, SteeringEntry>> {
     SUBAGENT_STEERING_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -269,9 +276,13 @@ fn steering_registry() -> &'static Mutex<HashMap<String, SubagentSteeringQueue>>
 /// the runner's `LoopSpawnConfig::steering_queue`.
 pub fn register_subagent_steering(id: &str) -> SubagentSteeringQueue {
     let queue: SubagentSteeringQueue = Default::default();
-    steering_registry()
-        .lock_ignore_poison()
-        .insert(id.to_string(), queue.clone());
+    steering_registry().lock_ignore_poison().insert(
+        id.to_string(),
+        SteeringEntry {
+            queue: queue.clone(),
+            sent: Vec::new(),
+        },
+    );
     queue
 }
 
@@ -279,6 +290,30 @@ pub fn register_subagent_steering(id: &str) -> SubagentSteeringQueue {
 /// subagent reached a terminal state and will never poll it again.
 pub fn unregister_subagent_steering(id: &str) {
     steering_registry().lock_ignore_poison().remove(id);
+}
+
+/// Take the messages sent to subagent `id` so far, leaving its log empty.
+pub fn take_subagent_messages(id: &str) -> Vec<String> {
+    steering_registry()
+        .lock_ignore_poison()
+        .get_mut(id)
+        .map(|entry| std::mem::take(&mut entry.sent))
+        .unwrap_or_default()
+}
+
+/// Append the messages the user sent a subagent mid-run to its result. The
+/// messages reach only the subagent, so without this the parent reads a
+/// report that answers instructions it never saw.
+fn with_user_messages(mut text: String, sent: &[String]) -> String {
+    if sent.is_empty() {
+        return text;
+    }
+    text.push_str("\n\n[The user messaged this subagent while it ran:");
+    for (i, message) in sent.iter().enumerate() {
+        text.push_str(&format!("\n{}. {}", i + 1, message));
+    }
+    text.push(']');
+    text
 }
 
 /// Result of [`message_subagent`].
@@ -300,7 +335,7 @@ pub fn message_subagent(id_prefix: &str, text: &str) -> MessageOutcome {
     if trimmed.is_empty() || text.trim().is_empty() {
         return MessageOutcome::NotFound;
     }
-    let map = steering_registry().lock_ignore_poison();
+    let mut map = steering_registry().lock_ignore_poison();
     let id = if map.contains_key(trimmed) {
         trimmed.to_string()
     } else {
@@ -315,8 +350,9 @@ pub fn message_subagent(id_prefix: &str, text: &str) -> MessageOutcome {
             _ => return MessageOutcome::Ambiguous(matches),
         }
     };
-    if let Some(queue) = map.get(&id) {
-        queue.lock_ignore_poison().push_back(text.to_string());
+    if let Some(entry) = map.get_mut(&id) {
+        entry.queue.lock_ignore_poison().push_back(text.to_string());
+        entry.sent.push(text.to_string());
     }
     MessageOutcome::Queued(id)
 }
@@ -1346,6 +1382,8 @@ impl TaskTool {
                         let delivered = crate::agent::tools::subagent_digest::try_digest(&text)
                             .await
                             .unwrap_or(text);
+                        let delivered =
+                            with_user_messages(delivered, &take_subagent_messages(&tid_for_task));
                         (TaskState::Completed(delivered), None)
                     }
                     Ok(Err(e)) => {
@@ -1456,14 +1494,15 @@ impl TaskTool {
             let aborted = abort.is_cancelled();
             match result {
                 Ok(Ok(text)) => {
+                    let sent = take_subagent_messages(&task_id);
                     if let Some(digest) =
                         crate::agent::tools::subagent_digest::try_digest(&text).await
                     {
-                        return Ok(digest);
+                        return Ok(with_user_messages(digest, &sent));
                     }
                     let outcome =
                         crate::agent::tools::output_relay::relay_if_large("task", text, "");
-                    Ok(outcome.text)
+                    Ok(with_user_messages(outcome.text, &sent))
                 }
                 Ok(Err(e)) => {
                     if aborted {
@@ -2853,11 +2892,27 @@ mod tests {
             MessageOutcome::NotFound
         );
         assert!(b.lock_ignore_poison().is_empty());
+        assert_eq!(
+            take_subagent_messages("msgtest-aaa-1"),
+            vec!["look at foo.rs".to_string()]
+        );
+        assert!(take_subagent_messages("msgtest-aaa-1").is_empty());
         unregister_subagent_steering("msgtest-aaa-1");
         unregister_subagent_steering("msgtest-aab-2");
         assert_eq!(
             message_subagent("msgtest-aaa-1", "x"),
             MessageOutcome::NotFound
+        );
+    }
+
+    /// The parent only sees what the subagent returns, so messages sent to
+    /// it mid-run ride along as a numbered footer; none adds nothing.
+    #[test]
+    fn with_user_messages_appends_numbered_footer() {
+        assert_eq!(with_user_messages("done".into(), &[]), "done");
+        assert_eq!(
+            with_user_messages("done".into(), &["a".into(), "b".into()]),
+            "done\n\n[The user messaged this subagent while it ran:\n1. a\n2. b]"
         );
     }
 

@@ -229,10 +229,11 @@ fn kfmt(n: u64) -> String {
     }
 }
 
-/// Dim second line under an `[AGENTS]` row: what the subagent did last,
-/// how many tool calls so far, and how long it has run, e.g.
-/// `↳ read path=src/lib.rs · 4 tools · 1m05s`. `None` before its first
-/// event, so a just-spawned row stays one line.
+/// Dim second line under an `[AGENTS]` row: how long the subagent has run,
+/// how many tool calls so far, and what it did last, e.g.
+/// `↳ 1m05s · 4 tools · read path=src/lib.rs`. The short fixed-width parts
+/// lead so a narrow panel truncates the activity, not the counters. `None`
+/// before its first event, so a just-spawned row stays one line.
 fn subagent_preview_line(row: &SubagentStatusRow) -> Option<String> {
     let activity = row.activity.as_deref()?;
     let secs = row.elapsed_secs;
@@ -246,7 +247,7 @@ fn subagent_preview_line(row: &SubagentStatusRow) -> Option<String> {
         1 => " · 1 tool".to_string(),
         n => format!(" · {n} tools"),
     };
-    Some(format!("↳ {activity}{tools} · {elapsed}"))
+    Some(format!("↳ {elapsed}{tools} · {activity}"))
 }
 
 /// Rows kept free for a minimal ACTIVITY box (top + 1 row + bottom +
@@ -1453,8 +1454,8 @@ mod tests {
             "id_short fallback should appear for an unnamed subagent:\n{dump}"
         );
         assert!(
-            box_body.contains("↳ read path="),
-            "a subagent with activity should show a preview line:\n{box_body}"
+            box_body.contains("↳ 1m05s · 4 tools"),
+            "a subagent with activity should show a preview line, counters first:\n{box_body}"
         );
         assert!(
             !box_body.contains("build the parser"),
