@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 
 use crate::ui::notifications::Notification;
 use crate::ui::panels_ext::{PanelFace, PanelLine, PanelOp};
+use crate::ui::view::ViewEvent;
 
 /// What one op asks the UI to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +253,24 @@ pub fn route(data: &str, sink: &dyn FeedSink) -> Option<String> {
     }
 }
 
+/// One event's `data` as a view event, for a view engine that owns the
+/// panels: any JSON object passes through undecoded (the engine names
+/// what it understands); anything else is dropped here.
+pub fn feed_event(data: &str) -> Option<ViewEvent> {
+    match serde_json::from_str::<Value>(data) {
+        Ok(op @ Value::Object(_)) => Some(ViewEvent::Feed { op }),
+        _ => None,
+    }
+}
+
+/// Told to the view engine when the feed's stream ends, so it can
+/// close the panels the producer left open.
+pub fn feed_ended() -> ViewEvent {
+    ViewEvent::Feed {
+        op: serde_json::json!({"op": "feed/ended"}),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -405,6 +424,22 @@ pub(crate) mod tests {
         assert_eq!(got.len(), 2, "unknown op produced no effect: {got:?}");
         assert!(matches!(got[0], FeedEffect::Panel(PanelOp::Show { .. })));
         assert!(matches!(got[1], FeedEffect::Notify { .. }));
+    }
+
+    #[test]
+    fn feed_events_carry_objects_undecoded() {
+        let Some(ViewEvent::Feed { op }) = feed_event(r#"{"op":"ui/whatever","x":[1]}"#) else {
+            panic!("feed event expected");
+        };
+        assert_eq!(op, serde_json::json!({"op": "ui/whatever", "x": [1]}));
+        assert_eq!(feed_event("not json"), None);
+        assert_eq!(feed_event("[1]"), None);
+        assert_eq!(
+            feed_ended(),
+            ViewEvent::Feed {
+                op: serde_json::json!({"op": "feed/ended"})
+            }
+        );
     }
 
     #[test]

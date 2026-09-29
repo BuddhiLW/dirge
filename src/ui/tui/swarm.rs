@@ -12,7 +12,7 @@ use crate::ui::panels_ext::ExternalPanels;
 use crate::ui::swarm::{GRID_HINT, SwarmAgent, SwarmView, grid_geometry, swarm_cells};
 
 use super::chat::crossterm_to_ratatui;
-use super::panels::{SubPanel, ellipsize_width, subagent_preview_line};
+use super::panels::{SubPanel, ellipsize_width, panel_row, subagent_preview_line};
 
 /// Shown when the grid is open but there is nothing to paint.
 const EMPTY_LINES: [&str; 2] = [
@@ -155,7 +155,7 @@ impl<'a> Widget for SwarmGrid<'a> {
                     sub = sub.line("·", RColor::DarkGray);
                 } else {
                     for l in p.visible_lines(rows) {
-                        sub = sub.line(l.text.clone(), crossterm_to_ratatui(l.face.color()));
+                        sub = sub.row(panel_row(l));
                     }
                 }
                 sub.render(cell, buf);

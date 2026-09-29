@@ -17,10 +17,13 @@ use ratatui::style::{Color as RColor, Style};
 use ratatui::widgets::Widget;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::ui::panels_ext::ExternalPanels;
+use crate::ui::panels_ext::{ExternalPanels, PanelLine};
 use crate::ui::renderer::{LeftPanelInfo, PanelData, SubagentStatusRow};
 
 use super::chat::crossterm_to_ratatui;
+
+/// One body row: styled runs painted left to right.
+pub(crate) type Row = Vec<(String, RColor)>;
 
 /// One framed sub-panel: `╭─[TITLE]─╮` top, `│ content │` body,
 /// `╰─╯` bottom. Content lines are LEFT-aligned with one cell of
@@ -30,7 +33,7 @@ use super::chat::crossterm_to_ratatui;
 pub struct SubPanel<'a> {
     title: &'a str,
     badge: Option<String>,
-    lines: Vec<(String, RColor)>,
+    lines: Vec<Row>,
     border_style: Style,
 }
 
@@ -47,7 +50,13 @@ impl<'a> SubPanel<'a> {
     /// Append one body line. The color is applied to the text
     /// (borders + padding always use `border_style`).
     pub fn line(mut self, text: impl Into<String>, color: RColor) -> Self {
-        self.lines.push((text.into(), color));
+        self.lines.push(vec![(text.into(), color)]);
+        self
+    }
+
+    /// Append one body line made of styled runs.
+    pub fn row(mut self, row: Row) -> Self {
+        self.lines.push(row);
         self
     }
 
@@ -102,10 +111,17 @@ impl<'a> Widget for SubPanel<'a> {
             buf[(area.x + area.width - 1, y)]
                 .set_char('│')
                 .set_style(bs);
-            if let Some((text, color)) = self.lines.get(i) {
-                // One leading space, then text clipped to inner_w - 1.
-                let text_style = Style::default().fg(*color);
-                buf.set_stringn(area.x + 1, y, format!(" {}", text), inner_w, text_style);
+            if let Some(row) = self.lines.get(i) {
+                // One leading space, then the runs clipped to inner_w - 1.
+                let end = area.x + 1 + inner_w as u16;
+                let mut x = area.x + 2;
+                for (text, color) in row {
+                    if x >= end {
+                        break;
+                    }
+                    let style = Style::default().fg(*color);
+                    (x, _) = buf.set_stringn(x, y, text, (end - x) as usize, style);
+                }
             }
         }
 
@@ -254,8 +270,16 @@ pub(crate) fn subagent_preview_line(row: &SubagentStatusRow) -> Option<String> {
 /// spacer) when sizing external panels, so they can't evict it.
 const ACTIVITY_MIN_ROWS: u16 = 4;
 
-/// One sub-panel ready to paint: title, optional badge, coloured body rows.
-type BoxLines = (String, Option<String>, Vec<(String, RColor)>);
+/// One sub-panel ready to paint: title, optional badge, styled body rows.
+type BoxLines = (String, Option<String>, Vec<Row>);
+
+/// An external panel line as the runs a sub-panel paints.
+pub(crate) fn panel_row(line: &PanelLine) -> Row {
+    line.segments()
+        .into_iter()
+        .map(|(text, face)| (text.to_string(), crossterm_to_ratatui(face.color())))
+        .collect()
+}
 
 /// Fit external panels into `budget` rows (each box costs its body
 /// rows + 2 borders + 1 spacer). Panels are taken in paint order; one
@@ -271,12 +295,10 @@ fn fit_external_panels(panels: &ExternalPanels, budget: u16) -> Vec<BoxLines> {
         }
         let want = p.lines.len().max(1);
         let rows = want.min(left - 3);
-        let lines: Vec<(String, RColor)> = if p.lines.is_empty() {
-            vec![("·".to_string(), RColor::DarkGray)]
+        let lines: Vec<Row> = if p.lines.is_empty() {
+            vec![vec![("·".to_string(), RColor::DarkGray)]]
         } else {
-            p.visible_lines(rows)
-                .map(|l| (l.text.clone(), crossterm_to_ratatui(l.face.color())))
-                .collect()
+            p.visible_lines(rows).map(panel_row).collect()
         };
         left -= rows + 3;
         out.push((p.title.clone(), None, lines));
@@ -333,24 +355,27 @@ fn paint_idle_card(
     // Helper: render a SubPanel of `lines` at the current `dy` if it
     // fits, advancing `dy` past it + a 1-row spacer. No-op when out of
     // vertical room.
-    let place_badged = |buf: &mut Buffer,
-                        dy: &mut u16,
-                        title: &str,
-                        badge: Option<String>,
-                        lines: Vec<(String, RColor)>| {
-        let h = 2 + lines.len() as u16;
-        if box_w < 4 || area.y + *dy + h > area.y + area.height {
-            return;
-        }
-        let mut sp = SubPanel::new(title).border_style(bs).badge(badge);
-        for (t, c) in lines {
-            sp = sp.line(t, c);
-        }
-        sp.render(Rect::new(area.x, area.y + *dy, box_w, h), buf);
-        *dy += h + 1;
-    };
+    let place_badged =
+        |buf: &mut Buffer, dy: &mut u16, title: &str, badge: Option<String>, rows: Vec<Row>| {
+            let h = 2 + rows.len() as u16;
+            if box_w < 4 || area.y + *dy + h > area.y + area.height {
+                return;
+            }
+            let mut sp = SubPanel::new(title).border_style(bs).badge(badge);
+            for row in rows {
+                sp = sp.row(row);
+            }
+            sp.render(Rect::new(area.x, area.y + *dy, box_w, h), buf);
+            *dy += h + 1;
+        };
     let place = |buf: &mut Buffer, dy: &mut u16, title: &str, lines: Vec<(String, RColor)>| {
-        place_badged(buf, dy, title, None, lines)
+        place_badged(
+            buf,
+            dy,
+            title,
+            None,
+            lines.into_iter().map(|l| vec![l]).collect(),
+        )
     };
 
     // [CONTEXT] — fill bar + tokens/window + compaction count.

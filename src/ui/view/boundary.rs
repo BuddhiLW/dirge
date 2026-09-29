@@ -5,9 +5,10 @@
 
 use crossterm::style::Color;
 
-use super::domain::{NoticeLevel, PanelScope, ViewEffect, ViewUpdate};
+use super::domain::{NoticeLevel, PaintSpan, PanelScope, ViewEffect, ViewUpdate};
 use crate::extras::panel_feed::{self, ReplyAction};
 use crate::ui::colors::{c_agent, c_error};
+use crate::ui::panels_ext::{PanelFace, PanelLine, PanelOp, PanelSpan};
 use crate::ui::renderer::{PaneVisibility, PanelMode, Renderer};
 
 /// A line for the chat area.
@@ -41,6 +42,7 @@ enum Outcome {
 /// UI loop.
 pub fn apply(renderer: &mut Renderer, update: &ViewUpdate) -> Applied {
     renderer.set_swarm(update.model.swarm.as_ref());
+    super::set_owns_feed(update.model.owns_feed);
     let mut applied = Applied::default();
     for effect in &update.effects {
         match interpret(renderer, effect) {
@@ -83,14 +85,47 @@ fn interpret(renderer: &mut Renderer, effect: &ViewEffect) -> Outcome {
         ViewEffect::DisplayStatus => Outcome::Line((display_status_line(renderer), c_agent())),
         ViewEffect::OpenAgent { id } => Outcome::Handoff(Handoff::OpenAgent(id.clone())),
         ViewEffect::MessageAgent { id } => Outcome::Handoff(Handoff::MessageAgent(id.clone())),
+        ViewEffect::Paint {
+            id,
+            title,
+            rows,
+            tail,
+            offset,
+            focus,
+        } => {
+            renderer.apply_external_panel_op(PanelOp::Paint {
+                id: id.clone(),
+                title: title.clone(),
+                lines: rows.iter().map(|row| paint_line(row)).collect(),
+                tail: *tail,
+                offset: *offset,
+                focus: *focus,
+            });
+            Outcome::Done
+        }
+        ViewEffect::Unpaint { id } => {
+            renderer.apply_external_panel_op(PanelOp::Close { id: id.clone() });
+            Outcome::Done
+        }
     }
 }
 
 fn notice_color(level: NoticeLevel) -> Color {
     match level {
         NoticeLevel::Info => c_agent(),
+        NoticeLevel::Warn => Color::Yellow,
         NoticeLevel::Error => c_error(),
     }
+}
+
+/// A painted row as a panel line: each run's wire face name mapped
+/// the same way a panel-feed line's is.
+fn paint_line(row: &[PaintSpan]) -> PanelLine {
+    let spans = row
+        .iter()
+        .map(|s| PanelSpan::new(s.text.clone(), panel_feed::ops::face_of(Some(&s.face))))
+        .collect();
+    PanelLine::from_spans(spans, PanelFace::Normal)
 }
 
 /// The producer reply a `reply` effect names; `None` for an unknown

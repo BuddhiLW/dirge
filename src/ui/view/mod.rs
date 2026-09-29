@@ -34,6 +34,7 @@ pub(crate) mod wire;
 pub(crate) mod tests;
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) use domain::{ViewEvent, ViewModel, ViewUpdate};
 use engine::ThreadEngine;
@@ -113,4 +114,20 @@ pub fn submit(event: ViewEvent) {
         Some(engine) => engine.submit(event),
         None => tracing::debug!(target: "dirge::view", "no view engine; event dropped"),
     }
+}
+
+/// Whether the running engine owns the external panels (its latest
+/// model said `owns_feed`). Read by the panel feed from its own task,
+/// so it is a flag, not the model.
+static OWNS_FEED: AtomicBool = AtomicBool::new(false);
+
+/// Set from every applied update (see `boundary::apply`).
+pub(crate) fn set_owns_feed(owns: bool) {
+    OWNS_FEED.store(owns, Ordering::Relaxed);
+}
+
+/// True when panel-feed ops should go to the engine as
+/// [`ViewEvent::Feed`] instead of being applied by the UI directly.
+pub fn owns_feed() -> bool {
+    OWNS_FEED.load(Ordering::Relaxed)
 }

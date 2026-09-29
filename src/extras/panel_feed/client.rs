@@ -247,7 +247,13 @@ async fn connect_once(
             match item {
                 SseItem::Event(ev) => {
                     delivered = true;
-                    if let Some(id) = ops::route(&ev.data, sink)
+                    // A view engine that owns the panels gets the op
+                    // undecoded; otherwise the UI's own decoder runs.
+                    if crate::ui::view::owns_feed() {
+                        if let Some(event) = ops::feed_event(&ev.data) {
+                            crate::ui::view::submit(event);
+                        }
+                    } else if let Some(id) = ops::route(&ev.data, sink)
                         && !shown.contains(&id)
                     {
                         shown.push(id);
@@ -262,7 +268,11 @@ async fn connect_once(
     };
     // The producer is gone (or we are): its panels would otherwise
     // linger as stale state. A reconnect replays what is still live.
+    // A view engine that owns the panels hears it and closes its own.
     if !matches!(outcome, Outcome::Stopped) {
+        if crate::ui::view::owns_feed() {
+            crate::ui::view::submit(ops::feed_ended());
+        }
         for id in shown {
             sink.apply(ops::FeedEffect::Panel(PanelOp::Close { id }));
         }
