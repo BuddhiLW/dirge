@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{Value, json};
 
-use super::dialect;
-use super::domain::{HookEvent, HookOutcome, system_reminder};
+use super::domain::{HookEvent, HookOutcome, Submission, system_reminder};
 use super::{CommandHooks, HookBinding};
+use super::{dialect, policy};
 use crate::agent::agent_loop::hooks::{
     AfterToolCallContext, AfterToolCallFn, BeforeToolCallContext, BeforeToolCallFn,
     BeforeToolCallReturn, GetFollowupMessagesFn,
@@ -373,23 +373,15 @@ pub fn with_subagent_context(
     )
 }
 
-/// The prompt the model receives after `UserPromptSubmit`: context is
-/// prepended; a block replaces the prompt with a refusal notice.
-pub fn submitted_prompt(hooks: &CommandHooks, session_id: Option<&str>, prompt: String) -> String {
+/// `UserPromptSubmit` for `prompt`: the text the model receives, or the
+/// reason it must not be called at all. See [`policy::submission`].
+pub fn submitted_prompt(
+    hooks: &CommandHooks,
+    session_id: Option<&str>,
+    prompt: String,
+) -> Submission {
     let outcome = hooks.user_prompt_submit(session_id, &prompt);
-    if let Some(reason) = outcome.block {
-        return format!(
-            "<system-reminder>\nThe user's prompt was blocked by a UserPromptSubmit hook and must not be acted on. \
-             Tell the user it was blocked and why.\nReason: {reason}\n</system-reminder>"
-        );
-    }
-    match outcome.context_text() {
-        Some(text) => format!(
-            "{}\n\n{prompt}",
-            system_reminder(HookEvent::UserPromptSubmit, &text)
-        ),
-        None => prompt,
-    }
+    policy::submission(outcome, prompt)
 }
 
 /// `agent_type` reported for dirge's `task` subagents.
