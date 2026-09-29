@@ -378,6 +378,7 @@ impl ContextUsage {
     }
 
     /// `tokens / ctx_max`; 0 when the window is unknown.
+    #[cfg_attr(not(feature = "addons"), allow(dead_code))]
     pub fn pressure(self) -> f64 {
         if self.ctx_max == 0 {
             0.0
