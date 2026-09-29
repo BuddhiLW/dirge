@@ -39,7 +39,10 @@
     {:op     :paint
      :id     id
      :title  (:title p)
-     :rows   (:rows p)
+     :rows   (if (and (:cursor? p) (seq (:rows p)))
+               (assoc (:rows p) (:cursor p)
+                      (mapv #(assoc % :face "cursor") (nth (:rows p) (:cursor p))))
+               (:rows p))
      :tail   (boolean (:tail p))
      :offset (:offset p)
      :focus  (= id (:focused state))}))
@@ -94,6 +97,26 @@
         [cur out] (reduce step [[] []] row)]
     (conj out cur)))
 
+(defn row-ids-of
+  "Stable identifiers parallel to the rows (only the first split row gets an id)."
+  [op]
+  (let [lines (if (sequential? (:lines op)) (:lines op)
+                  (when (string? (:text op)) [(:text op)]))]
+    (vec (mapcat (fn [line]
+                   (let [row (line->row line)
+                         n (count (split-row row))]
+                     (concat [(when (map? line) (:id line))] (repeat (dec n) nil))))
+                 (filter #(some? (line->row %)) lines)))))
+
+(defn row-payloads-of
+  [op]
+  (let [lines (if (sequential? (:lines op)) (:lines op)
+                  (when (string? (:text op)) [(:text op)]))]
+    (vec (mapcat (fn [line]
+                   (let [n (count (split-row (line->row line)))]
+                     (concat [(when (map? line) (:payload line))] (repeat (dec n) nil))))
+                 (filter #(some? (line->row %)) lines)))))
+
 (defn rows-of
   "The body rows of a show op: its :lines, else its :text."
   [op]
@@ -144,7 +167,8 @@
 
 (defn clamp-offset
   [p]
-  (assoc p :offset (min (or (:offset p) 0) (max 0 (dec (count (:rows p)))))))
+  (assoc p :offset (min (or (:offset p) 0) (max 0 (dec (count (:rows p)))))
+           :cursor (min (or (:cursor p) 0) (max 0 (dec (count (:rows p)))))))
 
 (defn drop-panel
   [state id]
@@ -163,7 +187,7 @@
           state   (if full? (drop-panel state old) state)
           evicted (if full? [(unpaint old)] [])]
       [(-> state
-           (assoc-in [:panels id] {:title title :rows [] :tail tail :offset 0})
+           (assoc-in [:panels id] {:title title :rows [] :tail tail :offset 0 :cursor 0 :cursor? false :keys {} :row-ids [] :row-payloads [] :payload {}})
            (update :order conj id))
        evicted])))
 
@@ -175,9 +199,20 @@
   (if-let [id (panel-id op)]
     (let [title       (title-of op id)
           [state evs] (ensure-panel state id title false)
-          rows        (vec (take max-rows (drop-title-row (rows-of op) title)))
+          all-rows    (rows-of op)
+          all-ids     (row-ids-of op)
+          all-payloads (row-payloads-of op)
+          dropped     (- (count all-rows) (count (drop-title-row all-rows title)))
+          rows        (vec (take max-rows (drop dropped all-rows)))
+          row-ids     (vec (take max-rows (drop dropped all-ids)))
+          row-payloads (vec (take max-rows (drop dropped all-payloads)))
           state       (update-in state [:panels id]
-                                 #(clamp-offset (assoc % :title title :rows rows :tail false)))]
+                                 #(clamp-offset (assoc % :title title :rows rows :row-ids row-ids :row-payloads row-payloads
+                                                         :payload (if (map? (:payload op)) (:payload op) {})
+                                                         :keys (if (map? (:keys op)) (:keys op) {})
+                                                         :cursor? (true? (:cursor op)) :tail false)))
+          state       (if (or (true? (:cursor op)) (seq (:keys op)))
+                        (assoc state :focused id) state)]
       [state (conj evs (paint state id))])
     [state []]))
 
@@ -214,12 +249,46 @@
                                        (clamp-offset
                                         (assoc p
                                                :rows (if (pos? over) (subvec rows over) rows)
+                                               :row-ids (vec (take max-rows (drop (max over 0)
+                                                                                  (concat (:row-ids p) (repeat (count new) nil)))))
+                                               :row-payloads (vec (take max-rows (drop (max over 0)
+                                                                                       (concat (:row-payloads p) (repeat (count new) nil)))))
                                                ;; A reader scrolled back keeps their place.
                                                :offset (if (pos? (:offset p))
                                                          (+ (:offset p) (count new))
                                                          0))))))]
         [state (conj evs (paint state id))])
       [state []])))
+
+(def scroll-keys {"j" 1 "Down" 1 "k" -1 "Up" -1
+                  "PgDn" 10 "PgUp" -10})
+
+(defn panel-keys [state]
+  (if-let [p (get-in state [:panels (:focused state)])]
+    (vec (sort (distinct (concat (map name (keys (:keys p)))
+                                (keys scroll-keys)))))
+    []))
+
+(defn key-step
+  "Only the focused panel receives its declared keys. Cursor is a row index;
+   offset counts back from the top, and follows it as it moves."
+  [state {:keys [key panel]}]
+  (let [p (get-in state [:panels panel])
+        verb (or (get (:keys p) key) (get (:keys p) (keyword key)))
+        delta (get scroll-keys key)]
+    (cond
+      (not= panel (:focused state)) [state []]
+      (and (string? verb) (not (str/blank? verb)))
+      [state [{:op :reply :action "invoke"
+               :payload {:panel panel :verb verb
+                         :row (get (:row-ids p) (:cursor p))
+                         :payload (or (get (:row-payloads p) (:cursor p)) (:payload p) {})}}]]
+      delta (let [state (update-in state [:panels panel]
+                                   (fn [p] (let [cursor (max 0 (min (max 0 (dec (count (:rows p))))
+                                                                        (+ (:cursor p) delta)))]
+                                             (assoc p :cursor cursor :offset cursor))))]
+              [state [(paint state panel)]])
+      :else [state []])))
 
 (def levels
   {"warn" :warn "warning" :warn "error" :error "err" :error})
@@ -238,6 +307,11 @@
   [state _]
   [empty-state (mapv unpaint (:order state))])
 
+(defn open-file [state op]
+  (if (and (string? (:path op)) (not (str/blank? (:path op))))
+    [state [{:op :open-file :path (:path op) :line (:line op) :diff (:diff op)}]]
+    [state []]))
+
 (def ops
   "Feed op name -> (fn [state op] [state' effects]). An op not listed
    is ignored: a newer producer never breaks the view."
@@ -246,6 +320,7 @@
    "ui/focus-tab"   focus-tab
    "ui/append-tab"  append-tab
    "ui/notify"      notify
+   "ui/open-file"   open-file
    "feed/ended"     feed-ended})
 
 (defn step

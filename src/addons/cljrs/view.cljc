@@ -271,12 +271,16 @@
   {"init"    (fn [state _] [state []])
    "command" command-step
    "grid"    grid-step
-   "feed"    feed-step})
+   "feed"    feed-step
+   "key"     (fn [state event]
+               (let [[p effects] (panels/key-step (:panels state) event)]
+                 [(assoc state :panels p) effects]))})
 
 (defn model
   [state]
   {:swarm         (when-let [s (:swarm state)] {:selected (:selected s)})
    :grid_keys     (vec (sort (keys grid-keymap)))
+   :panel_keys    (panels/panel-keys (:panels state))
    :view_commands (vec (sort (keys commands)))
    :owns_feed     true})
 
