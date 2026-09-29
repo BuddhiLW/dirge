@@ -820,3 +820,49 @@ fn session_end_reaches_mcp_before_the_teardown_closes_it() {
     );
     host.shutdown();
 }
+
+#[test]
+fn an_emit_site_declares_the_fields_its_hook_reads_as_keywords() {
+    use super::domain::with_keyword_fields;
+
+    let host = super::start(
+        echo_plan(&fixtures().join("keywords")),
+        Harness::with_sink(Arc::new(RecordingSink::default())),
+        PROTOCOL,
+    )
+    .expect("host starts");
+    let kinds = |key: &str, ctx: Value| -> Value {
+        let replies = host.emit(key, &ctx);
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        replies[0].result.clone().expect("the hook answers")
+    };
+
+    // A key the host knows nothing about: only what the emit site declares.
+    assert_eq!(
+        kinds(
+            "fixture/probe",
+            with_keyword_fields(json!({"mode": "fast", "note": "plain"}), &["mode"]),
+        ),
+        json!({"mode": "keyword", "note": "string"}),
+        "the declared field is a keyword and the declaration is not in ctx"
+    );
+    assert_eq!(
+        kinds("fixture/probe", json!({"mode": "fast"})),
+        json!({"mode": "string"}),
+        "nothing declared, nothing converted"
+    );
+
+    // A key with host defaults: they still apply, with or without more.
+    assert_eq!(
+        kinds("dirge/session-end", json!({"reason": "exit", "cwd": "/w"})),
+        json!({"reason": "keyword", "cwd": "string"})
+    );
+    assert_eq!(
+        kinds(
+            "dirge/session-end",
+            with_keyword_fields(json!({"reason": "swap", "cwd": "/w"}), &["cwd"]),
+        ),
+        json!({"reason": "keyword", "cwd": "keyword"})
+    );
+    host.shutdown();
+}
