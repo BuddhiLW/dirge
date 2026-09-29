@@ -222,6 +222,51 @@ pub fn compose_open_run(first: Option<OpenRunFn>, second: Option<OpenRunFn>) -> 
     }
 }
 
+/// `first`, then `second` on the context `first` left. Where both change
+/// the same field, `second`'s change wins.
+#[cfg_attr(not(feature = "addons"), allow(dead_code))]
+pub fn compose_prepare_next_turn(
+    first: Option<PrepareNextTurnFn>,
+    second: Option<PrepareNextTurnFn>,
+) -> Option<PrepareNextTurnFn> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(Arc::new(move |mut turn: TurnHookContext| {
+            let (first, second) = (first.clone(), second.clone());
+            Box::pin(async move {
+                let a = first(turn.clone()).await;
+                if let Some(context) = a.as_ref().and_then(|u| u.context.clone()) {
+                    turn.context = context;
+                }
+                match (a, second(turn).await) {
+                    (Some(a), Some(b)) => Some(TurnUpdate {
+                        context: b.context.or(a.context),
+                        model: b.model.or(a.model),
+                        thinking_level: b.thinking_level.or(a.thinking_level),
+                    }),
+                    (a, b) => b.or(a),
+                }
+            })
+        })),
+        (first, second) => first.or(second),
+    }
+}
+
+/// Stop when `first` or `second` asks to; `second` is not asked once
+/// `first` has.
+#[cfg_attr(not(feature = "addons"), allow(dead_code))]
+pub fn compose_should_stop_after_turn(
+    first: Option<ShouldStopAfterTurnFn>,
+    second: Option<ShouldStopAfterTurnFn>,
+) -> Option<ShouldStopAfterTurnFn> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(Arc::new(move |turn: TurnHookContext| {
+            let (first, second) = (first.clone(), second.clone());
+            Box::pin(async move { first(turn.clone()).await || second(turn).await })
+        })),
+        (first, second) => first.or(second),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +298,53 @@ mod tests {
         assert_eq!(both(RunOpening::default()).await.system_prompt, "ab");
         let second = compose_open_run(None, Some(appending("b"))).unwrap();
         assert_eq!(second(RunOpening::default()).await.system_prompt, "b");
+    }
+
+    fn turn_ctx() -> TurnHookContext {
+        TurnHookContext {
+            message: AssistantMessage::new(Vec::new(), super::super::message::StopReason::Stop),
+            tool_results: Vec::new(),
+            context: Context::default(),
+            new_messages: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_second_prepare_sees_the_first_context_and_wins_where_both_answer() {
+        use super::super::types::ThinkingLevel;
+        let first: PrepareNextTurnFn = Arc::new(|mut turn: TurnHookContext| {
+            Box::pin(async move {
+                turn.context.messages.push(Value::from("first"));
+                Some(TurnUpdate {
+                    context: Some(turn.context),
+                    model: Some("m1".into()),
+                    thinking_level: Some(ThinkingLevel::Low),
+                })
+            })
+        });
+        let second: PrepareNextTurnFn = Arc::new(|turn: TurnHookContext| {
+            Box::pin(async move {
+                assert_eq!(turn.context.messages, vec![Value::from("first")]);
+                Some(TurnUpdate {
+                    thinking_level: Some(ThinkingLevel::High),
+                    ..TurnUpdate::default()
+                })
+            })
+        });
+        let both = compose_prepare_next_turn(Some(first), Some(second)).unwrap();
+        let update = both(turn_ctx()).await.unwrap();
+        assert_eq!(update.thinking_level, Some(ThinkingLevel::High));
+        assert_eq!(update.model.as_deref(), Some("m1"));
+        assert_eq!(update.context.unwrap().messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_stop_from_the_first_skips_the_second() {
+        let yes: ShouldStopAfterTurnFn = Arc::new(|_| Box::pin(async { true }));
+        let unreachable: ShouldStopAfterTurnFn =
+            Arc::new(|_| Box::pin(async { panic!("asked after a stop") }));
+        let both = compose_should_stop_after_turn(Some(yes), Some(unreachable)).unwrap();
+        assert!(both(turn_ctx()).await);
     }
 
     #[test]

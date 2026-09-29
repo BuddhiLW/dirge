@@ -806,6 +806,9 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
 
     if let Some(addons) = &cfg.addon_hooks {
         addons.install_tool_hooks(&mut loop_config);
+        // After the plugin's: the addons transform what the plugin's
+        // transform answered, and either may stop the run.
+        addons.install_turn_hooks(&mut loop_config);
         // After the plugin's: a plugin summary that validates wins.
         loop_config.compaction_hooks = super::types::compose_compaction_hooks(
             loop_config.compaction_hooks.take(),

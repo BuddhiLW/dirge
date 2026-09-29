@@ -789,6 +789,21 @@ pub type TransformContextFn = std::sync::Arc<
         + Sync,
 >;
 
+/// `first`, then `second` on the messages `first` answered.
+#[cfg_attr(not(feature = "addons"), allow(dead_code))]
+pub fn compose_transform_context(
+    first: Option<TransformContextFn>,
+    second: Option<TransformContextFn>,
+) -> Option<TransformContextFn> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(std::sync::Arc::new(move |messages| {
+            let (first, second) = (first.clone(), second.clone());
+            Box::pin(async move { second(first(messages).await).await })
+        })),
+        (first, second) => first.or(second),
+    }
+}
+
 /// Why a compaction pass runs, and how full the context is as it does.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CompactionFacts {

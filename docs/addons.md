@@ -112,6 +112,9 @@ keys and ignores the rest:
 | `:dirge/after-tool-call` | `{:tool :args :result :error? :tool-use-id :tokens :ctx-max :pressure}` | text appended to the tool result |
 | `:dirge/before-compact` | `{:count :tokens :reason :ctx-max :pressure :session-id}` | ignored |
 | `:dirge/compact` | `{:span :tokens :reason :focus :ctx-max :pressure :session-id}` | `nil` or `{:summary "text"}`, see [Compaction](#compaction) |
+| `:dirge/transform-context` | `{:messages :tokens :session-id}` | `nil` or `{:messages [...]}`, see [Turns](#turns) |
+| `:dirge/prepare-next-turn` | `{:text :stop-reason :tool-results :messages :tokens :session-id}` | `nil`, text, or `{:thinking "level" :context "text"}` |
+| `:dirge/should-stop-after-turn` | same as `:dirge/prepare-next-turn` | `true`, `{:stop true}` or `{:stop "reason"}` to end the run |
 | `:dirge/event` | one event of the run, see [Watching the run](#watching-the-run-dirgeevent) | ignored |
 
 A text answer may also be given as `{:context "text"}`. Hooks run for the
@@ -162,6 +165,46 @@ Janet plugin's `on-compact` summary goes first.
 Both hooks run off dirge's event loop, so `mcp-call` works from them. A
 fold waits at most 60 seconds for each, then goes on without the answer;
 raise that with `addons.compact_timeout_secs`.
+
+### Turns
+
+Three hooks follow the run turn by turn. None has a hook point of its own:
+dirge reaches them as [open hook keys](#open-hook-keys).
+
+`:dirge/transform-context` runs before every model call. `:messages` is the
+conversation that call would send, in dirge's message shape (maps with
+`:role` and `:content`), and `:tokens` its estimated size. Answer
+`{:messages [...]}` to send those messages instead, for this call only: the
+saved conversation is not changed. The answer must hold at least one
+message, and every message must have a `:role`; any other answer leaves the
+messages as they were. The first addon whose answer passes is the one used.
+A Janet plugin's `transform-context` runs first, and the addon sees what it
+answered.
+
+`:dirge/prepare-next-turn` and `:dirge/should-stop-after-turn` run after
+each turn, in that order, before dirge looks for the next one. Their ctx describes the turn: `:text` is
+the assistant's text, `:stop-reason` why it stopped (`stop`, `toolUse`,
+`length`, ...), `:tool-results` one `{:tool :tool-use-id :text :error?}` per
+tool result, and `:messages` and `:tokens` the size of the conversation so
+far.
+
+`:dirge/prepare-next-turn` may answer `{:thinking "high"}` to set the
+thinking level of the turns after this one (`off`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, `max`; the first known level wins, an unknown one
+is ignored). A text answer, or `{:context "text"}`, is added to the
+conversation as a `<system-reminder>` the next turn reads. The reminder
+stays in the conversation for the rest of the run, but is not saved with
+the session. A Janet plugin's `harness/set-next-thinking-level` goes first;
+where both set the level, the addon's wins.
+
+`:dirge/should-stop-after-turn` ends the run after this turn when any addon
+answers `true`, `{:stop true}` or `{:stop "reason"}`; the reason is logged.
+A Janet plugin's `harness/request-stop-after-turn` is asked first. Any other
+answer, `nil` included, lets the run go on.
+
+The three run off dirge's event loop, so `mcp-call` works from them. Each
+call waits at most 10 seconds, then goes on as if the hook had not answered.
+`:dirge/transform-context` runs before every model call, so keep it fast.
 
 ### Session start and end
 
@@ -385,7 +428,8 @@ Hook keys are open. Besides the `:dirge/*` keys listed under
 [Hooks](#hooks), an addon may register any keyword; `/addons` lists every
 key an addon registered. A seam in dirge reaches such a key by name
 (`AddonHost::emit`) without a new hook point in the host, so adding a seam
-costs one call site, not a change to the addon host's types.
+costs one call site, not a change to the addon host's types. The
+[turn hooks](#turns) are reached this way.
 
 ### Watching the run: `:dirge/event`
 

@@ -135,6 +135,63 @@ fn compaction_hooks_reach_a_running_addon() {
     assert_eq!(host.compact(&ctx, |_| false), None);
 }
 
+#[tokio::test]
+async fn turn_hooks_reach_a_running_addon_and_their_answers_fold_back() {
+    use super::turn_hooks::{self, PREPARE_NEXT_TURN, SHOULD_STOP_AFTER_TURN, TRANSFORM_CONTEXT};
+    use crate::agent::agent_loop::hooks::TurnHookContext;
+    use crate::agent::agent_loop::message::{
+        AssistantMessage, ContentBlock, StopReason, ToolResultMessage,
+    };
+    use crate::agent::agent_loop::types::{Context, LoopConfig, ThinkingLevel};
+
+    let host = Arc::new(live_host(IsolateOptions::default()));
+    for key in [TRANSFORM_CONTEXT, PREPARE_NEXT_TURN, SHOULD_STOP_AFTER_TURN] {
+        assert!(host.listens_key(key), "{key}");
+    }
+    let mut config = LoopConfig::for_tests(Arc::new(|m: &[Value]| m.to_vec()));
+    turn_hooks::install(&mut config, &host, turn_hooks::BUDGET);
+
+    // The addon keeps the last message only.
+    let messages = vec![
+        json!({"role": "user", "content": "a"}),
+        json!({"role": "assistant", "content": [{"type": "text", "text": "b"}]}),
+    ];
+    let transform = config.transform_context.expect("transform installed");
+    assert_eq!(transform(messages.clone()).await, vec![messages[1].clone()]);
+
+    let turn = |text: &str| TurnHookContext {
+        message: AssistantMessage::new(
+            vec![ContentBlock::Text { text: text.into() }],
+            StopReason::Stop,
+        ),
+        tool_results: vec![ToolResultMessage {
+            tool_call_id: "c1".into(),
+            tool_name: "read".into(),
+            content: vec![ContentBlock::Text { text: "x".into() }],
+            details: Value::Null,
+            is_error: false,
+        }],
+        context: Context {
+            messages: messages.clone(),
+            ..Default::default()
+        },
+        new_messages: Vec::new(),
+    };
+
+    // A thinking level and a note for the next turn.
+    let prepare = config.prepare_next_turn.expect("prepare installed");
+    let update = prepare(turn("working")).await.expect("an update");
+    assert_eq!(update.thinking_level, Some(ThinkingLevel::High));
+    let context = update.context.expect("a note");
+    assert_eq!(context.messages.len(), 3);
+    assert!(context.messages[2].to_string().contains("1 tool results"));
+
+    // The addon stops the run only once the turn says done.
+    let stop = config.should_stop_after_turn.expect("stop installed");
+    assert!(!stop(turn("working")).await);
+    assert!(stop(turn("done")).await);
+}
+
 #[test]
 fn posted_events_reach_the_event_hook_in_order() {
     use crate::event::AgentEvent;
