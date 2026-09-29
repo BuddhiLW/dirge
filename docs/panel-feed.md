@@ -41,8 +41,42 @@ on a new port with a new token is picked up without restarting dirge.
 { "url": "http://127.0.0.1:43127/prefix", "token": "0123abcd...", "port": 43127, "pid": 4242 }
 ```
 
-Only `url` (must be `http://` or `https://`; a trailing `/` is dropped)
-and `token` (optional) are read; other keys are ignored.
+Only `url` (must be `http://` or `https://`; a trailing `/` is dropped),
+`token` (optional) and `capabilities` (optional, below) are read; other
+keys are ignored.
+
+#### Capabilities
+
+A producer says which replies it accepts and which grid keys send them.
+dirge keeps no producer verbs of its own; without `capabilities` it
+assumes the defaults below.
+
+```json
+"capabilities": {
+  "version": 1,
+  "replies": ["focus", "unfocus", "next-tab", "prev-tab", "refresh", "invoke"],
+  "invokes": ["open", "run"],
+  "keys": {"enter": "focus", "u": "unfocus", "r": "refresh",
+           "tab": "next-tab", "shift-tab": "prev-tab", "o": {"invoke": "open"}}
+}
+```
+
+- `version`: only `1` is read; any other keeps every default.
+- `replies`: the verbs `/panel <verb>` and the grid may send. Absent: the
+  defaults `focus <id>`, `unfocus`, `next-tab`, `prev-tab`, `refresh`. A
+  default verb keeps its arity (`focus` needs an id); any other takes an
+  optional id. `invoke` names the invoke reply, not a verb.
+- `keys`: grid keys, in keymap chord syntax (`enter`, `tab`,
+  `shift-tab`, `u`), to a reply verb or to `{"invoke": verb}` on the
+  selected panel cell. A key whose verb is not in `replies` (or, when
+  `invokes` is given, not in `invokes`) is dropped, as is a chord with
+  Ctrl or Alt. Absent: Tab, Shift+Tab, r, u and Enter bound to the
+  default verbs that `replies` allows.
+- dirge's own grid keys (Esc/q, arrows and hjkl, Home/End, 1-9, and
+  Enter/m on a subagent cell) cannot be rebound. Enter on a panel cell
+  is the producer's.
+
+A reply verb that names an item gets the selected panel cell's id.
 
 Every file that carries a token (the discovery file or `token_file`)
 must be a regular file, not a symlink, **owned by the current user**

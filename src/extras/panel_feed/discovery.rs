@@ -79,9 +79,9 @@ pub struct Endpoint {
     /// Base URL; the client appends `/events` and `/reply`.
     pub url: String,
     pub token: Option<String>,
-    /// The reply verbs the producer advertised (`capabilities.replies`);
-    /// `None` when it advertised none.
-    pub replies: Option<Vec<String>>,
+    /// What the producer advertised; `None` when nothing this client
+    /// reads.
+    pub capabilities: Option<Capabilities>,
 }
 
 impl std::fmt::Debug for Endpoint {
@@ -89,7 +89,7 @@ impl std::fmt::Debug for Endpoint {
         f.debug_struct("Endpoint")
             .field("url", &self.url)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
-            .field("replies", &self.replies)
+            .field("capabilities", &self.capabilities)
             .finish()
     }
 }
@@ -201,33 +201,87 @@ struct DiscoveryDoc {
 /// The only `capabilities.version` this client reads.
 const CAPABILITIES_VERSION: u64 = 1;
 
-/// The reply verbs a discovery document's `capabilities` advertise
-/// (pure). `None` (today's defaults) when there are none, the version is
-/// not one this client reads, or `replies` is not a list; a non-string
-/// entry is dropped. Each rejection is logged.
-pub fn advertised_replies(capabilities: &serde_json::Value) -> Option<Vec<String>> {
+/// What a producer's discovery document advertises.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Capabilities {
+    /// Reply verbs (`replies`); `None`: the defaults.
+    pub replies: Option<Vec<String>>,
+    /// Verbs its keys may invoke (`invokes`); empty: not checked.
+    pub invokes: Vec<String>,
+    /// Key bindings (`keys`), chord -> binding; `None`: the defaults.
+    pub keys: Option<Vec<(String, AdvertisedKey)>>,
+}
+
+/// What an advertised key does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdvertisedKey {
+    Reply(String),
+    Invoke(String),
+}
+
+fn warn(what: &str) {
+    tracing::warn!(target: "dirge::panel_feed", "capabilities: {what}");
+}
+
+fn string_list(value: Option<&serde_json::Value>, field: &str) -> Option<Vec<String>> {
+    let items = value?.as_array().or_else(|| {
+        warn(&format!("{field} is not a list; ignored"));
+        None
+    })?;
+    Some(
+        items
+            .iter()
+            .filter_map(|item| {
+                let name = item.as_str().map(str::trim).filter(|n| !n.is_empty());
+                if name.is_none() {
+                    warn(&format!("{field} entry {item} ignored"));
+                }
+                name.map(str::to_string)
+            })
+            .collect(),
+    )
+}
+
+/// A discovery document's `capabilities` (pure). `None` when the version
+/// is not one this client reads: everything then keeps its default. A
+/// malformed field or entry is dropped and logged.
+pub fn parse_capabilities(capabilities: &serde_json::Value) -> Option<Capabilities> {
     let version = capabilities
         .get("version")
         .and_then(serde_json::Value::as_u64);
     if version != Some(CAPABILITIES_VERSION) {
-        tracing::warn!(target: "dirge::panel_feed", ?version, "capabilities version not read; using the default replies");
+        warn(&format!("version {version:?} not read; using the defaults"));
         return None;
     }
-    let replies = capabilities.get("replies")?.as_array().or_else(|| {
-        tracing::warn!(target: "dirge::panel_feed", "capabilities.replies is not a list; using the default replies");
-        None
-    })?;
-    let names: Vec<String> = replies
-        .iter()
-        .filter_map(|r| {
-            let name = r.as_str().map(str::trim).filter(|n| !n.is_empty());
-            if name.is_none() {
-                tracing::warn!(target: "dirge::panel_feed", reply = %r, "capabilities.replies entry ignored");
-            }
-            name.map(str::to_string)
-        })
-        .collect();
-    Some(names)
+    let keys = capabilities.get("keys").and_then(|k| {
+        let map = k.as_object().or_else(|| {
+            warn("keys is not an object; ignored");
+            None
+        })?;
+        Some(
+            map.iter()
+                .filter_map(|(chord, binding)| {
+                    let parsed = match binding {
+                        serde_json::Value::String(verb) => Some(AdvertisedKey::Reply(verb.clone())),
+                        serde_json::Value::Object(o) => o
+                            .get("invoke")
+                            .and_then(serde_json::Value::as_str)
+                            .map(|v| AdvertisedKey::Invoke(v.to_string())),
+                        _ => None,
+                    };
+                    if parsed.is_none() {
+                        warn(&format!("key {chord} binding {binding} ignored"));
+                    }
+                    parsed.map(|p| (chord.clone(), p))
+                })
+                .collect(),
+        )
+    });
+    Some(Capabilities {
+        replies: string_list(capabilities.get("replies"), "replies"),
+        invokes: string_list(capabilities.get("invokes"), "invokes").unwrap_or_default(),
+        keys,
+    })
 }
 
 /// Parse a discovery document (pure).
@@ -244,7 +298,7 @@ pub fn parse_discovery(text: &str) -> Result<Endpoint, String> {
     Ok(Endpoint {
         url,
         token: doc.token.filter(|t| !t.is_empty()),
-        replies: doc.capabilities.as_ref().and_then(advertised_replies),
+        capabilities: doc.capabilities.as_ref().and_then(parse_capabilities),
     })
 }
 
@@ -266,7 +320,7 @@ pub fn resolve(source: &Source) -> Result<Endpoint, DiscoveryError> {
             Ok(Endpoint {
                 url: url.trim_end_matches('/').to_string(),
                 token,
-                replies: None,
+                capabilities: None,
             })
         }
     }
@@ -349,7 +403,7 @@ mod tests {
         let ep = Endpoint {
             url: "http://h".into(),
             token: Some("s3cret".into()),
-            replies: None,
+            capabilities: None,
         };
         let dbg = format!("{ep:?}");
         assert!(!dbg.contains("s3cret"), "{dbg}");

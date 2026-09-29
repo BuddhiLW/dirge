@@ -26,6 +26,8 @@ use tokio::sync::watch;
 
 use crate::sync_util::LockExt;
 use crate::ui::notifications::Notification;
+use crate::ui::view::ViewEvent;
+use crate::ui::view::domain::{ProducerKey, ProducerVerb};
 use client::{FeedOptions, ReplyError};
 use discovery::{PanelFeedConfig, Source};
 
@@ -54,15 +56,7 @@ pub enum ReplyAction {
 }
 
 /// Whether a reply verb names an item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Target {
-    /// It takes none.
-    None,
-    /// It needs one.
-    Required,
-    /// It may carry one; the producer decides what it means.
-    Optional,
-}
+pub use crate::ui::view::domain::ReplyTarget as Target;
 
 /// A reply verb the producer accepts, and whether it names an item.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,9 +82,19 @@ const VERB_ALIASES: &[(&str, &str)] = &[("next", "next-tab"), ("prev", "prev-tab
 /// advertises none.
 pub const REPLY_USAGE: &str = "usage: /panel next|prev|refresh|unfocus|focus <id>";
 
-/// The reply verbs the running producer advertised in its discovery
-/// document (`capabilities.replies`); `None` until one does.
-static ADVERTISED: Mutex<Option<Vec<String>>> = Mutex::new(None);
+/// What the running producer advertised in its discovery document
+/// (`capabilities`); `None` until one does.
+static ADVERTISED: Mutex<Option<discovery::Capabilities>> = Mutex::new(None);
+
+/// The grid keys bound when the producer advertises none, by grid key
+/// name: the bindings every panel-feed producer so far has expected.
+const DEFAULT_KEYS: &[(&str, &str)] = &[
+    ("Tab", "next-tab"),
+    ("BackTab", "prev-tab"),
+    ("r", "refresh"),
+    ("u", "unfocus"),
+    ("Enter", "focus"),
+];
 
 /// [`DEFAULT_VERBS`] as a verb list.
 pub fn default_verbs() -> Vec<ReplyVerb> {
@@ -120,17 +124,103 @@ pub fn advertised_verbs(names: &[String]) -> Vec<ReplyVerb> {
         .collect()
 }
 
-/// The verbs replies may use now: the producer's, else the defaults.
-pub fn reply_verbs() -> Vec<ReplyVerb> {
-    match ADVERTISED.lock_ignore_poison().as_deref() {
+/// The verbs `caps` allows: its replies, else the defaults.
+fn verbs_of(caps: Option<&discovery::Capabilities>) -> Vec<ReplyVerb> {
+    match caps.and_then(|c| c.replies.as_deref()) {
         Some(names) => advertised_verbs(names),
         None => default_verbs(),
     }
 }
 
-/// Record what the producer just advertised (`None`: nothing).
-pub fn set_advertised(replies: Option<Vec<String>>) {
-    *ADVERTISED.lock_ignore_poison() = replies;
+/// The verbs replies may use now: the producer's, else the defaults.
+pub fn reply_verbs() -> Vec<ReplyVerb> {
+    verbs_of(ADVERTISED.lock_ignore_poison().as_ref())
+}
+
+/// Record what the producer just advertised (`None`: nothing). When it
+/// changed, the view hears it as a [`ViewEvent::Producer`].
+pub fn set_advertised(caps: Option<discovery::Capabilities>) {
+    let changed = {
+        let mut current = ADVERTISED.lock_ignore_poison();
+        let changed = *current != caps;
+        *current = caps;
+        changed
+    };
+    if changed {
+        crate::ui::view::submit(producer_event_now());
+    }
+}
+
+/// The grid key name a chord (keymap syntax: `enter`, `shift-tab`, `u`)
+/// goes by; `None` for one the grid cannot receive (Ctrl or Alt held).
+pub fn grid_key(chord: &str) -> Option<String> {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (code, mods) = crate::ui::keymap::parse_chord(chord)?;
+    if code == KeyCode::Tab && mods.contains(KeyModifiers::SHIFT) {
+        return Some("BackTab".to_string());
+    }
+    crate::ui::view::promote::key_name(&KeyEvent::new(code, mods))
+}
+
+/// The grid keys `caps` binds, checked against `verbs`: its keys, else
+/// [`DEFAULT_KEYS`] whose verb is in force. A binding to a verb not
+/// advertised, or a chord the grid cannot receive, is dropped and logged.
+fn keys_of(caps: Option<&discovery::Capabilities>, verbs: &[ReplyVerb]) -> Vec<ProducerKey> {
+    use discovery::AdvertisedKey;
+    let Some(advertised) = caps.and_then(|c| c.keys.as_ref()) else {
+        return DEFAULT_KEYS
+            .iter()
+            .filter(|(_, verb)| find_verb(verbs, verb).is_some())
+            .map(|(key, verb)| ProducerKey {
+                key: key.to_string(),
+                verb: verb.to_string(),
+                invoke: false,
+            })
+            .collect();
+    };
+    let invokes = caps.map(|c| c.invokes.as_slice()).unwrap_or_default();
+    let mut keys: Vec<ProducerKey> = advertised
+        .iter()
+        .filter_map(|(chord, binding)| {
+            let key = grid_key(chord);
+            let (verb, invoke, known) = match binding {
+                AdvertisedKey::Reply(v) => (v, false, find_verb(verbs, v).is_some()),
+                AdvertisedKey::Invoke(v) => (v, true, invokes.is_empty() || invokes.contains(v)),
+            };
+            if key.is_none() || !known {
+                tracing::warn!(target: "dirge::panel_feed", chord, verb, "advertised key dropped");
+                return None;
+            }
+            Some(ProducerKey {
+                key: key?,
+                verb: verb.clone(),
+                invoke,
+            })
+        })
+        .collect();
+    keys.sort_by(|a, b| a.key.cmp(&b.key));
+    keys
+}
+
+/// The [`ViewEvent::Producer`] for `caps` (pure).
+pub fn producer_event(caps: Option<&discovery::Capabilities>) -> ViewEvent {
+    let verbs = verbs_of(caps);
+    ViewEvent::Producer {
+        keys: keys_of(caps, &verbs),
+        usage: usage(&verbs),
+        replies: verbs
+            .into_iter()
+            .map(|v| ProducerVerb {
+                name: v.name.into_owned(),
+                target: v.target,
+            })
+            .collect(),
+    }
+}
+
+/// [`producer_event`] for what the producer advertises now.
+pub fn producer_event_now() -> ViewEvent {
+    producer_event(ADVERTISED.lock_ignore_poison().as_ref())
 }
 
 /// The usage line for `verbs`.
@@ -188,13 +278,8 @@ impl ReplyAction {
         }
     }
 
-    /// Parse the words after `/panel` into a reply among the verbs the
-    /// producer accepts now. `Err` carries a user-facing usage message.
-    pub fn parse(args: &[&str]) -> Result<Self, String> {
-        Self::parse_among(&reply_verbs(), args)
-    }
-
-    /// [`Self::parse`] among `verbs` (pure).
+    /// Parse the words after `/panel` into a reply among `verbs` (pure).
+    /// `Err` carries a user-facing usage message.
     pub fn parse_among(verbs: &[ReplyVerb], args: &[&str]) -> Result<Self, String> {
         let usage = usage(verbs);
         let name = args.first().map(|s| s.trim()).unwrap_or("");
@@ -317,7 +402,7 @@ pub fn spawn_reply(action: ReplyAction) {
 /// Send `action` to the producer behind `source`.
 pub async fn reply_to(source: &Source, action: &ReplyAction) -> Result<(), ReplyError> {
     let ep = discovery::resolve(source)?;
-    set_advertised(ep.replies.clone());
+    set_advertised(ep.capabilities.clone());
     client::post_reply(&ep, action.to_json()).await
 }
 

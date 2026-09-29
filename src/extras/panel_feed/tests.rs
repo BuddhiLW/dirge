@@ -333,7 +333,10 @@ mod reply_command {
 
     #[test]
     fn parses_every_verb() {
-        let ok = |args: &[&str]| ReplyAction::parse(args).expect("valid");
+        let ok = |args: &[&str]| {
+            ReplyAction::parse_among(&crate::extras::panel_feed::default_verbs(), args)
+                .expect("valid")
+        };
         assert_eq!(ok(&["next"]), ReplyAction::verb("next-tab"));
         assert_eq!(ok(&["next-tab"]), ReplyAction::verb("next-tab"));
         assert_eq!(ok(&["prev"]), ReplyAction::verb("prev-tab"));
@@ -351,10 +354,13 @@ mod reply_command {
             &["focus", "a", "b"][..],
             &["next", "x"][..],
         ] {
-            let err = ReplyAction::parse(args).expect_err("invalid");
+            let err = ReplyAction::parse_among(&crate::extras::panel_feed::default_verbs(), args)
+                .expect_err("invalid");
             assert!(err.contains("usage: /panel"), "{args:?} -> {err}");
         }
-        let missing = ReplyAction::parse(&["focus"]).unwrap_err();
+        let missing =
+            ReplyAction::parse_among(&crate::extras::panel_feed::default_verbs(), &["focus"])
+                .unwrap_err();
         assert!(missing.contains("needs an item id"), "{missing}");
     }
 
@@ -437,7 +443,7 @@ mod reply_verbs {
     use super::super::{
         ReplyAction, ReplyVerb, Target, advertised_verbs, default_verbs, find_verb, usage,
     };
-    use crate::extras::panel_feed::discovery::{advertised_replies, parse_discovery};
+    use crate::extras::panel_feed::discovery::{parse_capabilities, parse_discovery};
     use serde_json::json;
 
     fn verb(name: &'static str, target: Target) -> ReplyVerb {
@@ -526,23 +532,52 @@ mod reply_verbs {
     }
 
     #[test]
-    fn discovery_capabilities_advertise_replies_for_version_1_only() {
+    fn discovery_capabilities_are_read_for_version_1_only() {
+        use crate::extras::panel_feed::discovery::{AdvertisedKey, Capabilities};
         let doc = |caps: serde_json::Value| {
             parse_discovery(&json!({"url": "http://127.0.0.1:9", "capabilities": caps}).to_string())
                 .unwrap()
-                .replies
+                .capabilities
         };
         assert_eq!(
-            doc(json!({"version": 1, "replies": ["focus", "pin", 3, ""], "keys": {}})),
-            Some(vec!["focus".to_string(), "pin".to_string()])
+            doc(json!({"version": 1, "replies": ["focus", "pin", 3, ""],
+                        "invokes": ["open"],
+                        "keys": {"p": "pin", "o": {"invoke": "open"}, "z": 7}})),
+            Some(Capabilities {
+                replies: Some(vec!["focus".to_string(), "pin".to_string()]),
+                invokes: vec!["open".to_string()],
+                keys: Some(vec![
+                    ("p".to_string(), AdvertisedKey::Reply("pin".to_string())),
+                    ("o".to_string(), AdvertisedKey::Invoke("open".to_string())),
+                ]),
+            })
         );
         assert_eq!(doc(json!({"version": 2, "replies": ["pin"]})), None);
-        assert_eq!(doc(json!({"version": 1})), None);
         assert_eq!(
-            advertised_replies(&json!({"version": 1, "replies": "pin"})),
-            None
+            doc(json!({"version": 1})),
+            Some(Capabilities::default()),
+            "version 1 with nothing advertised: every default"
+        );
+        assert_eq!(
+            parse_capabilities(&json!({"version": 1, "replies": "pin"})).map(|c| c.replies),
+            Some(None)
         );
         let plain = parse_discovery(r#"{"url":"http://127.0.0.1:9"}"#).unwrap();
-        assert_eq!(plain.replies, None, "no capabilities: today's defaults");
+        assert_eq!(
+            plain.capabilities, None,
+            "no capabilities: today's defaults"
+        );
+    }
+
+    #[test]
+    fn chords_map_onto_grid_key_names() {
+        use crate::extras::panel_feed::grid_key;
+        assert_eq!(grid_key("enter").as_deref(), Some("Enter"));
+        assert_eq!(grid_key("tab").as_deref(), Some("Tab"));
+        assert_eq!(grid_key("shift-tab").as_deref(), Some("BackTab"));
+        assert_eq!(grid_key("backtab").as_deref(), Some("BackTab"));
+        assert_eq!(grid_key("u").as_deref(), Some("u"));
+        assert_eq!(grid_key("ctrl-x"), None, "the grid never sees Ctrl");
+        assert_eq!(grid_key("not a chord"), None);
     }
 }

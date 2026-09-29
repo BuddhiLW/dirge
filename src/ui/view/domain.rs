@@ -47,6 +47,43 @@ pub enum ViewEvent {
     Feed { op: serde_json::Value },
     /// Key consumed by a focused external panel.
     Key { key: String, panel: String },
+    /// What the panel producer accepts: its reply verbs, the grid keys
+    /// bound to them (by grid key name), and `/panel`'s usage line. Sent
+    /// at start and whenever the producer's advertisement changes; the
+    /// reducers own no producer verbs of their own.
+    Producer {
+        replies: Vec<ProducerVerb>,
+        keys: Vec<ProducerKey>,
+        usage: String,
+    },
+}
+
+/// Whether a producer reply verb names an item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReplyTarget {
+    /// It takes none.
+    None,
+    /// It needs one.
+    Required,
+    /// It may carry one; the producer decides what it means.
+    Optional,
+}
+
+/// A reply verb the producer accepts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProducerVerb {
+    pub name: String,
+    pub target: ReplyTarget,
+}
+
+/// A grid key the producer binds: to a reply verb, or (`invoke`) to a
+/// verb invoked on the selected panel cell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProducerKey {
+    pub key: String,
+    pub verb: String,
+    pub invoke: bool,
 }
 
 impl ViewEvent {
