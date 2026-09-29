@@ -21,7 +21,9 @@ pub(super) async fn answer_ext_method(
 }
 
 /// The JSON-RPC answer for what the addons made of an extension request.
-fn ext_response(answer: Result<Option<Value>, String>) -> Result<Value, agent_client_protocol::Error> {
+fn ext_response(
+    answer: Result<Option<Value>, String>,
+) -> Result<Value, agent_client_protocol::Error> {
     match answer {
         Ok(Some(result)) => Ok(result),
         Ok(None) => Err(agent_client_protocol::Error::method_not_found()),
@@ -114,7 +116,10 @@ mod tests {
 
     #[test]
     fn an_answer_is_the_result() {
-        assert_eq!(ext_response(Ok(Some(json!({"pong": 1})))).unwrap(), json!({"pong": 1}));
+        assert_eq!(
+            ext_response(Ok(Some(json!({"pong": 1})))).unwrap(),
+            json!({"pong": 1})
+        );
     }
 
     #[test]
@@ -124,7 +129,10 @@ mod tests {
 
     #[test]
     fn a_timeout_is_an_internal_error() {
-        assert_eq!(code(ext_response(Err("no answer".into())).unwrap_err()), json!(-32603));
+        assert_eq!(
+            code(ext_response(Err("no answer".into())).unwrap_err()),
+            json!(-32603)
+        );
     }
 
     /// No addon host is installed in tests, which is what an ACP server
@@ -133,7 +141,10 @@ mod tests {
     async fn without_addons_an_ext_method_is_not_found_and_meta_is_kept() {
         let raw = serde_json::value::RawValue::from_string("{}".into()).unwrap();
         let ext = ExtRequest::new("zed/ping", std::sync::Arc::from(raw));
-        assert_eq!(code(ext_response(ext_method(&ext).await).unwrap_err()), json!(-32601));
+        assert_eq!(
+            code(ext_response(ext_method(&ext).await).unwrap_err()),
+            json!(-32601)
+        );
         let mut base = Meta::new();
         base.insert("usage".into(), json!({"totalTokens": 3}));
         assert_eq!(

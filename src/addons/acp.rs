@@ -48,7 +48,10 @@ pub fn ext_result(replies: &[HookReply]) -> Option<Value> {
 /// `base` with every object answer's keys added. What `base` already holds
 /// wins, then earlier addons win over later ones. `None` when nothing is
 /// left.
-pub fn merged_meta(base: Option<Map<String, Value>>, replies: &[HookReply]) -> Option<Map<String, Value>> {
+pub fn merged_meta(
+    base: Option<Map<String, Value>>,
+    replies: &[HookReply],
+) -> Option<Map<String, Value>> {
     let mut meta = base.unwrap_or_default();
     for answer in replies.iter().filter_map(|r| r.result.as_ref().ok()) {
         if let Value::Object(keys) = answer {
@@ -83,7 +86,11 @@ impl MetaRequest {
 
 /// The addons' answer to extension method `method`: `Ok(None)` when none
 /// answered, `Err` when they did not answer within [`BUDGET`].
-pub async fn ext_method(host: Arc<AddonHost>, method: &str, params: Value) -> Result<Option<Value>, String> {
+pub async fn ext_method(
+    host: Arc<AddonHost>,
+    method: &str,
+    params: Value,
+) -> Result<Option<Value>, String> {
     if !host.listens_key(EXT_METHOD_KEY) {
         return Ok(None);
     }
@@ -100,7 +107,11 @@ pub fn ext_notification(host: &AddonHost, method: &str, params: Value) {
 
 /// `base` with the addons' `_meta` merged in. Addons that do not answer
 /// within [`BUDGET`] leave `base` as it is.
-pub async fn meta(host: Arc<AddonHost>, request: MetaRequest, base: Option<Map<String, Value>>) -> Option<Map<String, Value>> {
+pub async fn meta(
+    host: Arc<AddonHost>,
+    request: MetaRequest,
+    base: Option<Map<String, Value>>,
+) -> Option<Map<String, Value>> {
     if !host.listens_key(META_KEY) {
         return base;
     }
@@ -152,7 +163,10 @@ mod tests {
             self.run_hook_key(point.key(), ctx)
         }
         fn run_hook_key(&self, key: &str, ctx: &Value) -> Vec<HookReply> {
-            self.calls.lock().unwrap().push((key.to_string(), ctx.clone()));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((key.to_string(), ctx.clone()));
             self.answers.clone()
         }
         fn shutdown(&self) {}

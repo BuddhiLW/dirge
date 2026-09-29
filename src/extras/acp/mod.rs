@@ -371,7 +371,15 @@ async fn handle_prompt(
     cx.spawn({
         let cx = cx.clone();
         async move {
-            run_prompt(&state, &prompt_text, request_meta, session_id, responder, cx).await
+            run_prompt(
+                &state,
+                &prompt_text,
+                request_meta,
+                session_id,
+                responder,
+                cx,
+            )
+            .await
         }
     })
 }
