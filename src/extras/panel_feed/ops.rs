@@ -93,13 +93,57 @@ pub fn face_of(name: Option<&str>) -> PanelFace {
     }
 }
 
+/// hive-vessel's `:json` dialect, the first panel-feed producer, onto the
+/// neutral op names. The only place its vocabulary lives: delete an entry
+/// once no producer sends it.
+const OP_ALIASES: &[(&str, &str)] = &[
+    ("ui/show-panel", "show"),
+    ("ui/close-panel", "close"),
+    ("ui/focus-tab", "focus"),
+    ("ui/append-tab", "append"),
+    ("ui/notify", "notify"),
+    ("ui/open-file", "open-file"),
+];
+
+/// One op in the neutral vocabulary (pure): an aliased `op` renamed, a
+/// `panel/id` moved to `id` (it wins over one already there, as it always
+/// has), and a `doc`'s title lifted to `title` when there is none.
+pub fn normalize(mut value: Value) -> Value {
+    let Some(obj) = value.as_object_mut() else {
+        return value;
+    };
+    let neutral = obj
+        .get("op")
+        .and_then(Value::as_str)
+        .and_then(|op| OP_ALIASES.iter().find(|(alias, _)| *alias == op))
+        .map(|(_, name)| *name);
+    if let Some(name) = neutral {
+        obj.insert("op".into(), name.into());
+    }
+    if let Some(id) = obj.remove("panel/id") {
+        obj.insert("id".into(), id);
+    }
+    if !obj.contains_key("title") {
+        let doc_title = obj
+            .get("doc")
+            .and_then(Value::as_object)
+            .and_then(|d| d.get("doc/title").or_else(|| d.get("title")))
+            .filter(|t| t.is_string())
+            .cloned();
+        if let Some(title) = doc_title {
+            obj.insert("title".into(), title);
+        }
+    }
+    value
+}
+
 fn str_field<'a>(obj: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|k| obj.get(*k).and_then(Value::as_str))
 }
 
 fn panel_id(obj: &Map<String, Value>) -> Option<String> {
-    str_field(obj, &["panel/id", "id"])
+    str_field(obj, &["id"])
         .filter(|s| !s.trim().is_empty())
         .map(str::to_string)
 }
@@ -129,21 +173,14 @@ fn push_split(out: &mut Vec<PanelLine>, line: PanelLine) {
 }
 
 fn show_title(obj: &Map<String, Value>, id: &str) -> String {
-    str_field(obj, &["title"])
-        .or_else(|| {
-            obj.get("doc")
-                .and_then(Value::as_object)
-                .and_then(|d| str_field(d, &["doc/title", "title"]))
-        })
-        .unwrap_or(id)
-        .to_string()
+    str_field(obj, &["title"]).unwrap_or(id).to_string()
 }
 
 fn show_panel(obj: &Map<String, Value>) -> Result<FeedEffect, Skip> {
-    const OP: &str = "ui/show-panel";
+    const OP: &str = "show";
     let id = panel_id(obj).ok_or(Skip::Missing {
         op: OP,
-        field: "panel/id",
+        field: "id",
     })?;
     let title = show_title(obj, &id);
     let mut lines = Vec::new();
@@ -174,10 +211,10 @@ fn show_panel(obj: &Map<String, Value>) -> Result<FeedEffect, Skip> {
 }
 
 fn append_tab(obj: &Map<String, Value>) -> Result<FeedEffect, Skip> {
-    const OP: &str = "ui/append-tab";
+    const OP: &str = "append";
     let id = panel_id(obj).ok_or(Skip::Missing {
         op: OP,
-        field: "panel/id",
+        field: "id",
     })?;
     let line = obj
         .get("line")
@@ -193,31 +230,32 @@ fn append_tab(obj: &Map<String, Value>) -> Result<FeedEffect, Skip> {
 }
 
 /// Decode one event's `data`. The event type is not consulted: every
-/// op names itself in its `op` field.
+/// op names itself in its `op` field, neutral or aliased ([`normalize`]).
 pub fn decode(data: &str) -> Result<FeedEffect, Skip> {
     let value: Value = serde_json::from_str(data).map_err(|_| Skip::NotAnObject)?;
+    let value = normalize(value);
     let obj = value.as_object().ok_or(Skip::NotAnObject)?;
     let op = str_field(obj, &["op"]).ok_or(Skip::NoOp)?;
     match op {
-        "ui/show-panel" => show_panel(obj),
-        "ui/close-panel" => Ok(FeedEffect::Panel(PanelOp::Close {
+        "show" => show_panel(obj),
+        "close" => Ok(FeedEffect::Panel(PanelOp::Close {
             id: panel_id(obj).ok_or(Skip::Missing {
-                op: "ui/close-panel",
-                field: "panel/id",
+                op: "close",
+                field: "id",
             })?,
         })),
-        "ui/focus-tab" => {
+        "focus" => {
             let id = panel_id(obj).ok_or(Skip::Missing {
-                op: "ui/focus-tab",
-                field: "panel/id",
+                op: "focus",
+                field: "id",
             })?;
             let title = str_field(obj, &["title"]).unwrap_or(&id).to_string();
             Ok(FeedEffect::Panel(PanelOp::FocusTab { id, title }))
         }
-        "ui/append-tab" => append_tab(obj),
-        "ui/notify" => {
+        "append" => append_tab(obj),
+        "notify" => {
             let message = str_field(obj, &["message", "text"]).ok_or(Skip::Missing {
-                op: "ui/notify",
+                op: "notify",
                 field: "message",
             })?;
             Ok(FeedEffect::Notify {
@@ -234,7 +272,7 @@ pub fn decode(data: &str) -> Result<FeedEffect, Skip> {
 /// opened when the stream ends) or `None`.
 pub fn route(data: &str, sink: &dyn FeedSink) -> Option<String> {
     if let Some(event @ ViewEvent::Feed { .. }) = feed_event(data)
-        && matches!(&event, ViewEvent::Feed { op } if matches!(op.get("op").and_then(Value::as_str), Some("open-file" | "ui/open-file")))
+        && matches!(&event, ViewEvent::Feed { op } if op.get("op").and_then(Value::as_str) == Some("open-file"))
     {
         crate::ui::view::submit(event);
         return None;
@@ -260,11 +298,11 @@ pub fn route(data: &str, sink: &dyn FeedSink) -> Option<String> {
 }
 
 /// One event's `data` as a view event, for a view engine that owns the
-/// panels: any JSON object passes through undecoded (the engine names
-/// what it understands); anything else is dropped here.
+/// panels: any JSON object passes through undecoded but [`normalize`]d
+/// (the engine names what it understands); anything else is dropped here.
 pub fn feed_event(data: &str) -> Option<ViewEvent> {
     match serde_json::from_str::<Value>(data) {
-        Ok(op @ Value::Object(_)) => Some(ViewEvent::Feed { op }),
+        Ok(op @ Value::Object(_)) => Some(ViewEvent::Feed { op: normalize(op) }),
         _ => None,
     }
 }
@@ -399,7 +437,8 @@ pub(crate) mod tests {
     fn unknown_and_malformed_ops_are_skipped() {
         assert_eq!(
             decode(r#"{"op":"ui/open-file","file":"x"}"#),
-            Err(Skip::UnknownOp("ui/open-file".into()))
+            Err(Skip::UnknownOp("open-file".into())),
+            "open-file belongs to the view engine, not the panel decoder"
         );
         assert_eq!(decode("not json"), Err(Skip::NotAnObject));
         assert_eq!(decode("[1]"), Err(Skip::NotAnObject));
@@ -407,8 +446,8 @@ pub(crate) mod tests {
         assert_eq!(
             decode(r#"{"op":"ui/close-panel","panel/id":"  "}"#),
             Err(Skip::Missing {
-                op: "ui/close-panel",
-                field: "panel/id"
+                op: "close",
+                field: "id"
             })
         );
         assert!(matches!(
@@ -446,6 +485,56 @@ pub(crate) mod tests {
                 op: serde_json::json!({"op": "feed/ended"})
             }
         );
+    }
+
+    #[test]
+    fn the_hive_vessel_dialect_decodes_like_the_neutral_ops() {
+        let pairs = [
+            (
+                r#"{"op":"ui/show-panel","panel/id":"p","doc":{"doc/title":"T"},"lines":["a"]}"#,
+                r#"{"op":"show","id":"p","title":"T","lines":["a"]}"#,
+            ),
+            (
+                r#"{"op":"ui/close-panel","panel/id":"p"}"#,
+                r#"{"op":"close","id":"p"}"#,
+            ),
+            (
+                r#"{"op":"ui/focus-tab","panel/id":"t","title":"Tab"}"#,
+                r#"{"op":"focus","id":"t","title":"Tab"}"#,
+            ),
+            (
+                r#"{"op":"ui/append-tab","panel/id":"t","text":"x"}"#,
+                r#"{"op":"append","id":"t","text":"x"}"#,
+            ),
+            (
+                r#"{"op":"ui/notify","message":"m"}"#,
+                r#"{"op":"notify","message":"m"}"#,
+            ),
+        ];
+        for (aliased, neutral) in pairs {
+            assert_eq!(decode(aliased), decode(neutral), "{aliased}");
+            assert!(decode(neutral).is_ok(), "{neutral}");
+        }
+    }
+
+    #[test]
+    fn normalize_renames_aliases_and_keeps_everything_else() {
+        use serde_json::json;
+        assert_eq!(
+            normalize(json!({"op": "ui/open-file", "path": "a"})),
+            json!({"op": "open-file", "path": "a"})
+        );
+        assert_eq!(
+            normalize(json!({"op": "x", "panel/id": "p", "id": "q"})),
+            json!({"op": "x", "id": "p"}),
+            "panel/id wins over id"
+        );
+        assert_eq!(
+            normalize(json!({"op": "show", "title": "T", "doc": {"doc/title": "D"}})),
+            json!({"op": "show", "title": "T", "doc": {"doc/title": "D"}}),
+            "an explicit title is kept"
+        );
+        assert_eq!(normalize(json!([1])), json!([1]));
     }
 
     #[test]

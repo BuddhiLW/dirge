@@ -81,7 +81,7 @@ Example frame:
 ```
 id: 12
 event: panel
-data: {"op":"ui/notify","message":"build finished","level":"info"}
+data: {"op":"notify","message":"build finished","level":"info"}
 
 ```
 
@@ -97,21 +97,28 @@ backoff.
 
 When a connection ends, every panel it showed is closed, so no stale
 state lingers. Producers should therefore replay the current state of
-every live panel (their latest `ui/show-panel`) to each new
+every live panel (their latest `show`) to each new
 connection.
 
 ## Ops
 
 Unknown ops, non-object payloads and ops missing a required field are
-ignored; the stream continues. Field names contain a `/` where shown.
+ignored; the stream continues.
 
-### `ui/show-panel`
+dirge also accepts hive-vessel's `:json` dialect, the first producer's
+names, and renames them on arrival: `ui/show-panel`, `ui/close-panel`,
+`ui/focus-tab`, `ui/append-tab`, `ui/notify` and `ui/open-file` become
+`show`, `close`, `focus`, `append`, `notify` and `open-file`; a
+`panel/id` field becomes `id`; and a `doc`'s `doc/title` becomes `title`
+when there is none. New producers should send the neutral names.
 
-Create panel `panel/id`, or replace its title and body.
+### `show`
+
+Create panel `id`, or replace its title and body.
 
 ```json
-{ "op": "ui/show-panel",
-  "panel/id": "builds",
+{ "op": "show",
+  "id": "builds",
   "title": "Builds",
   "lines": [ {"text": "Builds", "face": "title"},
              {"text": "", "face": "plain"},
@@ -119,9 +126,9 @@ Create panel `panel/id`, or replace its title and body.
              "a bare string is a plain line" ] }
 ```
 
-- `panel/id` (or `id`): required, non-blank.
-- `title`: optional. Otherwise `doc["doc/title"]` (or `doc["title"]`)
-  when a `doc` object is present, else the id.
+- `id`: required, non-blank.
+- `title`: optional. Otherwise `doc["title"]` when a `doc` object is
+  present, else the id.
 - `lines`: array of strings or `{text, face}` objects. A `text`
   containing newlines becomes several rows with the same face. If
   `lines` is absent, a string `text` field is used as the body.
@@ -143,35 +150,35 @@ the ops itself, as described here.
   painted twice.
 - Any other fields (such as a structured `doc`) are ignored.
 
-### `ui/close-panel`
+### `close`
 
 ```json
-{ "op": "ui/close-panel", "panel/id": "builds" }
+{ "op": "close", "id": "builds" }
 ```
 
-### `ui/focus-tab`
+### `focus`
 
 Create or retitle an accumulating (log-style) panel and focus it.
 
 ```json
-{ "op": "ui/focus-tab", "panel/id": "log", "title": "Activity" }
+{ "op": "focus", "id": "log", "title": "Activity" }
 ```
 
-### `ui/append-tab`
+### `append`
 
 Append one line to a log-style panel, creating it when absent.
 
 ```json
-{ "op": "ui/append-tab", "panel/id": "log", "line": {"text": "step 3 done", "face": "muted"} }
+{ "op": "append", "id": "log", "line": {"text": "step 3 done", "face": "muted"} }
 ```
 
 `line` may also be a bare string, or the line can be given as top-level
 `text` and `face`.
 
-### `ui/notify`
+### `notify`
 
 ```json
-{ "op": "ui/notify", "message": "deploy finished", "level": "warn" }
+{ "op": "notify", "message": "deploy finished", "level": "warn" }
 ```
 
 `message` (or `text`) is required; `level` is `info` (default), `warn`
@@ -268,7 +275,7 @@ means the v1 plain-lines client. Producers must degrade to plain lines and
 legacy replies for clients without a capability. Replies do not carry this
 parameter.
 
-With `keys`, `ui/show-panel` may include `"keys":{"n":"next","Enter":"open"}`.
+With `keys`, `show` may include `"keys":{"n":"next","Enter":"open"}`.
 Only keys declared by the focused panel are claimed; the producer decides
 what verbs mean. With `cursor`, `"cursor":true` enables j/k, Up/Down and
 PgUp/PgDn navigation over body rows. A line may include an `"id"` (stable
@@ -285,5 +292,5 @@ optional unified `diff`. The path must resolve to an existing regular file
 inside the current project root, including after symlink resolution. dirge
 opens it in the configured external editor, or previews its content in a
 panel; if `diff` is present it previews the supplied diff instead. A refused
-path produces a notice, never an editor launch. `ui/open-file` remains an
-alias for compatibility.
+path produces a notice, never an editor launch. `ui/open-file` is accepted
+as part of the hive-vessel dialect above.
