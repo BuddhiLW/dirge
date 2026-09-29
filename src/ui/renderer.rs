@@ -1451,33 +1451,12 @@ impl Renderer {
         &self.external_panels
     }
 
-    /// The open swarm view, `None` when closed.
-    pub fn swarm_view(&self) -> Option<&crate::ui::swarm::SwarmView> {
-        self.swarm_view.as_ref()
-    }
-
-    /// Open or close the swarm grid. Opening selects the producer's
-    /// focused panel (painted first). Returns whether it is now open.
-    pub fn set_swarm_open(&mut self, open: bool) -> bool {
-        if !open {
-            self.swarm_view = None;
-        } else if self.swarm_view.is_none() {
-            self.swarm_view = Some(crate::ui::swarm::SwarmView::new());
-        }
-        self.swarm_view.is_some()
-    }
-
-    /// Flip the swarm grid; returns whether it is now open.
-    pub fn toggle_swarm(&mut self) -> bool {
-        let open = self.swarm_view.is_none();
-        self.set_swarm_open(open)
-    }
-
-    /// Select the grid cell at `index` (paint order).
-    pub fn select_swarm_panel(&mut self, index: usize) {
-        if let Some(v) = self.swarm_view.as_mut() {
-            v.select_index(&self.external_panels, index);
-        }
+    /// Mirror the view model's swarm grid (`ui::view`): open with its
+    /// selection, or closed. The grid's state lives in the view engine;
+    /// the renderer only paints it.
+    pub fn set_swarm(&mut self, swarm: Option<&crate::ui::view::domain::SwarmModel>) {
+        let selected = swarm.map(|s| s.selected.clone());
+        self.swarm_view = selected.map(crate::ui::swarm::SwarmView::selecting);
     }
 
     /// Columns of the swarm grid at the current terminal size (the

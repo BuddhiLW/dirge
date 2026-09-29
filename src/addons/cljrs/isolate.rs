@@ -399,7 +399,7 @@ impl Interp {
         let caller_on_runtime = Rc::new(Cell::new(false));
         harness::install(runtime.globals(), harness, caller_on_runtime.clone());
         let inbox = Rc::new(RefCell::new(Vec::new()));
-        install_bridge(runtime.globals(), inbox.clone());
+        install_args(runtime.globals(), BRIDGE_NS, inbox.clone());
         let mut interp = Self {
             env: runtime.env("user"),
             globals: runtime.globals().clone(),
@@ -428,15 +428,7 @@ impl Interp {
     }
 
     fn eval_str(&mut self, src: &str) -> Result<Json, String> {
-        let mut parser = cljrs_reader::Parser::new(src.to_string(), "<dirge>".to_string());
-        let forms = parser.parse_all().map_err(|e| format!("{e:?}"))?;
-        let _frame = cljrs_gc::push_alloc_frame();
-        let mut last = Json::Null;
-        for form in &forms {
-            let value = eval(form, &mut self.env).map_err(|e| e.to_string())?;
-            last = bridge::to_json(&value);
-        }
-        Ok(last)
+        eval_source(&mut self.env, src)
     }
 
     fn set_roots(&mut self, roots: Vec<PathBuf>) {
@@ -479,11 +471,11 @@ impl Interp {
     }
 }
 
-/// `(dirge.bridge/args)`: the in-flight call's arguments as a vector,
-/// converted on the isolate thread so the values are born inside the eval
-/// that uses them.
-fn install_bridge(globals: &Arc<GlobalEnv>, inbox: Rc<RefCell<Vec<Json>>>) {
-    let native = NativeFn::with_closure(format!("{BRIDGE_NS}/args"), Arity::Fixed(0), move |_| {
+/// `(<ns>/args)`: the in-flight call's arguments as a vector, converted
+/// on the isolate thread so the values are born inside the eval that uses
+/// them. Each runtime interns it under its own namespace.
+pub(super) fn install_args(globals: &Arc<GlobalEnv>, ns: &str, inbox: Rc<RefCell<Vec<Json>>>) {
+    let native = NativeFn::with_closure(format!("{ns}/args"), Arity::Fixed(0), move |_| {
         let items = inbox
             .borrow()
             .iter()
@@ -494,9 +486,23 @@ fn install_bridge(globals: &Arc<GlobalEnv>, inbox: Rc<RefCell<Vec<Json>>>) {
         ))))
     });
     globals.intern(
-        BRIDGE_NS,
+        ns,
         Arc::from("args"),
         Value::NativeFunction(GcPtr::new(native)),
     );
-    globals.mark_loaded(BRIDGE_NS);
+    globals.mark_loaded(ns);
+}
+
+/// Evaluate every form of `src` in `env`; the last value as JSON,
+/// converted inside the allocation frame that made it.
+pub(super) fn eval_source(env: &mut Env, src: &str) -> Result<Json, String> {
+    let mut parser = cljrs_reader::Parser::new(src.to_string(), "<dirge>".to_string());
+    let forms = parser.parse_all().map_err(|e| format!("{e:?}"))?;
+    let _frame = cljrs_gc::push_alloc_frame();
+    let mut last = Json::Null;
+    for form in &forms {
+        let value = eval(form, env).map_err(|e| e.to_string())?;
+        last = bridge::to_json(&value);
+    }
+    Ok(last)
 }

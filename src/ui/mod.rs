@@ -58,6 +58,7 @@ mod tree;
 /// legacy `renderer` module during the staged migration; see beads
 /// dirge-a3x..dirge-eu3 for the phase plan.
 mod tui;
+pub(crate) mod view;
 mod wrap;
 pub(crate) mod wt_merge_phase;
 
@@ -1653,6 +1654,11 @@ pub async fn run_interactive(
     // default). The handle lives for the whole loop; dropping it on
     // any exit path stops the subscription task.
     let _panel_feed = crate::extras::panel_feed::start(cfg.panel_feed.as_ref());
+    // View engine (`ui::view`): the view commands and the swarm grid run
+    // off this loop and apart from the agent. Updates arrive on `view_rx`;
+    // the latest model decides locally which keys and commands it owns.
+    let (view_tx, mut view_rx) = mpsc::unbounded_channel::<crate::ui::view::ViewUpdate>();
+    let mut view_model = crate::ui::view::start(view_tx);
 
     let (user_tx, mut user_rx) = mpsc::unbounded_channel::<UserEvent>();
     input_reader::spawn_input_reader(user_tx.clone());
@@ -2062,38 +2068,24 @@ pub async fn run_interactive(
                                 // sequence would yank). The bound action still dispatches
                                 // through the normal `action` path.
                                 let from_sequence = seq_action.is_some();
-                                // Swarm grid open: its keys select cells, reply
-                                // to the panel producer, or close the grid, and
-                                // the editor below stays inert. Other global
-                                // commands and Ctrl+C pass through.
-                                if !from_sequence
-                                    && let Some(view) = renderer.swarm_view()
-                                {
-                                    use crate::ui::swarm::GridKey;
-                                    let grid = crate::ui::swarm::grid_key(
-                                        &key,
-                                        action,
-                                        view,
-                                        renderer.external_panels(),
-                                        renderer.swarm_grid_columns(),
-                                    );
-                                    match grid {
-                                        GridKey::Close => {
-                                            renderer.set_swarm_open(false);
-                                            renderer.request_repaint();
+                                // Swarm grid open (per the view model): its
+                                // keys go to the view engine, the editor below
+                                // stays inert, other global commands and
+                                // Ctrl+C pass through. Decided from the model
+                                // alone; the loop never waits on the engine.
+                                if !from_sequence && view_model.swarm_open() {
+                                    use crate::ui::view::promote::{KeyRoute, grid_event, route_key};
+                                    match route_key(&view_model, &key, action) {
+                                        KeyRoute::Grid(name) => {
+                                            crate::ui::view::submit(grid_event(
+                                                name,
+                                                renderer.external_panels(),
+                                                renderer.swarm_grid_columns(),
+                                            ));
                                             continue;
                                         }
-                                        GridKey::Select(i) => {
-                                            renderer.select_swarm_panel(i);
-                                            renderer.request_repaint();
-                                            continue;
-                                        }
-                                        GridKey::Reply(reply) => {
-                                            crate::extras::panel_feed::spawn_reply(reply);
-                                            continue;
-                                        }
-                                        GridKey::Swallow => continue,
-                                        GridKey::PassThrough => {}
+                                        KeyRoute::Swallow => continue,
+                                        KeyRoute::PassThrough => {}
                                     }
                                 }
                                 let is_ctrl_c = !from_sequence
@@ -2764,9 +2756,9 @@ pub async fn run_interactive(
                                         continue;
                                     }
                                     Some(KeyAction::ToggleSwarm) => {
-                                        // Full-screen grid of the external panels.
-                                        renderer.toggle_swarm();
-                                        renderer.request_repaint();
+                                        // Full-screen grid of the external
+                                        // panels; the view engine toggles it.
+                                        crate::ui::view::submit(crate::ui::view::ViewEvent::command("swarm", &[]));
                                         continue;
                                     }
                                     _ => {}
@@ -3058,6 +3050,19 @@ pub async fn run_interactive(
                                         // The echo below still shows what the user typed.
                                         let expanded =
                                             crate::ui::slash::aliases::expand_alias(&text, &aliases);
+                                        // View commands (`ui::view`) change
+                                        // only what is shown: they go to the
+                                        // view engine, never through the busy
+                                        // gate, and never wait on the agent.
+                                        if let Some(event) =
+                                            crate::ui::view::promote::view_command(&view_model, &expanded)
+                                        {
+                                            write_user_lines(&mut renderer, &text)?;
+                                            renderer.write_line("", Color::White)?;
+                                            crate::ui::view::submit(event);
+                                            renderer.request_repaint();
+                                            continue;
+                                        }
                                         // dirge-nfa: read-only inspection
                                         // commands run during agent activity.
                                         // The busy gate ONLY blocks commands
@@ -4912,6 +4917,24 @@ pub async fn run_interactive(
                             &text,
                             color,
                         )?;
+                        renderer.request_repaint();
+                    }
+                    Some(update) = view_rx.recv() => {
+                        // The view engine answered (`ui::view`): mirror
+                        // its model and carry out its effects. Nothing
+                        // here touches the agent, so this runs mid-turn.
+                        for (line, color) in crate::ui::view::boundary::apply(&mut renderer, &update) {
+                            write_outside_chamber(
+                                &mut renderer,
+                                &mut ui.last_tool_name,
+                                &mut ui.tool_chamber_open,
+                                &mut ui.chamber_top_start,
+                                &mut ui.chamber_top_end,
+                                &line,
+                                color,
+                            )?;
+                        }
+                        view_model = update.model;
                         renderer.request_repaint();
                     }
                     Some(panel_op) = async {

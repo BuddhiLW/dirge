@@ -6,16 +6,12 @@
 //! producer sent (no accumulating timeline): it reads
 //! [`ExternalPanels`] exactly as the compact box does.
 //!
-//! This module is the pure half: the view state ([`SwarmView`]), the
-//! key mapping while the grid is open ([`grid_key`]), `/swarm`
-//! argument parsing ([`SwarmCmd::parse`]) and the grid geometry
-//! ([`grid_geometry`]). The painter lives in `ui::tui::swarm`; replies
-//! go through the panel feed's existing reply channel.
+//! This module is the pure half the painter needs: the selection it
+//! paints ([`SwarmView`]), `/swarm` argument parsing
+//! ([`SwarmCmd::parse`]) and the grid geometry ([`grid_geometry`]). The
+//! grid's state and keys belong to the view seam (`ui::view`); the
+//! painter lives in `ui::tui::swarm`.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-use crate::extras::panel_feed::ReplyAction;
-use crate::ui::keymap::KeyAction;
 use crate::ui::panels_ext::ExternalPanels;
 
 /// Narrowest grid cell (columns) before the grid drops a column.
@@ -40,6 +36,11 @@ impl SwarmView {
         Self::default()
     }
 
+    /// The grid with `selected` highlighted (`None`: the first panel).
+    pub fn selecting(selected: Option<String>) -> Self {
+        Self { selected }
+    }
+
     /// Index of the selected panel in paint order (`panels.panels()`),
     /// falling back to the first panel when the selection is gone.
     pub fn selected_index(&self, panels: &ExternalPanels) -> usize {
@@ -47,23 +48,6 @@ impl SwarmView {
             .as_deref()
             .and_then(|id| panels.panels().iter().position(|p| p.id == id))
             .unwrap_or(0)
-    }
-
-    /// Select the panel at `index` in paint order (clamped).
-    pub fn select_index(&mut self, panels: &ExternalPanels, index: usize) {
-        let all = panels.panels();
-        if all.is_empty() {
-            self.selected = None;
-            return;
-        }
-        let i = index.min(all.len() - 1);
-        self.selected = Some(all[i].id.clone());
-    }
-
-    /// Id of the selected panel, if any panel exists.
-    pub fn selected_id(&self, panels: &ExternalPanels) -> Option<String> {
-        let all = panels.panels();
-        all.get(self.selected_index(panels)).map(|p| p.id.clone())
     }
 }
 
@@ -92,98 +76,6 @@ impl SwarmCmd {
             },
             _ => Err(format!("/swarm takes at most one argument ({SWARM_USAGE})")),
         }
-    }
-}
-
-/// What a key does while the grid is open.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GridKey {
-    /// Close the grid.
-    Close,
-    /// Move the selection to this index (paint order).
-    Select(usize),
-    /// Send this reply to the producer.
-    Reply(ReplyAction),
-    /// Not a grid key: let the normal dispatch handle it (global
-    /// commands, Ctrl+C).
-    PassThrough,
-    /// Swallow the key (the editor is inert while the grid is open).
-    Swallow,
-}
-
-/// Map `key` to a grid command (pure). Unmodified grid keys win over
-/// the global keymap (Shift+Tab is `cycle_prompt` globally but
-/// prev-tab here); any other key the global keymap resolved (`action`)
-/// passes through, so scrolling, redraw, the panel reply keys and the
-/// swarm toggle keep working, and so does Ctrl+C. `columns` is the
-/// grid's current column count, used by the vertical arrows.
-pub fn grid_key(
-    key: &KeyEvent,
-    action: Option<KeyAction>,
-    view: &SwarmView,
-    panels: &ExternalPanels,
-    columns: usize,
-) -> GridKey {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    if !ctrl
-        && !alt
-        && let Some(g) = plain_grid_key(key.code, view, panels, columns)
-    {
-        return g;
-    }
-    if action.is_some() || (ctrl && key.code == KeyCode::Char('c')) {
-        GridKey::PassThrough
-    } else {
-        GridKey::Swallow
-    }
-}
-
-/// The grid meaning of an unmodified key, `None` when it has none.
-fn plain_grid_key(
-    code: KeyCode,
-    view: &SwarmView,
-    panels: &ExternalPanels,
-    columns: usize,
-) -> Option<GridKey> {
-    let n = panels.len();
-    let cur = view.selected_index(panels);
-    let cols = columns.max(1);
-    let last = n.saturating_sub(1);
-    let select = |i: usize| {
-        Some(if n == 0 {
-            GridKey::Swallow
-        } else {
-            GridKey::Select(i)
-        })
-    };
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => Some(GridKey::Close),
-        KeyCode::Tab => Some(GridKey::Reply(ReplyAction::NextTab)),
-        KeyCode::BackTab => Some(GridKey::Reply(ReplyAction::PrevTab)),
-        KeyCode::Char('r') => Some(GridKey::Reply(ReplyAction::Refresh)),
-        KeyCode::Char('u') => Some(GridKey::Reply(ReplyAction::Unfocus)),
-        KeyCode::Enter => Some(match view.selected_id(panels) {
-            Some(id) => GridKey::Reply(ReplyAction::Focus(id)),
-            None => GridKey::Swallow,
-        }),
-        KeyCode::Left | KeyCode::Char('h') => select(cur.saturating_sub(1)),
-        KeyCode::Right | KeyCode::Char('l') => select((cur + 1).min(last)),
-        KeyCode::Up | KeyCode::Char('k') => select(cur.saturating_sub(cols)),
-        KeyCode::Down | KeyCode::Char('j') => {
-            select(if cur + cols <= last { cur + cols } else { cur })
-        }
-        KeyCode::Home => select(0),
-        KeyCode::End => select(last),
-        KeyCode::Char(c @ '1'..='9') => {
-            let i = (c as usize) - ('1' as usize);
-            Some(if i < n {
-                GridKey::Select(i)
-            } else {
-                GridKey::Swallow
-            })
-        }
-        _ => None,
     }
 }
 
@@ -246,10 +138,6 @@ mod tests {
         s
     }
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
-    }
-
     #[test]
     fn swarm_args_parse() {
         assert_eq!(SwarmCmd::parse(&[]), Ok(SwarmCmd::Toggle));
@@ -263,98 +151,20 @@ mod tests {
     }
 
     #[test]
-    fn selection_follows_the_panel_id() {
+    fn the_painted_selection_follows_the_panel_id() {
         let mut s = panels(&["a", "b", "c"]);
-        let mut v = SwarmView::new();
-        assert_eq!(v.selected_index(&s), 0);
-        v.select_index(&s, 2);
-        assert_eq!(v.selected_id(&s).as_deref(), Some("c"));
+        assert_eq!(SwarmView::new().selected_index(&s), 0);
+        let v = SwarmView::selecting(Some("c".into()));
+        assert_eq!(v.selected_index(&s), 2);
         // A producer focus moves `c` first; the highlight stays on it.
         s.apply(PanelOp::FocusTab {
             id: "c".into(),
             title: "C".into(),
         });
         assert_eq!(v.selected_index(&s), 0);
-        assert_eq!(v.selected_id(&s).as_deref(), Some("c"));
         // A closed panel falls back to the first one.
         s.apply(PanelOp::Close { id: "c".into() });
-        assert_eq!(v.selected_id(&s).as_deref(), Some("a"));
-        v.select_index(&s, 99);
-        assert_eq!(v.selected_id(&s).as_deref(), Some("b"));
-    }
-
-    #[test]
-    fn grid_keys_reply_through_the_feed() {
-        let s = panels(&["a", "b"]);
-        let mut v = SwarmView::new();
-        v.select_index(&s, 1);
-        let k = |code| grid_key(&key(code), None, &v, &s, 2);
-        assert_eq!(k(KeyCode::Tab), GridKey::Reply(ReplyAction::NextTab));
-        assert_eq!(k(KeyCode::BackTab), GridKey::Reply(ReplyAction::PrevTab));
-        assert_eq!(k(KeyCode::Char('r')), GridKey::Reply(ReplyAction::Refresh));
-        assert_eq!(k(KeyCode::Char('u')), GridKey::Reply(ReplyAction::Unfocus));
-        assert_eq!(
-            k(KeyCode::Enter),
-            GridKey::Reply(ReplyAction::Focus("b".into()))
-        );
-        assert_eq!(k(KeyCode::Esc), GridKey::Close);
-        assert_eq!(k(KeyCode::Char('q')), GridKey::Close);
-        assert_eq!(k(KeyCode::Char('z')), GridKey::Swallow);
-    }
-
-    #[test]
-    fn grid_keys_move_the_selection() {
-        let s = panels(&["a", "b", "c", "d", "e"]);
-        let mut v = SwarmView::new();
-        v.select_index(&s, 1);
-        let k = |code, v: &SwarmView| grid_key(&key(code), None, v, &s, 3);
-        assert_eq!(k(KeyCode::Right, &v), GridKey::Select(2));
-        assert_eq!(k(KeyCode::Left, &v), GridKey::Select(0));
-        assert_eq!(k(KeyCode::Down, &v), GridKey::Select(4));
-        assert_eq!(k(KeyCode::Up, &v), GridKey::Select(0));
-        assert_eq!(k(KeyCode::Char('3'), &v), GridKey::Select(2));
-        assert_eq!(k(KeyCode::Char('9'), &v), GridKey::Swallow);
-        assert_eq!(k(KeyCode::End, &v), GridKey::Select(4));
-        v.select_index(&s, 2);
-        // No cell below the last row's end: stay put.
-        assert_eq!(k(KeyCode::Down, &v), GridKey::Select(2));
-    }
-
-    #[test]
-    fn global_commands_and_ctrl_c_pass_through() {
-        let s = panels(&["a"]);
-        let v = SwarmView::new();
-        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(grid_key(&ctrl_c, None, &v, &s, 1), GridKey::PassThrough);
-        let alt_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT);
-        assert_eq!(
-            grid_key(&alt_s, Some(KeyAction::ToggleSwarm), &v, &s, 1),
-            GridKey::PassThrough
-        );
-        let ctrl_w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
-        assert_eq!(grid_key(&ctrl_w, None, &v, &s, 1), GridKey::Swallow);
-        // Shift+Tab is `cycle_prompt` globally; in the grid it is prev-tab.
-        let back = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
-        assert_eq!(
-            grid_key(&back, Some(KeyAction::CyclePrompt), &v, &s, 1),
-            GridKey::Reply(ReplyAction::PrevTab)
-        );
-        // Unbound unmodified keys never reach the (hidden) editor.
-        assert_eq!(
-            grid_key(&key(KeyCode::Char('x')), None, &v, &s, 1),
-            GridKey::Swallow
-        );
-    }
-
-    #[test]
-    fn empty_grid_only_closes_and_replies() {
-        let s = ExternalPanels::default();
-        let v = SwarmView::new();
-        let k = |code| grid_key(&key(code), None, &v, &s, 1);
-        assert_eq!(k(KeyCode::Right), GridKey::Swallow);
-        assert_eq!(k(KeyCode::Enter), GridKey::Swallow);
-        assert_eq!(k(KeyCode::Char('r')), GridKey::Reply(ReplyAction::Refresh));
-        assert_eq!(k(KeyCode::Esc), GridKey::Close);
+        assert_eq!(v.selected_index(&s), 0);
     }
 
     #[test]
