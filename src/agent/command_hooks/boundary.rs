@@ -116,6 +116,10 @@ impl<T: ?Sized> Registry<T> {
             .cloned()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).is_empty()
+    }
+
     /// Every part with its name, in name order.
     pub fn all(&self) -> Vec<(String, Arc<T>)> {
         self.0
