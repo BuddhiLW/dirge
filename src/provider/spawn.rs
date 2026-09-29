@@ -569,6 +569,7 @@ impl AnyAgent {
     }
 
     /// Fork a subagent using a freshly built, isolated tool registry.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_subagent_runner_with_tools(
         &self,
         prompt: String,
@@ -577,6 +578,7 @@ impl AnyAgent {
         child_session_id: &str,
         max_turns: usize,
         model_override: Option<&AnyModel>,
+        steering: Option<crate::agent::tools::task::SubagentSteeringQueue>,
     ) -> crate::agent::runner::AgentRunner {
         use crate::agent::agent_loop::{LoopSpawnConfig, retrying_stream_fn, spawn_loop_runner};
         use crate::agent::recovery::RecoveryPolicy;
@@ -624,6 +626,9 @@ impl AnyAgent {
         };
         cfg.session_id = Some(child_session_id.to_string());
         cfg.max_turns = Some(max_turns);
+        // Text the user sends to this subagent (focused-tab input, `/msg`)
+        // lands here and is injected at the next turn boundary.
+        cfg.steering_queue = steering;
         spawn_loop_runner(cfg).into_agent_runner()
     }
 
@@ -656,6 +661,7 @@ impl AnyAgent {
         // `None` uses the live agent's model. Either way the TOOL SET comes
         // from the live agent (the parent's filtered registry).
         model_override: Option<&AnyModel>,
+        steering: Option<crate::agent::tools::task::SubagentSteeringQueue>,
     ) -> crate::agent::runner::AgentRunner {
         // Union the tier-capped built-in allow-list with the profile's MCP
         // selection. `resolve_mcp_selection` intersects the request with the
@@ -681,6 +687,7 @@ impl AnyAgent {
             child_session_id,
             max_turns,
             model_override,
+            steering,
         )
     }
 

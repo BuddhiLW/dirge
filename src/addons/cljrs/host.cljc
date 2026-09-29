@@ -222,6 +222,19 @@
     (catch #?(:clj Throwable :default :default) t
       (failure t))))
 
+(defn run-hook-handler
+  "Run command-hook `handler` of `addon-id`, the fn under that name in its
+   :dirge/command-hooks entry, with `ctx` ({:payload hook-json}): {:ok answer}
+   or {:error msg}. A string handler name also finds a keyword key."
+  [addon-id handler ctx]
+  (try
+    (let [handlers (get-in @!addons [addon-id :hooks :dirge/command-hooks])]
+      (if-let [f (or (get handlers handler) (get handlers (keyword handler)))]
+        {:ok (json-safe (f ctx))}
+        {:error (str "no command hook " handler " in addon " addon-id)}))
+    (catch #?(:clj Throwable :default :default) t
+      (failure t))))
+
 (def hook-keyword-fields
   "Context fields a hook reads as keywords, by hook key. They reach the host
    as strings."

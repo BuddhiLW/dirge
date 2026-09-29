@@ -58,6 +58,7 @@ mod tree;
 /// legacy `renderer` module during the staged migration; see beads
 /// dirge-a3x..dirge-eu3 for the phase plan.
 mod tui;
+pub(crate) mod view;
 mod wrap;
 pub(crate) mod wt_merge_phase;
 
@@ -1653,6 +1654,11 @@ pub async fn run_interactive(
     // default). The handle lives for the whole loop; dropping it on
     // any exit path stops the subscription task.
     let _panel_feed = crate::extras::panel_feed::start(cfg.panel_feed.as_ref());
+    // View engine (`ui::view`): the view commands and the swarm grid run
+    // off this loop and apart from the agent. Updates arrive on `view_rx`;
+    // the latest model decides locally which keys and commands it owns.
+    let (view_tx, mut view_rx) = mpsc::unbounded_channel::<crate::ui::view::ViewUpdate>();
+    let mut view_model = crate::ui::view::start(view_tx);
 
     let (user_tx, mut user_rx) = mpsc::unbounded_channel::<UserEvent>();
     input_reader::spawn_input_reader(user_tx.clone());
@@ -2062,38 +2068,24 @@ pub async fn run_interactive(
                                 // sequence would yank). The bound action still dispatches
                                 // through the normal `action` path.
                                 let from_sequence = seq_action.is_some();
-                                // Swarm grid open: its keys select cells, reply
-                                // to the panel producer, or close the grid, and
-                                // the editor below stays inert. Other global
-                                // commands and Ctrl+C pass through.
-                                if !from_sequence
-                                    && let Some(view) = renderer.swarm_view()
-                                {
-                                    use crate::ui::swarm::GridKey;
-                                    let grid = crate::ui::swarm::grid_key(
-                                        &key,
-                                        action,
-                                        view,
-                                        renderer.external_panels(),
-                                        renderer.swarm_grid_columns(),
-                                    );
-                                    match grid {
-                                        GridKey::Close => {
-                                            renderer.set_swarm_open(false);
-                                            renderer.request_repaint();
+                                // Swarm grid open (per the view model): its
+                                // keys go to the view engine, the editor below
+                                // stays inert, other global commands and
+                                // Ctrl+C pass through. Decided from the model
+                                // alone; the loop never waits on the engine.
+                                if !from_sequence && view_model.swarm_open() {
+                                    use crate::ui::view::promote::{KeyRoute, grid_event, route_key};
+                                    match route_key(&view_model, &key, action) {
+                                        KeyRoute::Grid(name) => {
+                                            crate::ui::view::submit(grid_event(
+                                                name,
+                                                renderer.swarm_cells(),
+                                                renderer.swarm_grid_columns(),
+                                            ));
                                             continue;
                                         }
-                                        GridKey::Select(i) => {
-                                            renderer.select_swarm_panel(i);
-                                            renderer.request_repaint();
-                                            continue;
-                                        }
-                                        GridKey::Reply(reply) => {
-                                            crate::extras::panel_feed::spawn_reply(reply);
-                                            continue;
-                                        }
-                                        GridKey::Swallow => continue,
-                                        GridKey::PassThrough => {}
+                                        KeyRoute::Swallow => continue,
+                                        KeyRoute::PassThrough => {}
                                     }
                                 }
                                 let is_ctrl_c = !from_sequence
@@ -2619,6 +2611,7 @@ pub async fn run_interactive(
                                             &mut ui.chat_idx_to_subagent,
                                             old_active,
                                         );
+                                        push_subagent_rows(&ui, &mut renderer);
                                         load_chat_ui_state(
                                             &mut ui.chat_ui_states[renderer.active_chat()],
                                             &mut ui.response_buf,
@@ -2764,9 +2757,9 @@ pub async fn run_interactive(
                                         continue;
                                     }
                                     Some(KeyAction::ToggleSwarm) => {
-                                        // Full-screen grid of the external panels.
-                                        renderer.toggle_swarm();
-                                        renderer.request_repaint();
+                                        // Full-screen grid of the external
+                                        // panels; the view engine toggles it.
+                                        crate::ui::view::submit(crate::ui::view::ViewEvent::command("swarm", &[]));
                                         continue;
                                     }
                                     _ => {}
@@ -2919,6 +2912,30 @@ pub async fn run_interactive(
                                     ui.expand_target = crate::ui::state::ExpandTarget::None;
                                     ui.expansion_anchor = None;
                                     ui.live_thinking_expanded = false;
+                                    // Input typed on a subagent's tab goes to that
+                                    // subagent, not the main agent: it is queued as
+                                    // steering for its next turn boundary. Slash
+                                    // commands still run normally.
+                                    if !text.starts_with('/') {
+                                        let active = renderer.active_chat();
+                                        if let Some(sub_id) = ui.chat_idx_to_subagent.get(&active).cloned() {
+                                            use crate::agent::tools::task::{MessageOutcome, message_subagent};
+                                            let note = match message_subagent(&sub_id, &text) {
+                                                MessageOutcome::Queued(_) => {
+                                                    let _ = renderer.write_line_to_chat(
+                                                        active,
+                                                        &format!("<you> {text}"),
+                                                        c_agent(),
+                                                    );
+                                                    "(queued — delivered at the subagent's next turn boundary)"
+                                                }
+                                                _ => "(subagent is not running or has no tools — message not delivered)",
+                                            };
+                                            let _ = renderer.write_line_to_chat(active, note, theme::dim());
+                                            renderer.request_repaint();
+                                            continue;
+                                        }
+                                    }
                                     #[cfg(feature = "loop")]
                                     if loop_state.as_ref().is_some_and(|ls| ls.active) && !text.starts_with('/') {
                                         // Queue the message instead of dropping it.
@@ -3034,6 +3051,19 @@ pub async fn run_interactive(
                                         // The echo below still shows what the user typed.
                                         let expanded =
                                             crate::ui::slash::aliases::expand_alias(&text, &aliases);
+                                        // View commands (`ui::view`) change
+                                        // only what is shown: they go to the
+                                        // view engine, never through the busy
+                                        // gate, and never wait on the agent.
+                                        if let Some(event) =
+                                            crate::ui::view::promote::view_command(&view_model, &expanded)
+                                        {
+                                            write_user_lines(&mut renderer, &text)?;
+                                            renderer.write_line("", Color::White)?;
+                                            crate::ui::view::submit(event);
+                                            renderer.request_repaint();
+                                            continue;
+                                        }
                                         // dirge-nfa: read-only inspection
                                         // commands run during agent activity.
                                         // The busy gate ONLY blocks commands
@@ -4907,6 +4937,40 @@ pub async fn run_interactive(
                         )?;
                         renderer.request_repaint();
                     }
+                    Some(update) = view_rx.recv() => {
+                        // The view engine answered (`ui::view`): mirror
+                        // its model and carry out its effects. Nothing
+                        // here touches the agent, so this runs mid-turn.
+                        let applied = crate::ui::view::boundary::apply(&mut renderer, &update);
+                        for (line, color) in applied.lines {
+                            write_outside_chamber(
+                                &mut renderer,
+                                &mut ui.last_tool_name,
+                                &mut ui.tool_chamber_open,
+                                &mut ui.chamber_top_start,
+                                &mut ui.chamber_top_end,
+                                &line,
+                                color,
+                            )?;
+                        }
+                        // Effects on state only this loop owns: the
+                        // chat tabs and the editor.
+                        for handoff in applied.handoffs {
+                            use crate::ui::view::boundary::Handoff;
+                            match handoff {
+                                Handoff::OpenAgent(id) => {
+                                    if let Some(&idx) = ui.subagent_chat_map.get(&id) {
+                                        switch_to_chat(&mut ui, &mut renderer, idx);
+                                    }
+                                }
+                                Handoff::MessageAgent(id) => {
+                                    input.set_text(&format!("/msg {id} "));
+                                }
+                            }
+                        }
+                        view_model = update.model;
+                        renderer.request_repaint();
+                    }
                     Some(panel_op) = async {
                         if let Some(rx) = &mut panel_rx {
                             rx.recv().await
@@ -5191,15 +5255,7 @@ pub async fn run_interactive(
                         // Trigger a viewport repaint so the gutter
                         // refreshes without waiting for the next chat
                         // event / keystroke.
-                        let panel_rows: Vec<crate::ui::renderer::SubagentStatusRow> =
-                            ui.subagent_panel_rows
-                                .iter()
-                                .map(|(id, agent)| crate::ui::renderer::SubagentStatusRow {
-                                    id_short: id.chars().take(6).collect(),
-                                    agent: agent.clone(),
-                                })
-                                .collect();
-                        renderer.set_subagent_status(panel_rows);
+                        push_subagent_rows(&ui, &mut renderer);
                         renderer.request_repaint();
 
                         // dirge-9xo: auto-resume the parent agent when a
@@ -5828,6 +5884,68 @@ fn rect_contains_xy(rect: Option<ratatui::layout::Rect>, row: u16, col: u16) -> 
 fn modified_visible_rows(rect: Option<ratatui::layout::Rect>) -> usize {
     rect.map(|r| (r.height as usize).saturating_sub(2).saturating_sub(1))
         .unwrap_or(0)
+}
+
+/// Push the live subagent rows to the renderer: the `[AGENTS]` box and
+/// the swarm grid's subagent cells (with the chat tab each streams into).
+fn push_subagent_rows(ui: &state::UiState, renderer: &mut Renderer) {
+    let (rows, agents) = ui
+        .subagent_panel_rows
+        .iter()
+        .map(|(id, live)| {
+            let row = live.status_row(id);
+            let cell = crate::ui::swarm::SwarmAgent {
+                id: id.clone(),
+                chat_idx: ui.subagent_chat_map.get(id).copied(),
+                row: row.clone(),
+                tail: Vec::new(),
+            };
+            (row, cell)
+        })
+        .unzip();
+    renderer.set_subagent_status(rows);
+    renderer.set_swarm_agents(agents);
+}
+
+/// Make chat tab `idx` the active one, carrying the per-chat UI state
+/// across the switch the way Ctrl+N/P does.
+fn switch_to_chat(ui: &mut state::UiState, renderer: &mut Renderer, idx: usize) {
+    let old_active = renderer.active_chat();
+    if idx == old_active || idx >= renderer.chat_count() {
+        return;
+    }
+    save_chat_ui_state(
+        &mut ui.chat_ui_states[old_active],
+        &mut ui.response_buf,
+        &mut ui.response_start_line,
+        &mut ui.reasoning_buf,
+        &mut ui.reasoning_start_line,
+        &mut ui.last_tool_name,
+        &mut ui.last_tool_call_id,
+        &mut ui.tool_chamber_open,
+        &mut ui.agent_line_started,
+        &mut ui.was_reasoning,
+        &mut ui.tool_calls_buf,
+        &mut ui.tool_calls_this_run,
+    );
+    renderer.switch_chat(idx);
+    load_chat_ui_state(
+        &mut ui.chat_ui_states[idx],
+        &mut ui.response_buf,
+        &mut ui.response_start_line,
+        &mut ui.reasoning_buf,
+        &mut ui.reasoning_start_line,
+        &mut ui.last_tool_name,
+        &mut ui.last_tool_call_id,
+        &mut ui.tool_chamber_open,
+        &mut ui.agent_line_started,
+        &mut ui.was_reasoning,
+        &mut ui.tool_calls_buf,
+        &mut ui.tool_calls_this_run,
+    );
+    // The expansion anchor indexes the old chat's buffer.
+    ui.expansion_anchor = None;
+    ui.live_thinking_expanded = false;
 }
 
 /// dirge-vpma.8: after a chat at index `removed` is closed, chat indices

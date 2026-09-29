@@ -47,7 +47,7 @@ kill-subagent) are **rebindable** via the `keybindings` config — see
 | Alt+X | Drop all queued interjections (without cancelling the running agent) |
 | Alt+. / Alt+, | Ask the external panel producer for its next / previous view (see [panel-feed.md](panel-feed.md#replies)); same as `/panel next` / `/panel prev` |
 | Alt+/ | Ask the external panel producer to repaint (`/panel refresh`) |
-| Alt+S | Open or close the swarm grid: every external panel at full size (`/swarm`; see [panel-feed.md](panel-feed.md#swarm-grid)) |
+| Alt+S | Open or close the swarm grid: every external panel and running subagent at full size (`/swarm`; see [panel-feed.md](panel-feed.md#swarm-grid)) |
 | Ctrl+K | Kill subagent on focused chat tab |
 | Ctrl+X | Close active chat window |
 | Ctrl+N / Ctrl+P | Switch to next/previous chat window (when multiple subagent chats exist) |

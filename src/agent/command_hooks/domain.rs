@@ -61,7 +61,9 @@ impl fmt::Display for HookEvent {
     }
 }
 
-/// One `{ "type": "command", "command": ..., "timeout": ... }` entry.
+/// One `{ "type": "command", "command": ..., "timeout": ... }` entry, or
+/// `{ "type": "addon", "addon": ..., "handler": ..., "timeout": ... }`,
+/// answered by a handler an addon registered instead of a process.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct HookCommand {
     #[serde(rename = "type", default = "default_kind")]
@@ -71,6 +73,12 @@ pub struct HookCommand {
     /// Seconds.
     #[serde(default)]
     pub timeout: Option<u64>,
+    /// `type: "addon"`: the id of the addon that answers.
+    #[serde(default)]
+    pub addon: Option<String>,
+    /// `type: "addon"`: the handler name within that addon.
+    #[serde(default)]
+    pub handler: Option<String>,
 }
 
 fn default_kind() -> String {
@@ -78,9 +86,40 @@ fn default_kind() -> String {
 }
 
 impl HookCommand {
-    /// Only `type: "command"` entries with a non-blank command run.
+    /// `type: "command"` entries with a non-blank command run, and
+    /// `type: "addon"` entries naming both an addon and a handler.
     pub fn is_runnable(&self) -> bool {
-        self.kind == "command" && !self.command.trim().is_empty()
+        match self.kind.as_str() {
+            "command" => !self.command.trim().is_empty(),
+            "addon" => self.addon_target().is_some(),
+            _ => false,
+        }
+    }
+
+    /// `(addon, handler)` of an addon entry, both non-blank.
+    pub fn addon_target(&self) -> Option<(&str, &str)> {
+        if self.kind != "addon" {
+            return None;
+        }
+        let addon = self
+            .addon
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+        let handler = self
+            .handler
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+        Some((addon, handler))
+    }
+
+    /// What names this entry in a log line: its command, or `addon:<id>/<handler>`.
+    pub fn label(&self) -> String {
+        match self.addon_target() {
+            Some((addon, handler)) => format!("addon:{addon}/{handler}"),
+            None => self.command.clone(),
+        }
     }
 
     pub fn timeout_secs(&self) -> u64 {

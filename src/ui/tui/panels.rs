@@ -229,6 +229,27 @@ fn kfmt(n: u64) -> String {
     }
 }
 
+/// Dim second line under an `[AGENTS]` row: how long the subagent has run,
+/// how many tool calls so far, and what it did last, e.g.
+/// `↳ 1m05s · 4 tools · read path=src/lib.rs`. The short fixed-width parts
+/// lead so a narrow panel truncates the activity, not the counters. `None`
+/// before its first event, so a just-spawned row stays one line.
+pub(crate) fn subagent_preview_line(row: &SubagentStatusRow) -> Option<String> {
+    let activity = row.activity.as_deref()?;
+    let secs = row.elapsed_secs;
+    let elapsed = if secs >= 60 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    };
+    let tools = match row.tool_calls {
+        0 => String::new(),
+        1 => " · 1 tool".to_string(),
+        n => format!(" · {n} tools"),
+    };
+    Some(format!("↳ {elapsed}{tools} · {activity}"))
+}
+
 /// Rows kept free for a minimal ACTIVITY box (top + 1 row + bottom +
 /// spacer) when sizing external panels, so they can't evict it.
 const ACTIVITY_MIN_ROWS: u16 = 4;
@@ -390,12 +411,16 @@ fn paint_idle_card(
     } else {
         subagents
             .iter()
-            .map(|r| {
+            .flat_map(|r| {
                 let label = match &r.agent {
                     Some(a) => format!("{a} {}", r.id_short),
                     None => r.id_short.clone(),
                 };
-                (label, green)
+                let mut rows = vec![(label, green)];
+                if let Some(preview) = subagent_preview_line(r) {
+                    rows.push((preview, dim));
+                }
+                rows
             })
             .collect()
     };
@@ -1382,10 +1407,14 @@ mod tests {
             SubagentStatusRow {
                 id_short: "abc123".into(),
                 agent: Some("architect".into()),
+                activity: Some("read path=src/lib.rs".into()),
+                tool_calls: 4,
+                elapsed_secs: 65,
             },
             SubagentStatusRow {
                 id_short: "zzz999".into(),
                 agent: None,
+                ..Default::default()
             },
         ];
         let backend = TestBackend::new(30, 50);
@@ -1425,6 +1454,10 @@ mod tests {
             "id_short fallback should appear for an unnamed subagent:\n{dump}"
         );
         assert!(
+            box_body.contains("↳ 1m05s · 4 tools"),
+            "a subagent with activity should show a preview line, counters first:\n{box_body}"
+        );
+        assert!(
             !box_body.contains("build the parser"),
             "prompt prose must NOT appear in the AGENTS box:\n{box_body}"
         );
@@ -1452,10 +1485,12 @@ mod tests {
             SubagentStatusRow {
                 id_short: "aaa111".into(),
                 agent: Some("architect".into()),
+                ..Default::default()
             },
             SubagentStatusRow {
                 id_short: "bbb222".into(),
                 agent: Some("architect".into()),
+                ..Default::default()
             },
         ];
         let backend = TestBackend::new(30, 50);

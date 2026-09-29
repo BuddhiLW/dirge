@@ -251,8 +251,8 @@ pub(crate) struct UiState {
     pub(crate) subagent_chat_map: HashMap<String, usize>,
     /// chat tab index → task_id (reverse, for Ctrl+K kill).
     pub(crate) chat_idx_to_subagent: HashMap<usize, String>,
-    /// Left-panel subagent rows: id → agent name (for the `[AGENTS]` box).
-    pub(crate) subagent_panel_rows: IndexMap<String, Option<String>>,
+    /// Left-panel subagent rows: id → live status (for the `[AGENTS]` box).
+    pub(crate) subagent_panel_rows: IndexMap<String, crate::ui::agent_io::SubagentLive>,
     /// Recent tool-name ticker (left panel), capped at [`TOOL_ACTIVITY_CAP`].
     pub(crate) tool_activity: VecDeque<String>,
 

@@ -117,6 +117,12 @@ enum Command {
         key: String,
         ctx: Json,
     },
+    HookHandler {
+        addon_id: String,
+        handler: String,
+        ctx: Json,
+        reply: Sender<Result<Json, String>>,
+    },
     Shutdown {
         reply: Sender<()>,
     },
@@ -152,6 +158,11 @@ thread_local! {
 /// that loop in turn.
 pub fn mark_event_loop_thread() {
     EVENT_LOOP.with(|marked| marked.set(true));
+}
+
+/// True on the thread [`mark_event_loop_thread`] marked.
+pub fn on_event_loop_thread() -> bool {
+    EVENT_LOOP.with(Cell::get)
 }
 
 /// Handle to the isolate thread. Cloning is not offered: one owner, shared
@@ -367,6 +378,15 @@ impl AddonRuntime for Isolate {
         self.repl.clone()
     }
 
+    fn run_hook_handler(&self, addon_id: &str, handler: &str, ctx: &Json) -> Result<Json, String> {
+        self.ask(|reply| Command::HookHandler {
+            addon_id: addon_id.to_string(),
+            handler: handler.to_string(),
+            ctx: ctx.clone(),
+            reply,
+        })?
+    }
+
     fn shutdown(&self) {
         if let Err(error) = self.ask(|reply| Command::Shutdown { reply })
             && error != GONE
@@ -537,7 +557,7 @@ impl Interp {
             refresh_requested.clone(),
         );
         let inbox = Rc::new(RefCell::new(Vec::new()));
-        install_bridge(runtime.globals(), inbox.clone());
+        install_args(runtime.globals(), BRIDGE_NS, inbox.clone());
         let mut interp = Self {
             env: runtime.env("user"),
             globals: runtime.globals().clone(),
@@ -617,6 +637,20 @@ impl Interp {
                 }
                 shared.posted.fetch_sub(1, Ordering::SeqCst);
             }
+            Command::HookHandler {
+                addon_id,
+                handler,
+                ctx,
+                reply,
+            } => {
+                let out = self
+                    .call(
+                        "run-hook-handler",
+                        vec![addon_id.into(), handler.into(), ctx],
+                    )
+                    .and_then(|envelope| policy::tool_reply(&envelope));
+                let _ = reply.send(out);
+            }
             Command::Shutdown { reply } => {
                 self.shutdown();
                 let _ = reply.send(());
@@ -662,15 +696,7 @@ impl Interp {
     }
 
     fn eval_str(&mut self, src: &str) -> Result<Json, String> {
-        let mut parser = cljrs_reader::Parser::new(src.to_string(), "<dirge>".to_string());
-        let forms = parser.parse_all().map_err(|e| format!("{e:?}"))?;
-        let _frame = cljrs_gc::push_alloc_frame();
-        let mut last = Json::Null;
-        for form in &forms {
-            let value = eval(form, &mut self.env).map_err(|e| e.to_string())?;
-            last = bridge::to_json(&value);
-        }
-        Ok(last)
+        eval_source(&mut self.env, src)
     }
 
     fn set_roots(&mut self, roots: Vec<PathBuf>) {
@@ -713,11 +739,11 @@ impl Interp {
     }
 }
 
-/// `(dirge.bridge/args)`: the in-flight call's arguments as a vector,
-/// converted on the isolate thread so the values are born inside the eval
-/// that uses them.
-fn install_bridge(globals: &Arc<GlobalEnv>, inbox: Rc<RefCell<Vec<Json>>>) {
-    let native = NativeFn::with_closure(format!("{BRIDGE_NS}/args"), Arity::Fixed(0), move |_| {
+/// `(<ns>/args)`: the in-flight call's arguments as a vector, converted
+/// on the isolate thread so the values are born inside the eval that uses
+/// them. Each runtime interns it under its own namespace.
+pub(super) fn install_args(globals: &Arc<GlobalEnv>, ns: &str, inbox: Rc<RefCell<Vec<Json>>>) {
+    let native = NativeFn::with_closure(format!("{ns}/args"), Arity::Fixed(0), move |_| {
         let items = inbox
             .borrow()
             .iter()
@@ -728,9 +754,23 @@ fn install_bridge(globals: &Arc<GlobalEnv>, inbox: Rc<RefCell<Vec<Json>>>) {
         ))))
     });
     globals.intern(
-        BRIDGE_NS,
+        ns,
         Arc::from("args"),
         Value::NativeFunction(GcPtr::new(native)),
     );
-    globals.mark_loaded(BRIDGE_NS);
+    globals.mark_loaded(ns);
+}
+
+/// Evaluate every form of `src` in `env`; the last value as JSON,
+/// converted inside the allocation frame that made it.
+pub(super) fn eval_source(env: &mut Env, src: &str) -> Result<Json, String> {
+    let mut parser = cljrs_reader::Parser::new(src.to_string(), "<dirge>".to_string());
+    let forms = parser.parse_all().map_err(|e| format!("{e:?}"))?;
+    let _frame = cljrs_gc::push_alloc_frame();
+    let mut last = Json::Null;
+    for form in &forms {
+        let value = eval(form, env).map_err(|e| e.to_string())?;
+        last = bridge::to_json(&value);
+    }
+    Ok(last)
 }

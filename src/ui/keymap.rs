@@ -194,7 +194,16 @@ impl Command for KeyAction {
         (
             KeyAction::ToggleSwarm,
             "toggle_swarm",
-            &[(KeyCode::Char('s'), KeyModifiers::ALT)],
+            // Alt+Shift+S too: legacy terminals report it as `S`+Alt,
+            // kitty-protocol ones as `S`+Alt+Shift.
+            &[
+                (KeyCode::Char('s'), KeyModifiers::ALT),
+                (KeyCode::Char('S'), KeyModifiers::ALT),
+                (
+                    KeyCode::Char('S'),
+                    KeyModifiers::ALT.union(KeyModifiers::SHIFT),
+                ),
+            ],
         ),
     ];
 }
@@ -840,6 +849,13 @@ mod tests {
             km.resolve(&ev(KeyCode::Char('s'), KeyModifiers::NONE)),
             None
         );
+        // Alt+Shift+S, in both terminal spellings.
+        for mods in [KeyModifiers::ALT, KeyModifiers::ALT | KeyModifiers::SHIFT] {
+            assert_eq!(
+                km.resolve(&ev(KeyCode::Char('S'), mods)),
+                Some(KeyAction::ToggleSwarm)
+            );
+        }
     }
 
     /// dirge-e59d: Alt+X drops queued interjections (Ctrl+X stays

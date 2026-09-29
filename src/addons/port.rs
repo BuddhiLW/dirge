@@ -68,6 +68,19 @@ pub trait AddonRuntime: Send + Sync + 'static {
         None
     }
 
+    /// Run command-hook `handler` of `addon_id` (its `:dirge/command-hooks`
+    /// entry) with `ctx`. `Ok` carries the handler's answer.
+    fn run_hook_handler(
+        &self,
+        addon_id: &str,
+        handler: &str,
+        _ctx: &Value,
+    ) -> Result<Value, String> {
+        Err(format!(
+            "this addon runtime cannot run command hook {handler} of {addon_id}"
+        ))
+    }
+
     /// Shut every addon down. Idempotent.
     fn shutdown(&self);
 }

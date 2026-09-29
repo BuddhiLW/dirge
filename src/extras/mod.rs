@@ -33,6 +33,8 @@ pub mod memory_curator;
 pub mod memory_db;
 pub mod memory_graduation;
 pub mod memory_hybrid;
+#[cfg(feature = "mcp")]
+pub mod memory_mcp;
 pub mod memory_provider;
 #[cfg(test)]
 mod memory_retrieval_eval;
