@@ -1,4 +1,5 @@
 use compact_str::CompactString;
+use serde::Serialize;
 
 /// Structured classification of tool output for richer downstream
 /// rendering. Most tools return plain text and use `Text`; tools
@@ -13,7 +14,8 @@ use compact_str::CompactString;
 /// surfaces without touching every tool's `type Output = String`
 /// contract. A future refactor could thread the variant through
 /// the rig `Tool` trait for finer control.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ToolContent {
     /// Plain text output — the default for every tool that
     /// returns prose, JSON, command output, diffs, etc.
@@ -31,7 +33,8 @@ pub enum ToolContent {
 /// crucially, surface when the LLM summarizer is *failing*
 /// (IMPROVEMENTS_PLAN #5). A spike in `PruneAndFailedSummary` is an
 /// early warning that the summarizer is broken.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 #[allow(clippy::enum_variant_names)]
 pub enum CompactionKind {
     /// Pruning only — no LLM summarizer ran (none wired, circuit breaker
@@ -49,7 +52,10 @@ pub enum CompactionKind {
     PruneSummarizerDisabled,
 }
 
-#[derive(Debug, Clone)]
+/// Serializes as `{"<variant-name>": {<field-name>: value}}`, both names
+/// kebab-case; payloads without a serializable form are skipped.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "kebab-case", rename_all_fields = "kebab-case")]
 pub enum AgentEvent {
     Token(CompactString),
     Reasoning(CompactString),
@@ -234,6 +240,7 @@ pub enum AgentEvent {
     /// when at least one repair fired. Empty snapshots aren't
     /// emitted at all. Phase-1 of docs/AGENTIC_LOOP_PLAN.md.
     RepairStats {
+        #[serde(skip)]
         snapshot: crate::agent::agent_loop::tool_input_repair::RepairStatsSnapshot,
     },
     /// Phase 4 part 1 — dual-client tiering: the NEXT LLM call has
@@ -243,6 +250,7 @@ pub enum AgentEvent {
     /// this so the user knows about the unexpected provider change.
     EscalationActivated {
         provider: CompactString,
+        #[serde(skip)]
         reason: crate::agent::agent_loop::message::EscalationReason,
     },
 }

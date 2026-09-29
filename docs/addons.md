@@ -346,7 +346,18 @@ costs one call site, not a change to the addon host's types.
 ### Watching the run: `:dirge/event`
 
 The `:dirge/event` hook hears every event of the main session's run as the
-front end gets it, one map per event, keyed by `:event`:
+front end gets it, one map per event, keyed by `:event`.
+
+An event is heard as it serializes: `:event` is its name and its fields
+are the other keys, both kebab-case. An event with one unnamed field
+carries it as `:value`. Every string in the map, however deeply nested, is
+cut at 16 KiB. So an event dirge adds later reaches addons without a
+change to the hook; a `SomethingHappened { tool_name }` would arrive as
+`{:event :something-happened :tool-name "..."}`.
+
+The events below are heard as listed. Some of these keys differ from the
+serialized form (`:tool` for the tool's name, `:notice` for a system
+notice), and the table is the contract for them:
 
 | `:event` | Other keys |
 |---|---|
@@ -367,8 +378,9 @@ front end gets it, one map per event, keyed by `:event`:
 | `:escalation` | `:provider :reason` |
 | `:repair-stats` | |
 
-Streamed token and reasoning deltas are not sent: the whole response
-arrives with `:done`. Text longer than 16 KiB is cut and marked. The hook's
+Streamed token and reasoning deltas and the tool-started tick are not
+sent: the whole response arrives with `:done`, and `:tool-call` comes
+before every tool runs. Text longer than 16 KiB is cut and marked. The hook's
 answer is ignored and nothing waits for it: events are queued to the addon
 runtime and run in order after whatever it is doing, and when more than 256
 are waiting new ones are dropped.
