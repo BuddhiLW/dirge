@@ -349,17 +349,21 @@ the nREPL of a shared JVM process such as hive's:
   Sessions keep their own namespace and `*1`/`*2`/`*3`/`*e`, but they do not
   run in parallel. While an evaluation runs, dirge's hooks, tools and
   commands wait for it, so a long evaluation holds them up.
-- **Interrupt is limited.** `interrupt` drops an `eval` or `load-file` that
-  has not started yet, and stops a request of several forms between two of
-  them. It cannot stop a form that is running: a form that loops forever
-  keeps the addon runtime busy for good.
-- **No middleware.** The server answers `clone`, `close`, `describe`,
-  `eval`, `interrupt`, `load-file`, `lookup`, `ls-sessions` and
-  `completions`, and nothing else. There is no CIDER middleware
-  (`cider-nrepl`, `refactor-nrepl`) and no way to add any, so editor
-  features built on it, such as the debugger, test runner or stack-trace
-  inspector, do not work. Evaluation, completion and documentation lookup
-  do. Printed output arrives when a form finishes, not as it is printed.
+- **Interrupt stops the running form.** `interrupt` drops an `eval` or
+  `load-file` that has not started yet and stops one that is running at its
+  next checkpoint, so a form that loops forever can be stopped from a
+  second connection and the addon runtime answers again. The eval replies
+  `interrupted`. Native code that never returns to the interpreter, such as
+  a blocking `mcp-call`, is not stopped until it returns.
+- **A fixed set of ops, no middleware.** The server answers `clone`,
+  `close`, `describe`, `eval`, `interrupt`, `load-file`, `lookup`,
+  `ls-sessions` and `completions`, plus two ops CIDER uses:
+  `macroexpand` and `analyze-last-stacktrace` (also as `stacktrace`).
+  Nothing else can be added: there is no `cider-nrepl` or `refactor-nrepl`
+  middleware, so the debugger, test runner and refactorings do not work.
+  Evaluation, completion, documentation lookup and macroexpansion do.
+  Printed output streams as `out` while a form runs. There is no `err`
+  stream, and a stack trace names each cause but lists no frames.
 
 ### Refreshing in place
 
