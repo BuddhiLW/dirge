@@ -16,12 +16,13 @@ use super::host::AddonHost;
 use super::policy;
 use crate::agent::addon_hooks::AddonHooks;
 use crate::agent::agent_loop::LoopTool;
+use crate::agent::agent_loop::context_manager::ContextUsage;
 use crate::agent::agent_loop::hooks::{
     AfterToolCallContext, AfterToolCallFn, BeforeToolCallContext, BeforeToolCallFn,
     BeforeToolCallReturn, OpenRunFn, RunOpening,
 };
 use crate::agent::agent_loop::result::{AfterToolCallResult, BeforeToolCallResult, LoopToolResult};
-use crate::agent::agent_loop::types::LoopConfig;
+use crate::agent::agent_loop::types::{CompactionHooks, LoopConfig};
 use crate::agent::command_hooks::loop_hooks::{compose_after, compose_before};
 use crate::permission::ask::AskSender;
 use crate::permission::checker::PermCheck;
@@ -67,12 +68,14 @@ pub fn after_hook(host: Arc<AddonHost>) -> AfterToolCallFn {
     Arc::new(move |ctx: AfterToolCallContext| {
         let host = host.clone();
         Box::pin(async move {
-            let payload = json!({
+            let mut payload = json!({
                 "tool": ctx.tool_call_name,
                 "args": ctx.args,
                 "result": policy::content_text(&ctx.result.content),
                 "error?": ctx.is_error,
+                "tool-use-id": ctx.tool_call_id,
             });
+            add_usage(&mut payload, ctx.usage);
             let texts =
                 tokio::task::spawn_blocking(move || host.texts(HookPoint::AfterToolCall, &payload))
                     .await
@@ -80,6 +83,16 @@ pub fn after_hook(host: Arc<AddonHost>) -> AfterToolCallFn {
             after_override(&ctx.result, &texts)
         })
     })
+}
+
+/// `ctx` with how full the context is, when known, as `:tokens`, `:ctx-max`
+/// and `:pressure`.
+fn add_usage(ctx: &mut Value, usage: Option<ContextUsage>) {
+    if let (Some(usage), Some(fields)) = (usage, ctx.as_object_mut()) {
+        fields.insert("tokens".into(), usage.tokens.into());
+        fields.insert("ctx-max".into(), usage.ctx_max.into());
+        fields.insert("pressure".into(), usage.pressure().into());
+    }
 }
 
 fn after_override(result: &LoopToolResult, texts: &[String]) -> Option<AfterToolCallResult> {
@@ -129,14 +142,18 @@ pub fn with_system_prompt(
     )
 }
 
-/// `:dirge/on-prompt` contributions for `prompt`, as reminders.
+/// `:dirge/on-prompt` contributions for `prompt`, as reminders. `usage` is
+/// how full the context is, when the loop knows it.
 pub fn prompt_reminders(
     host: &AddonHost,
     prompt: &str,
     session_id: Option<&str>,
     first_prompt: bool,
+    usage: Option<ContextUsage>,
 ) -> Vec<String> {
-    let ctx = json!({ "prompt": prompt, "session-id": session_id, "first-prompt?": first_prompt });
+    let mut ctx =
+        json!({ "prompt": prompt, "session-id": session_id, "first-prompt?": first_prompt });
+    add_usage(&mut ctx, usage);
     host.texts(HookPoint::OnPrompt, &ctx)
         .iter()
         .map(|t| policy::reminder(HookPoint::OnPrompt, t))
@@ -183,7 +200,13 @@ fn amend_opening(
     first_prompt: bool,
 ) -> RunOpening {
     opening.system_prompt = with_system_prompt(host, opening.system_prompt, session_id);
-    let reminders = prompt_reminders(host, &opening.prompt, session_id, first_prompt);
+    let reminders = prompt_reminders(
+        host,
+        &opening.prompt,
+        session_id,
+        first_prompt,
+        opening.usage,
+    );
     opening.reminders.extend(reminders);
     opening
 }
@@ -204,7 +227,21 @@ fn cwd() -> Value {
 
 /// The process-wide addon host as the agent's [`AddonHooks`], looked up on
 /// every call: `/addons reload` may start it after boot.
-pub struct LiveAddonHooks;
+pub struct LiveAddonHooks {
+    compact_budget: Duration,
+}
+
+impl LiveAddonHooks {
+    /// Compaction hooks bounded by `addons.compact_timeout_secs`.
+    pub fn new(settings: &crate::config::AddonsConfig) -> Self {
+        Self {
+            compact_budget: settings
+                .compact_timeout_secs
+                .map(Duration::from_secs)
+                .unwrap_or(super::compaction::DEFAULT_BUDGET),
+        }
+    }
+}
 
 impl AddonHooks for LiveAddonHooks {
     fn loop_tools(
@@ -241,6 +278,11 @@ impl AddonHooks for LiveAddonHooks {
         {
             host.post(super::events::EVENT_KEY, &ctx);
         }
+    }
+
+    fn compaction_hooks(&self, session_id: Option<String>) -> Option<CompactionHooks> {
+        super::global()
+            .and_then(|host| super::compaction::hooks(host, session_id, self.compact_budget))
     }
 }
 
@@ -341,10 +383,73 @@ mod tests {
             &[HookPoint::OnPrompt],
             vec![reply(json!({"context": "3 lings running"}))],
         );
-        let notes = prompt_reminders(&host, "do it", Some("s1"), true);
+        let notes = prompt_reminders(&host, "do it", Some("s1"), true, None);
         assert_eq!(notes.len(), 1);
         assert!(notes[0].starts_with("<system-reminder>"));
         assert!(notes[0].contains("3 lings running"));
+    }
+
+    /// The ctx the scripted runtime recorded for the one hook call made.
+    fn recorded_ctx(rt: &ScriptedRuntime, point: HookPoint) -> Value {
+        let calls = rt.calls.lock().unwrap();
+        let prefix = format!("hook {} ", point.key());
+        let ctx = calls[0].strip_prefix(&prefix).expect("one hook call");
+        serde_json::from_str(ctx).unwrap()
+    }
+
+    #[test]
+    fn the_prompt_ctx_carries_the_context_usage() {
+        let rt = Arc::new(ScriptedRuntime::default());
+        let host = AddonHost::new(
+            rt.clone(),
+            vec![summary("hd", &[], &[HookPoint::OnPrompt])],
+            Vec::new(),
+        );
+        let usage = ContextUsage {
+            tokens: 30_000,
+            ctx_max: 120_000,
+        };
+        prompt_reminders(&host, "go", Some("s1"), false, Some(usage));
+        let ctx = recorded_ctx(&rt, HookPoint::OnPrompt);
+        assert_eq!(ctx["tokens"], 30_000);
+        assert_eq!(ctx["ctx-max"], 120_000);
+        assert_eq!(ctx["pressure"], 0.25);
+        assert_eq!(ctx["prompt"], "go");
+    }
+
+    #[tokio::test]
+    async fn the_after_ctx_carries_the_call_id_and_the_context_usage() {
+        let rt = Arc::new(ScriptedRuntime::default());
+        let host = Arc::new(AddonHost::new(
+            rt.clone(),
+            vec![summary("hd", &[], &[HookPoint::AfterToolCall])],
+            Vec::new(),
+        ));
+        let after = after_hook(host);
+        let out = after(AfterToolCallContext {
+            assistant_message: AssistantMessage::new(Vec::new(), StopReason::ToolUse),
+            tool_call_id: "t1".into(),
+            tool_call_name: "read".into(),
+            args: json!({"path": "a.rs"}),
+            result: LoopToolResult {
+                content: vec![json!({"type": "text", "text": "fn a() {}"})],
+                details: Value::Null,
+                terminate: None,
+            },
+            is_error: false,
+            usage: Some(ContextUsage {
+                tokens: 60_000,
+                ctx_max: 120_000,
+            }),
+        })
+        .await;
+        assert!(out.is_none());
+        let ctx = recorded_ctx(&rt, HookPoint::AfterToolCall);
+        assert_eq!(ctx["tool-use-id"], "t1");
+        assert_eq!(ctx["result"], "fn a() {}");
+        assert_eq!(ctx["tokens"], 60_000);
+        assert_eq!(ctx["ctx-max"], 120_000);
+        assert_eq!(ctx["pressure"], 0.5);
     }
 
     #[tokio::test]
@@ -358,6 +463,7 @@ mod tests {
             system_prompt: "base".into(),
             prompt: "do it".into(),
             reminders: Vec::new(),
+            usage: None,
         })
         .await;
         assert_eq!(opening.system_prompt, "base\n\naddon text");

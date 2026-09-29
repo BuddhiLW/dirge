@@ -107,9 +107,11 @@ keys and ignores the rest:
 | `:dirge/session-start` | `{:session-id :cwd :first-prompt? :mcp-servers}` | text added before the session's first prompt in this process |
 | `:dirge/session-end` | `{:session-id :cwd :reason}` | ignored |
 | `:dirge/system-prompt` | `{:cwd :session-id}` | text appended to the system prompt |
-| `:dirge/on-prompt` | `{:prompt :session-id :first-prompt?}` | text added before the user's prompt |
+| `:dirge/on-prompt` | `{:prompt :session-id :first-prompt? :tokens :ctx-max :pressure}` | text added before the user's prompt |
 | `:dirge/before-tool-call` | `{:tool :args :tool-call-id}` | `nil`, `{:block "reason"}`, `{:context "text"}` or `{:args {…}}` |
-| `:dirge/after-tool-call` | `{:tool :args :result :error?}` | text appended to the tool result |
+| `:dirge/after-tool-call` | `{:tool :args :result :error? :tool-use-id :tokens :ctx-max :pressure}` | text appended to the tool result |
+| `:dirge/before-compact` | `{:count :tokens :reason :ctx-max :pressure :session-id}` | ignored |
+| `:dirge/compact` | `{:span :tokens :reason :focus :ctx-max :pressure :session-id}` | `nil` or `{:summary "text"}`, see [Compaction](#compaction) |
 | `:dirge/event` | one event of the run, see [Watching the run](#watching-the-run-dirgeevent) | ignored |
 
 A text answer may also be given as `{:context "text"}`. Hooks run for the
@@ -118,6 +120,48 @@ addon hooks. An exception in a hook is logged and ignored.
 
 `:first-prompt?` is true when the session has no earlier conversation (a new
 session, or one `/clear` emptied), false for a resumed one.
+
+`:tokens`, `:ctx-max` and `:pressure` say how full the context is:
+`:tokens` is the estimated size of the conversation (the prompt that
+opens the run included), `:ctx-max` the usable context window, and
+`:pressure` is `:tokens / :ctx-max`. With them an addon can decide by how
+full the context is, and dirge keeps no policy for it.
+
+### Compaction
+
+When the conversation grows past its budget, dirge folds the older part of
+it into a summary. `:dirge/before-compact` hears that a fold is about to
+run: `:count` messages holding `:tokens`. It cannot stop the fold.
+
+`:dirge/compact` may write the summary itself. `:span` is the part being
+folded, in order, one map per entry:
+
+- `{:role "user"|"system" :text}` for a message; an earlier summary rides as
+  a `system` entry;
+- `{:role "assistant" :text}` for an assistant's text;
+- `{:role "assistant" :tool :tool-use-id :args :text}` for a tool call, where
+  `:args` is its arguments as JSON cut to 200 characters (`:text` is the
+  same);
+- `{:role "tool" :tool :tool-use-id :args :text}` for a tool result, with
+  the result as the tool-call hooks saw it, before the fold trims it.
+
+A call and its result carry the same `:tool-use-id`, and the span never
+holds one without the other. `:reason` is `pressure` for a fold the budget
+triggered and `checkpoint` when the folded part is one a background
+checkpoint already summarized. `:focus` is the topic `/compress <focus>`
+asked the fold to keep, or `nil`.
+
+Answer `{:summary "text"}` to replace dirge's summary. The text must pass
+the same check dirge's own summaries do: at least two of the summary's
+`## ` sections (`## Active Task`, `## Goal`, `## Completed Actions`,
+`## Remaining Work` and the rest dirge's summarizer writes). An answer that
+fails the check, `nil`, or an exception, leaves the next addon to answer,
+and when none does, dirge writes the summary as it does without addons. A
+Janet plugin's `on-compact` summary goes first.
+
+Both hooks run off dirge's event loop, so `mcp-call` works from them. A
+fold waits at most 60 seconds for each, then goes on without the answer;
+raise that with `addons.compact_timeout_secs`.
 
 ### Session start and end
 

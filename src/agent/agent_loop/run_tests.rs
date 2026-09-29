@@ -975,8 +975,8 @@ async fn fast_reuse_on_compact_overrides_checkpoint_summary() {
     let compact_calls = std::sync::Arc::new(AtomicUsize::new(0));
     let cc = compact_calls.clone();
     let hooks = CompactionHooks {
-        on_before: std::sync::Arc::new(|_c, _t| Box::pin(async {})),
-        on_compact: std::sync::Arc::new(move |_middle| {
+        on_before: std::sync::Arc::new(|_c, _t, _f| Box::pin(async {})),
+        on_compact: std::sync::Arc::new(move |_middle, _facts| {
             cc.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 Some("## Active Task\nPLUGIN-SUMMARY\n## Remaining Work\ngo".to_string())
@@ -1389,13 +1389,13 @@ async fn compaction_on_compact_hook_overrides_llm_summary() {
     let before_fired = std::sync::Arc::new(AtomicUsize::new(0));
     let before_c = before_fired.clone();
     let hooks = CompactionHooks {
-        on_before: std::sync::Arc::new(move |_count, _tokens| {
+        on_before: std::sync::Arc::new(move |_count, _tokens, _facts| {
             let f = before_c.clone();
             Box::pin(async move {
                 f.fetch_add(1, Ordering::SeqCst);
             })
         }),
-        on_compact: std::sync::Arc::new(move |_middle| {
+        on_compact: std::sync::Arc::new(move |_middle, _facts| {
             Box::pin(async move {
                 Some(
                     "## Active Task\nPLUGIN-SUMMARY\n\n## Completed Actions\n1. read the file"
@@ -1494,9 +1494,9 @@ async fn compaction_invalid_plugin_summary_falls_through_to_llm() {
         }));
 
     let hooks = CompactionHooks {
-        on_before: std::sync::Arc::new(|_c, _t| Box::pin(async {})),
+        on_before: std::sync::Arc::new(|_c, _t, _f| Box::pin(async {})),
         // Invalid: no required section header → validate_summary fails.
-        on_compact: std::sync::Arc::new(move |_middle| {
+        on_compact: std::sync::Arc::new(move |_middle, _facts| {
             Box::pin(async move { Some("garbage with no section header".to_string()) })
         }),
     };

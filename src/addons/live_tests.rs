@@ -112,6 +112,30 @@ fn open_hook_keys_reach_addons_by_name() {
 }
 
 #[test]
+fn compaction_hooks_reach_a_running_addon() {
+    use super::domain::HookPoint;
+    use crate::agent::compression::validate_summary;
+
+    let host = live_host(IsolateOptions::default());
+    assert!(host.listens(HookPoint::Compact));
+    assert!(host.listens(HookPoint::BeforeCompact));
+
+    host.before_compact(&json!({"count": 2, "tokens": 100, "reason": "pressure"}));
+    assert_eq!(tool_text(&host, "heard", json!({})), "before-compact");
+
+    let ctx = json!({
+        "span": [{"role": "user", "text": "a"}, {"role": "assistant", "text": "b"}],
+        "reason": "pressure",
+    });
+    assert_eq!(
+        host.compact(&ctx, validate_summary).as_deref(),
+        Some("## Active Task\nFold 2 entries (pressure).\n## Completed Actions\nRead the span.")
+    );
+    // A summary the validator refuses is no answer: dirge summarizes.
+    assert_eq!(host.compact(&ctx, |_| false), None);
+}
+
+#[test]
 fn posted_events_reach_the_event_hook_in_order() {
     use crate::event::AgentEvent;
 

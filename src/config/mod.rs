@@ -737,6 +737,9 @@ pub struct AddonsConfig {
     /// addon's tools, hooks and commands again and hand the changes to the
     /// running agent. Default true.
     pub live_refresh: Option<bool>,
+    /// Seconds a fold waits for `:dirge/compact` or `:dirge/before-compact`
+    /// before it goes on without the answer. Default 60.
+    pub compact_timeout_secs: Option<u64>,
 }
 
 /// The `addons.nrepl` key.
