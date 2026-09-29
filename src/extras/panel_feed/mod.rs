@@ -248,6 +248,25 @@ pub fn find_verb<'a>(verbs: &'a [ReplyVerb], name: &str) -> Option<&'a ReplyVerb
     verbs.iter().find(|v| v.name == name)
 }
 
+/// The reply a global panel key sends for `name` when `verbs` accepts
+/// it with no target (pure). `Err` is the warning to show instead.
+pub fn global_reply_among(verbs: &[ReplyVerb], name: &str) -> Result<ReplyAction, Notification> {
+    ReplyAction::checked(verbs, name, None).ok_or_else(|| {
+        Notification::Warn(crate::ui::ansi::strip_escapes(
+            &format!(
+                "the panel producer does not accept '{name}' ({})",
+                usage(verbs)
+            ),
+            crate::ui::ansi::StripPolicy::STRICT,
+        ))
+    })
+}
+
+/// [`global_reply_among`] the verbs the producer accepts now.
+pub fn global_reply(name: &str) -> Result<ReplyAction, Notification> {
+    global_reply_among(&reply_verbs(), name)
+}
+
 impl ReplyAction {
     /// The reply `verb` with no target.
     pub fn verb(action: &str) -> Self {

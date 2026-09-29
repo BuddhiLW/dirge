@@ -2750,15 +2750,17 @@ pub async fn run_interactive(
                                         | KeyAction::PanelPrevTab
                                         | KeyAction::PanelRefresh),
                                     ) => {
-                                        // Reply to the external panel producer; a
-                                        // failure arrives as a notification.
-                                        crate::extras::panel_feed::spawn_reply(
-                                            crate::extras::panel_feed::ReplyAction::verb(match a {
-                                                KeyAction::PanelNextTab => "next-tab",
-                                                KeyAction::PanelPrevTab => "prev-tab",
-                                                _ => "refresh",
-                                            }),
-                                        );
+                                        // Reply to the external panel producer when
+                                        // it accepts the verb; a refusal or failure
+                                        // arrives as a notification.
+                                        match crate::extras::panel_feed::global_reply(match a {
+                                            KeyAction::PanelNextTab => "next-tab",
+                                            KeyAction::PanelPrevTab => "prev-tab",
+                                            _ => "refresh",
+                                        }) {
+                                            Ok(reply) => crate::extras::panel_feed::spawn_reply(reply),
+                                            Err(notice) => crate::ui::notifications::notify_send(notice),
+                                        }
                                         continue;
                                     }
                                     Some(KeyAction::ToggleSwarm) => {

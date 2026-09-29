@@ -441,9 +441,11 @@ mod reply_command {
 
 mod reply_verbs {
     use super::super::{
-        ReplyAction, ReplyVerb, Target, advertised_verbs, default_verbs, find_verb, usage,
+        ReplyAction, ReplyVerb, Target, advertised_verbs, default_verbs, find_verb,
+        global_reply_among, usage,
     };
     use crate::extras::panel_feed::discovery::{parse_capabilities, parse_discovery};
+    use crate::ui::notifications::Notification;
     use serde_json::json;
 
     fn verb(name: &'static str, target: Target) -> ReplyVerb {
@@ -451,6 +453,31 @@ mod reply_verbs {
             name: name.into(),
             target,
         }
+    }
+
+    #[test]
+    fn global_keys_send_only_verbs_the_producer_accepts() {
+        assert_eq!(
+            global_reply_among(&default_verbs(), "next-tab").ok(),
+            Some(ReplyAction::verb("next-tab")),
+            "the defaults accept the global tab and refresh verbs"
+        );
+        let verbs = advertised_verbs(&["focus".into(), "refresh".into(), "pin".into()]);
+        assert_eq!(
+            global_reply_among(&verbs, "refresh").ok(),
+            Some(ReplyAction::verb("refresh"))
+        );
+        let Err(Notification::Warn(notice)) = global_reply_among(&verbs, "next-tab") else {
+            panic!("a verb the producer does not advertise must not be sent");
+        };
+        assert!(
+            notice.contains("'next-tab'") && notice.contains("pin"),
+            "{notice}"
+        );
+        assert!(
+            global_reply_among(&[verb("next-tab", Target::Required)], "next-tab").is_err(),
+            "a global key carries no target"
+        );
     }
 
     #[test]

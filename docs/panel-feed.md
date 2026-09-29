@@ -256,7 +256,9 @@ From the TUI, `/panel next`, `/panel prev`, `/panel refresh`,
 `/panel unfocus` and `/panel focus <id>` send these replies, and the
 global keys Alt+. (next), Alt+, (previous) and Alt+/ (refresh) do the
 same without leaving the prompt (rebindable as `panel_next_tab`,
-`panel_prev_tab` and `panel_refresh`). A reply that fails (no feed
+`panel_prev_tab` and `panel_refresh`). A global key sends its verb only
+when the producer accepts it (its `replies`, else the defaults);
+otherwise dirge shows a warning and sends nothing. A reply that fails (no feed
 running, the producer unreachable or answering non-2xx) is shown as a
 notification in the chat area.
 
