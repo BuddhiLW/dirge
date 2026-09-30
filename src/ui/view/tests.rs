@@ -180,6 +180,17 @@ pub(crate) fn custom_producer() -> ViewEvent {
 fn a_producer_binds_its_own_keys_and_verbs() {
     let mut r = NativeReducer::default();
     let u = run(&mut r, custom_producer());
+    let bound: Vec<&str> = u
+        .model
+        .producer_keys
+        .iter()
+        .map(|k| k.key.as_str())
+        .collect();
+    assert_eq!(
+        bound,
+        ["Enter", "o", "p"],
+        "the model publishes what is bound"
+    );
     assert!(u.model.grid_consumes("p") && u.model.grid_consumes("o"));
     assert!(!u.model.grid_consumes("Tab"), "next-tab is not advertised");
     assert!(

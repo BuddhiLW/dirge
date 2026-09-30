@@ -1513,11 +1513,14 @@ impl Renderer {
     }
 
     /// Mirror the view model's swarm grid (`ui::view`): open with its
-    /// selection, or closed. The grid's state lives in the view engine;
-    /// the renderer only paints it.
-    pub fn set_swarm(&mut self, swarm: Option<&crate::ui::view::domain::SwarmModel>) {
-        let selected = swarm.map(|s| s.selected.clone());
-        self.swarm_view = selected.map(crate::ui::swarm::SwarmView::selecting);
+    /// selection and the keys the panel producer binds, or closed. The
+    /// grid's state lives in the view engine; the renderer only paints it.
+    pub fn set_swarm(&mut self, model: &crate::ui::view::domain::ViewModel) {
+        use crate::ui::swarm::SwarmView;
+        self.swarm_view = model
+            .swarm
+            .as_ref()
+            .map(|s| SwarmView::selecting(s.selected.clone()).binding(&model.producer_keys));
     }
 
     /// Columns of the swarm grid at the current terminal size (the
