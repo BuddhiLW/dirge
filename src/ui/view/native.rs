@@ -210,6 +210,7 @@ impl NativeReducer {
                 keys
             },
             panel_keys: vec![],
+            producer_keys: self.keys.clone(),
             view_commands: sorted(COMMANDS.iter().map(|(n, _)| *n)),
             // The native view leaves feed ops to the UI's own decoder.
             owns_feed: false,
