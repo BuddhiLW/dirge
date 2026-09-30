@@ -203,7 +203,8 @@ A Janet plugin's `harness/request-stop-after-turn` is asked first. Any other
 answer, `nil` included, lets the run go on.
 
 The three run off dirge's event loop, so `mcp-call` works from them. Each
-call waits at most 10 seconds, then goes on as if the hook had not answered.
+call waits at most 10 seconds, then goes on as if the hook had not answered;
+raise that with `addons.turn_timeout_secs`.
 `:dirge/transform-context` runs before every model call, so keep it fast.
 
 ### Session start and end
