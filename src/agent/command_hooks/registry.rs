@@ -117,6 +117,12 @@ impl CommandHooks {
             .unwrap_or_default()
     }
 
+    /// Something would answer `event`: a configured hook, or a listener
+    /// of an open event.
+    pub fn answers(&self, event: HookEvent) -> bool {
+        self.has(event) || !self.listening(event).is_empty()
+    }
+
     /// Listeners that would hear `event`: none for the events dirge fires.
     fn listening(&self, event: HookEvent) -> Vec<(String, Arc<dyn boundary::HookListener>)> {
         if !event.is_open() {

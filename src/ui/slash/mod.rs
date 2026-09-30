@@ -3,6 +3,7 @@ use crate::sync_util::LockExt;
 use crossterm::style::Color;
 use smallvec::SmallVec;
 
+use crate::agent::command_hooks::{self, CompactTrigger, PreCompact};
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::context::ContextFiles;
@@ -315,6 +316,7 @@ pub(crate) fn prepare_prune_only_compaction(
 pub(crate) fn prepare_compaction(
     instructions: Option<&str>,
     forced: bool,
+    trigger: CompactTrigger,
     agent: &AnyAgent,
     client: &AnyClient,
     renderer: &mut Renderer,
@@ -343,6 +345,9 @@ pub(crate) fn prepare_compaction(
         renderer.write_line("nothing to compress (entire context is recent)", c_agent())?;
         return Ok(CompactionDecision::NoOp);
     }
+
+    let subject = PreCompact::new(trigger, instructions);
+    command_hooks::pre_compact_blocking(&subject, Some(session.id.as_ref()));
 
     let messages_to_summarize = &session.messages[..cut_idx];
     let previous_summary = session.compactions.last().map(|c| c.summary.as_str());

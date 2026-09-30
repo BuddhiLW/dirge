@@ -88,6 +88,7 @@ logged at debug level.
 | `UserPromptSubmit` | each user prompt | (all groups) | context is prepended to the prompt; a block ends the run with the hook's reason and the model is not called |
 | `SubagentStart` | a `task` subagent is forked (`agent_type`: `task`) | `agent_type` | context is appended to the child's system prompt |
 | `Stop` / `SubagentStop` | the main agent / a subagent is about to finish | (all groups) | a block feeds its reason back and the agent continues (`stop_hook_active` is set on the next check; at most 8 in a row) |
+| `PreCompact` | a compaction is about to run: `/compact` (`trigger`: `manual`), or a fold when the context fills up (`trigger`: `auto`) | `trigger` | observe only: the compaction runs whatever the hook answers; a block is logged and ignored |
 
 Matchers follow Claude Code: absent, `""` or `"*"` match everything;
 otherwise the pattern is a regex anchored to the whole name (`Edit|Write`,
@@ -109,14 +110,24 @@ like an addon entry's:
 ```
 
 The events in the table above reach addons through their own hook points
-(`:dirge/before-tool-call` and the rest), not through this key.
+(`:dirge/before-tool-call` and the rest), not through this key. The one
+exception is `PreCompact`: dirge fires it as an open event, so an addon
+hears it through `:dirge.hook/PreCompact` with no entry configured.
+
+`PreCompact` fires once per compaction, before the conversation is
+summarized: from `/compact`, from the pre-send compaction when a prompt
+would push the context past 85% of the window, from the recovery after a
+context-overflow error, and from the agent loop's own folds. A `/compact`
+that finds nothing old enough to compact does not fire it. A hook that answers
+slowly delays the compaction by that long (up to its `timeout`).
 
 ## Payload
 
 Every payload carries `hook_event_name`, `session_id`, `cwd`,
 `transcript_path` (`null`) and `harness: "dirge"`. Tool events add
 `tool_name`, `tool_input`, `tool_use_id` (and `tool_response` for
-`PostToolUse`).
+`PostToolUse`). `PreCompact` adds `trigger` (`manual` / `auto`) and
+`custom_instructions` (the `/compact` argument; empty otherwise).
 
 Tool calls are restated in Claude's vocabulary, so hooks written for Claude
 Code match:
