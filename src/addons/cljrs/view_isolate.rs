@@ -232,7 +232,7 @@ mod tests {
                 "normalization: {normalized}"
             );
             let u = r
-                .step(&feed(json!({"op":"ui/show-panel", "panel/id":"lens",
+                .step(&feed(json!({"op":"show", "id":"lens",
                 "cursor":true, "keys":{"enter":{"invoke":"open"}, "n":"next"},
                 "lines":[{"text":"alpha", "id":"a"},
                          {"text":"beta", "id":"b", "payload":{"file":"x"}}]})))
@@ -273,7 +273,7 @@ mod tests {
                 .unwrap();
             assert!(u.effects.is_empty());
             let u = r
-                .step(&feed(json!({"op":"ui/show-panel", "panel/id":"invalid",
+                .step(&feed(json!({"op":"show", "id":"invalid",
                                    "keys":{"enter":{"invoke":42}, "ctrl-x":"unsupported"}})))
                 .unwrap();
             assert!(
