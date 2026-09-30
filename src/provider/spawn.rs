@@ -252,6 +252,9 @@ impl AnyAgent {
         cfg.provider_name = Some(provider_name);
         cfg.model_name = Self::model_name_opt(&self.model_name);
         cfg.steering_queue = steering_queue;
+        // The main session's runs take external loop directives (hive
+        // senses from the panel feed) once a producer armed the inbox.
+        cfg.loop_inbox = crate::agent::agent_loop::loop_inbox::installed();
         cfg.tool_def_filter = tool_def_filter;
         cfg.dynamic_tool_search = self.dynamic_tool_search;
         cfg.turn_envelope = self.turn_envelope;

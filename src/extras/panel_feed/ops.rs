@@ -7,6 +7,7 @@
 
 use serde_json::{Map, Value};
 
+use crate::agent::agent_loop::loop_inbox::{self, LoopDirective, LoopMode};
 use crate::ui::notifications::Notification;
 use crate::ui::panels_ext::{PanelFace, PanelLine, PanelOp};
 
@@ -14,7 +15,12 @@ use crate::ui::panels_ext::{PanelFace, PanelLine, PanelOp};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FeedEffect {
     Panel(PanelOp),
-    Notify { level: NotifyLevel, message: String },
+    Notify {
+        level: NotifyLevel,
+        message: String,
+    },
+    /// A `loop/*` op: a directive for the running agent loop.
+    Loop(LoopDirective),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +79,12 @@ impl FeedSink for UiSink {
                     NotifyLevel::Warn => Notification::Warn(message),
                     NotifyLevel::Error => Notification::Error(message),
                 });
+            }
+            FeedEffect::Loop(directive) => {
+                // One visible line, so the human sees what just changed the
+                // agent's course; the model reads the full prompt.
+                crate::ui::notifications::notify_send(Notification::Info(loop_notice(&directive)));
+                loop_inbox::arm().push(directive);
             }
         }
     }
@@ -191,6 +203,40 @@ fn append_tab(obj: &Map<String, Value>) -> Result<FeedEffect, Skip> {
     Ok(FeedEffect::Panel(PanelOp::AppendTab { id, line }))
 }
 
+/// The chat line announcing `d` (pure): the prompt's first line, the mode.
+pub fn loop_notice(d: &LoopDirective) -> String {
+    let head = d.prompt.lines().next().unwrap_or("").trim();
+    let head = crate::ui::ansi::strip_escapes(head, crate::ui::ansi::StripPolicy::STRICT);
+    let head: String = head.chars().take(160).collect();
+    format!("{head} → {}", d.mode.name())
+}
+
+/// `loop/<mode>`: `id` and `prompt` (or `text`) are required.
+fn loop_directive(op: &str, obj: &Map<String, Value>) -> Result<FeedEffect, Skip> {
+    const OP: &str = "loop/*";
+    let mode = op
+        .strip_prefix("loop/")
+        .and_then(LoopMode::from_name)
+        .ok_or_else(|| Skip::UnknownOp(op.to_string()))?;
+    let id = str_field(obj, &["id"])
+        .filter(|s| !s.trim().is_empty())
+        .ok_or(Skip::Missing {
+            op: OP,
+            field: "id",
+        })?;
+    let prompt = str_field(obj, &["prompt", "text"])
+        .filter(|s| !s.trim().is_empty())
+        .ok_or(Skip::Missing {
+            op: OP,
+            field: "prompt",
+        })?;
+    Ok(FeedEffect::Loop(LoopDirective {
+        id: id.to_string(),
+        mode,
+        prompt: prompt.to_string(),
+    }))
+}
+
 /// Decode one event's `data`. The event type is not consulted: every
 /// op names itself in its `op` field.
 pub fn decode(data: &str) -> Result<FeedEffect, Skip> {
@@ -224,6 +270,7 @@ pub fn decode(data: &str) -> Result<FeedEffect, Skip> {
                 message: message.to_string(),
             })
         }
+        other if other.starts_with("loop/") => loop_directive(other, obj),
         other => Err(Skip::UnknownOp(other.to_string())),
     }
 }
@@ -405,6 +452,62 @@ pub(crate) mod tests {
         assert_eq!(got.len(), 2, "unknown op produced no effect: {got:?}");
         assert!(matches!(got[0], FeedEffect::Panel(PanelOp::Show { .. })));
         assert!(matches!(got[1], FeedEffect::Notify { .. }));
+    }
+
+    #[test]
+    fn loop_ops_decode_into_directives() {
+        assert_eq!(
+            decode(
+                r#"{"op":"loop/steer","id":"s1","prompt":"[hive sense · ling-1 is blocked]\nneed X","text":"need X"}"#
+            ),
+            Ok(FeedEffect::Loop(LoopDirective {
+                id: "s1".into(),
+                mode: LoopMode::Steer,
+                prompt: "[hive sense · ling-1 is blocked]\nneed X".into(),
+            }))
+        );
+        assert!(matches!(
+            decode(r#"{"op":"loop/followup","id":"s2","text":"done"}"#),
+            Ok(FeedEffect::Loop(LoopDirective {
+                mode: LoopMode::FollowUp,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            decode(r#"{"op":"loop/interject","id":"s3","prompt":"x"}"#),
+            Ok(FeedEffect::Loop(LoopDirective {
+                mode: LoopMode::Interject,
+                ..
+            }))
+        ));
+        assert_eq!(
+            decode(r#"{"op":"loop/steer","prompt":"x"}"#),
+            Err(Skip::Missing {
+                op: "loop/*",
+                field: "id"
+            })
+        );
+        assert_eq!(
+            decode(r#"{"op":"loop/steer","id":"s","prompt":"  "}"#),
+            Err(Skip::Missing {
+                op: "loop/*",
+                field: "prompt"
+            })
+        );
+        assert_eq!(
+            decode(r#"{"op":"loop/teleport","id":"s","prompt":"x"}"#),
+            Err(Skip::UnknownOp("loop/teleport".into()))
+        );
+    }
+
+    #[test]
+    fn loop_notice_is_one_clean_line() {
+        let d = LoopDirective {
+            id: "s".into(),
+            mode: LoopMode::Steer,
+            prompt: "[hive sense · ling-1 asks]\u{1b}[31m\nwhich db?".into(),
+        };
+        assert_eq!(loop_notice(&d), "[hive sense · ling-1 asks] → steer");
     }
 
     #[test]

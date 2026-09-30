@@ -300,6 +300,7 @@ async fn h7_scenario_1_simple_text() {
         #[cfg(feature = "plugin")]
         plugin_mgr: None,
         steering_queue: None,
+        loop_inbox: None,
         tool_execution: crate::agent::agent_loop::types::ToolExecutionMode::Parallel,
         event_channel_capacity: 256,
         provider_name: None,
@@ -406,6 +407,7 @@ async fn h7_scenario_2_turn_boundaries() {
         #[cfg(feature = "plugin")]
         plugin_mgr: None,
         steering_queue: None,
+        loop_inbox: None,
         tool_execution: crate::agent::agent_loop::types::ToolExecutionMode::Parallel,
         event_channel_capacity: 256,
         provider_name: None,
@@ -546,6 +548,7 @@ async fn h7_scenario_5_auth_error_surfaces() {
         #[cfg(feature = "plugin")]
         plugin_mgr: None,
         steering_queue: None,
+        loop_inbox: None,
         tool_execution: crate::agent::agent_loop::types::ToolExecutionMode::Parallel,
         event_channel_capacity: 256,
         provider_name: None,
@@ -739,6 +742,7 @@ async fn h7_scenario_3_tool_dispatch() {
         #[cfg(feature = "plugin")]
         plugin_mgr: None,
         steering_queue: None,
+        loop_inbox: None,
         tool_execution: crate::agent::agent_loop::types::ToolExecutionMode::Sequential,
         event_channel_capacity: 256,
         provider_name: None,
@@ -893,6 +897,7 @@ async fn h7_glm_scenario_1_simple_text() {
         #[cfg(feature = "plugin")]
         plugin_mgr: None,
         steering_queue: None,
+        loop_inbox: None,
         tool_execution: crate::agent::agent_loop::types::ToolExecutionMode::Parallel,
         event_channel_capacity: 256,
         provider_name: None,
@@ -1055,6 +1060,7 @@ async fn h7_glm_scenario_3_tool_dispatch() {
         #[cfg(feature = "plugin")]
         plugin_mgr: None,
         steering_queue: None,
+        loop_inbox: None,
         tool_execution: crate::agent::agent_loop::types::ToolExecutionMode::Sequential,
         event_channel_capacity: 256,
         provider_name: None,
@@ -1169,6 +1175,7 @@ fn cerebras_spawn_config(
         #[cfg(feature = "plugin")]
         plugin_mgr: None,
         steering_queue: None,
+        loop_inbox: None,
         tool_execution: crate::agent::agent_loop::types::ToolExecutionMode::Sequential,
         event_channel_capacity: 256,
         provider_name: Some("cerebras".to_string()),

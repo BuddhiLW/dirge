@@ -30,6 +30,10 @@ fn reply_bodies_match_the_wire() {
     assert_eq!(ReplyAction::NextTab.to_json(), r#"{"action":"next-tab"}"#);
     assert_eq!(ReplyAction::PrevTab.to_json(), r#"{"action":"prev-tab"}"#);
     assert_eq!(ReplyAction::Refresh.to_json(), r#"{"action":"refresh"}"#);
+    assert_eq!(
+        ReplyAction::Ack("s-1".into()).to_json(),
+        r#"{"action":"ack","target":"s-1"}"#
+    );
 }
 
 /// One request as the test server saw it.
@@ -194,6 +198,7 @@ async fn feed_routes_ops_cleans_up_reconnects_and_replies() {
         max_backoff: Duration::from_millis(200),
         idle_timeout: Duration::from_secs(5),
         connect_timeout: Duration::from_secs(2),
+        features: Vec::new(),
     };
     let handle = spawn(source.clone(), sink.clone(), opts);
 
@@ -285,6 +290,7 @@ async fn wrong_token_is_retried_and_reply_reports_status() {
         max_backoff: Duration::from_millis(40),
         idle_timeout: Duration::from_secs(5),
         connect_timeout: Duration::from_secs(2),
+        features: Vec::new(),
     };
     let handle = spawn(source.clone(), sink.clone(), opts);
     // Two refused attempts prove the loop keeps retrying.

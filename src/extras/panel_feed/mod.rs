@@ -44,6 +44,8 @@ pub enum ReplyAction {
     PrevTab,
     /// Ask the producer to repaint everything it shows.
     Refresh,
+    /// The loop op `id` reached the agent loop; stop holding it.
+    Ack(String),
 }
 
 /// Usage line for the reply verbs of `/panel`.
@@ -85,6 +87,7 @@ impl ReplyAction {
             Self::NextTab => "next-tab",
             Self::PrevTab => "prev-tab",
             Self::Refresh => "refresh",
+            Self::Ack(_) => "ack",
         }
     }
 
@@ -96,6 +99,7 @@ impl ReplyAction {
             Self::NextTab => json!({"action": "next-tab"}),
             Self::PrevTab => json!({"action": "prev-tab"}),
             Self::Refresh => json!({"action": "refresh"}),
+            Self::Ack(id) => json!({"action": "ack", "target": id}),
         };
         value.to_string()
     }
@@ -200,11 +204,41 @@ fn runtime_dir() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
+/// Acknowledges injected loop directives to the producer, one reply per
+/// directive, off the caller's thread (the loop must not wait on HTTP).
+struct FeedAck;
+
+impl crate::agent::agent_loop::loop_inbox::InjectionAck for FeedAck {
+    fn injected(&self, ids: &[String]) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        for id in ids {
+            let action = ReplyAction::Ack(id.clone());
+            tokio::spawn(async move {
+                if let Err(err) = reply(action).await {
+                    // Not user-facing: the producer resends an unacked op
+                    // on the next connection and the inbox dedups it.
+                    tracing::debug!(target: "dirge::panel_feed", %err, "loop ack not delivered");
+                }
+            });
+        }
+    }
+}
+
 /// Start the feed described by `cfg`, or `None` when it is disabled
 /// or has no source. Must be called inside a tokio runtime.
 pub fn start(cfg: Option<&PanelFeedConfig>) -> Option<FeedHandle> {
-    let source = cfg?.source(Some(&runtime_dir()))?;
-    Some(spawn(source, Arc::new(ops::UiSink), FeedOptions::default()))
+    let cfg = cfg?;
+    let source = cfg.source(Some(&runtime_dir()))?;
+    let mut opts = FeedOptions::default();
+    if cfg.loop_enabled() {
+        // Arm the loop inbox before subscribing: the producer replays
+        // unacknowledged ops as soon as we connect.
+        crate::agent::agent_loop::loop_inbox::arm().set_ack(Arc::new(FeedAck));
+        opts.features.push("loop".to_string());
+    }
+    Some(spawn(source, Arc::new(ops::UiSink), opts))
 }
 
 /// Spawn the subscription loop for `source` into `sink`.
