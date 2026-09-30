@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{Value, json};
 
-use super::domain::{HookEvent, HookOutcome, Submission, system_reminder};
+use super::domain::{
+    CompactTrigger, HookEvent, HookOutcome, PreCompact, Submission, system_reminder,
+};
 use super::{CommandHooks, HookBinding};
 use super::{dialect, policy};
 use crate::agent::agent_loop::hooks::{
@@ -16,6 +18,7 @@ use crate::agent::agent_loop::hooks::{
 };
 use crate::agent::agent_loop::message::{LoopMessage, UserMessage};
 use crate::agent::agent_loop::result::{AfterToolCallResult, BeforeToolCallResult, LoopToolResult};
+use crate::agent::agent_loop::types::{CompactionHooks, OnBeforeCompactFn, OnCompactFn};
 use crate::permission::ask::{AskRequest, AskSender, UserDecision};
 
 /// Consecutive `Stop` blocks tolerated before the loop is let go.
@@ -419,5 +422,54 @@ pub fn install(
             config.get_followup_messages.take(),
             stop_followup(binding.clone(), session_id),
         ));
+    }
+}
+
+/// Installs `PreCompact` on a loop's compaction hooks when something
+/// answers it: a configured hook or an addon listener.
+pub fn install_pre_compact(
+    config: &mut crate::agent::agent_loop::types::LoopConfig,
+    session_id: Option<String>,
+) {
+    let answered = super::for_open_events().is_some_and(|h| h.answers(PreCompact::event()));
+    if answered {
+        config.compaction_hooks = Some(with_pre_compact(
+            config.compaction_hooks.take(),
+            super::for_open_events,
+            session_id,
+        ));
+    }
+}
+
+/// `existing` compaction hooks, with `PreCompact` fired on the registry
+/// `source` names before its `on_before`. The loop compacts on its own
+/// only, so the trigger is `auto`. Without `existing`, `on_compact`
+/// supplies no summary.
+pub fn with_pre_compact(
+    existing: Option<CompactionHooks>,
+    source: fn() -> Option<Arc<CommandHooks>>,
+    session_id: Option<String>,
+) -> CompactionHooks {
+    let before = existing.as_ref().map(|h| h.on_before.clone());
+    let on_compact: OnCompactFn = match existing {
+        Some(h) => h.on_compact,
+        None => Arc::new(|_| Box::pin(async { None })),
+    };
+    let on_before: OnBeforeCompactFn = Arc::new(move |count, tokens| {
+        let before = before.clone();
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            if let Some(hooks) = source() {
+                let subject = PreCompact::new(CompactTrigger::Auto, None);
+                super::pre_compact(hooks, subject, session_id).await;
+            }
+            if let Some(before) = before {
+                before(count, tokens).await;
+            }
+        })
+    });
+    CompactionHooks {
+        on_before,
+        on_compact,
     }
 }

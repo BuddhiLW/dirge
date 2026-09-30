@@ -99,6 +99,61 @@ impl fmt::Display for HookEvent {
     }
 }
 
+/// What set a compaction off, in Claude Code's `trigger` words: the user
+/// asked for it (`/compact`), or the context filled up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactTrigger {
+    Manual,
+    Auto,
+}
+
+impl CompactTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CompactTrigger::Manual => "manual",
+            CompactTrigger::Auto => "auto",
+        }
+    }
+}
+
+/// A compaction about to run: the subject of the open `PreCompact` event.
+/// Nothing it answers can stop the compaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreCompact {
+    pub trigger: CompactTrigger,
+    /// The user's `/compact` instructions; empty when there are none.
+    pub custom_instructions: String,
+}
+
+impl PreCompact {
+    /// The event's name in a `hooks` block and in `hook_event_name`.
+    pub const EVENT: &'static str = "PreCompact";
+
+    pub fn new(trigger: CompactTrigger, instructions: Option<&str>) -> Self {
+        Self {
+            trigger,
+            custom_instructions: instructions.unwrap_or_default().to_string(),
+        }
+    }
+
+    pub fn event() -> HookEvent {
+        HookEvent::named(Self::EVENT)
+    }
+
+    /// The matcher target: a `manual` or `auto` group, as in Claude Code.
+    pub fn target(&self) -> &'static str {
+        self.trigger.as_str()
+    }
+
+    /// The event's own payload fields.
+    pub fn fields(&self) -> Value {
+        serde_json::json!({
+            "trigger": self.trigger.as_str(),
+            "custom_instructions": self.custom_instructions,
+        })
+    }
+}
+
 /// One `{ "type": "command", "command": ..., "timeout": ... }` entry, or
 /// `{ "type": "addon", "addon": ..., "handler": ..., "timeout": ... }`,
 /// answered by a handler an addon registered instead of a process. The

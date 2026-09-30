@@ -26,7 +26,7 @@ mod tests;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-pub use domain::{HookEvent, HooksConfig};
+pub use domain::{CompactTrigger, HookEvent, HookOutcome, HooksConfig, PreCompact};
 pub use registry::CommandHooks;
 
 use crate::permission::ask::AskSender;
@@ -105,7 +105,6 @@ pub fn global() -> Option<Arc<CommandHooks>> {
 /// registers one), a registry with no entries, so the listeners hear it
 /// with no hook configured. `None` when neither exists. The loops keep
 /// [`global`]: this one has no entries for the events they fire.
-#[allow(dead_code)] // no seam fires an open event yet
 pub fn for_open_events() -> Option<Arc<CommandHooks>> {
     open_registry(global(), &boundary::listeners(), || {
         LISTENING
@@ -129,4 +128,45 @@ fn open_registry(
     empty: impl FnOnce() -> Arc<CommandHooks>,
 ) -> Option<Arc<CommandHooks>> {
     configured.or_else(|| (!listeners.is_empty()).then(empty))
+}
+
+/// Fire `PreCompact` on `hooks` for a compaction about to run and wait
+/// for its answers. A block is logged, never obeyed.
+pub async fn pre_compact(
+    hooks: Arc<CommandHooks>,
+    subject: PreCompact,
+    session_id: Option<String>,
+) {
+    let event = PreCompact::event();
+    let payload = hooks.payload(event, session_id.as_deref(), subject.fields());
+    let targets = vec![subject.target().to_string()];
+    ignore_block(&hooks.run_async(event, targets, payload).await);
+}
+
+/// [`pre_compact`] on the open-event registry, from synchronous code.
+pub fn pre_compact_blocking(subject: &PreCompact, session_id: Option<&str>) {
+    if let Some(hooks) = for_open_events() {
+        ignore_block(&pre_compact_on(&hooks, subject, session_id));
+    }
+}
+
+/// `PreCompact` for `subject` on `hooks`, every answer folded. Blocking.
+pub fn pre_compact_on(
+    hooks: &CommandHooks,
+    subject: &PreCompact,
+    session_id: Option<&str>,
+) -> HookOutcome {
+    let event = PreCompact::event();
+    let payload = hooks.payload(event, session_id, subject.fields());
+    hooks.run_blocking(event, &[subject.target()], &payload)
+}
+
+fn ignore_block(outcome: &HookOutcome) {
+    if let Some(reason) = &outcome.block {
+        tracing::warn!(
+            target: "dirge::hooks",
+            %reason,
+            "PreCompact block ignored: a compaction cannot be refused",
+        );
+    }
 }
