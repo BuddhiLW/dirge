@@ -36,6 +36,18 @@ pub struct PanelFeedConfig {
     pub url: Option<String>,
     /// File holding the token for `url` (same permission rules).
     pub token_file: Option<String>,
+    /// Accept `loop/*` ops: the producer's directives are injected into
+    /// the running agent loop (see `agent_loop::loop_inbox`). Defaults to
+    /// on when the feed is on; `false` keeps the feed display-only.
+    #[serde(rename = "loop")]
+    pub loop_directives: Option<bool>,
+}
+
+impl PanelFeedConfig {
+    /// Whether the feed advertises and acts on `loop/*` ops.
+    pub fn loop_enabled(&self) -> bool {
+        self.loop_directives != Some(false)
+    }
 }
 
 /// Where to find the endpoint, resolved from config + environment.

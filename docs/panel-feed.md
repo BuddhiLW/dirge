@@ -29,6 +29,7 @@ or, with a fixed endpoint:
 | `discovery_dir` | Directory holding a discovery file named `dirge.json`. A relative path is taken under `$XDG_RUNTIME_DIR` (else the system temp dir). |
 | `url`           | Explicit base URL. Takes precedence over `discovery_dir`.                                 |
 | `token_file`    | File holding the token for `url` (surrounding whitespace is trimmed).                     |
+| `loop`          | `false` ignores `loop/*` ops (the feed stays display-only). Default: on. See [Loop ops](#loop-ops). |
 
 The source is re-read on every (re)connect, so a producer that restarts
 on a new port with a new token is picked up without restarting dirge.
@@ -232,6 +233,35 @@ or `error`. Terminal escape sequences are stripped.
 All producer text is sanitised (control and escape sequences removed)
 and bounded in length and count by the panel layer.
 
+## Loop ops
+
+Every op above only changes what the human sees. A `loop/*` op changes
+what the agent does: it is a directive for the running agent loop. dirge
+advertises it by subscribing with `features=loop` (unless the config says
+`"loop": false`), so a producer can hold these ops back from clients that
+would drop them.
+
+```json
+{"op": "loop/steer", "id": "s-17", "prompt": "[hive sense · ling-1 is blocked]\nneed the schema\n\nTo unblock it, ..."}
+```
+
+| op | effect |
+|----|--------|
+| `loop/steer` | Injected before the next model call of the running turn, between tool rounds, with a preamble saying it is an external event and not the user. With no run active it opens a turn. |
+| `loop/interject` | The running turn ends at its next boundary (the same graceful stop as the user's interjection) and the message opens the next turn. |
+| `loop/followup` | Delivered when the running turn is about to finish, so the run continues with it. With no run active it opens a turn. |
+
+`id` and `prompt` are required (`text` is accepted in place of `prompt`);
+the prompt is exactly what the model reads. Other fields are ignored.
+Each op also shows one line in the chat, so the human sees what changed
+the agent's course.
+
+An op reaches the loop once. When it does, dirge replies
+`{"action": "ack", "target": "<id>"}`. A producer should keep an op until
+it is acknowledged and send it again on the next connection; dirge
+replaces a queued op that has the same `id` instead of running it twice.
+Only the main session's runs take loop ops. Subagents never see them.
+
 ## Replies
 
 dirge POSTs one JSON object per request to `<url>/reply`. Any 2xx
@@ -243,12 +273,15 @@ dirge POSTs one JSON object per request to `<url>/reply`. Any 2xx
 {"action": "next-tab"}
 {"action": "prev-tab"}
 {"action": "refresh"}
+{"action": "ack", "target": "<loop op id>"}
 ```
 
 - `focus`: focus the item `target` (an id the producer showed).
 - `unfocus`: leave the focused view.
 - `next-tab` / `prev-tab`: move between the producer's views.
 - `refresh`: ask the producer to repaint everything it shows.
+- `ack`: the loop op `target` reached the agent loop (sent once per op,
+  automatically; see [Loop ops](#loop-ops)).
 
 Producers should accept and ignore actions they do not know.
 

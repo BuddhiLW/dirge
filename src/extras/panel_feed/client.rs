@@ -35,6 +35,9 @@ pub struct FeedOptions {
     pub idle_timeout: Duration,
     /// Connect timeout for one attempt.
     pub connect_timeout: Duration,
+    /// Features advertised on the subscription (`features=a,b`), so the
+    /// producer only sends ops this client acts on (`loop`: loop ops).
+    pub features: Vec<String>,
 }
 
 impl Default for FeedOptions {
@@ -44,6 +47,7 @@ impl Default for FeedOptions {
             max_backoff: Duration::from_secs(30),
             idle_timeout: Duration::from_secs(60),
             connect_timeout: Duration::from_secs(5),
+            features: Vec::new(),
         }
     }
 }
@@ -69,6 +73,28 @@ pub fn backoff_delay(base: Duration, attempt: u32, max: Duration, unit: f64) -> 
 fn jitter_unit() -> f64 {
     let bits = (uuid::Uuid::new_v4().as_u128() >> 64) as u64;
     (bits >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// The subscription URL: [`endpoint_url`] with `features` appended to
+/// the [`FEATURES`] it always advertises.
+fn events_url(ep: &Endpoint, features: &[String]) -> Result<reqwest::Url, String> {
+    let mut url = endpoint_url(ep, "events")?;
+    if features.is_empty() {
+        return Ok(url);
+    }
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(k, v)| {
+            let v = if k == "features" {
+                format!("{v},{}", features.join(","))
+            } else {
+                v.into_owned()
+            };
+            (k.into_owned(), v)
+        })
+        .collect();
+    url.query_pairs_mut().clear().extend_pairs(pairs);
+    Ok(url)
 }
 
 /// `<base>/<path>?token=<token>` with the token percent-encoded.
@@ -190,7 +216,7 @@ async fn connect_once(
     base: &mut Duration,
     last_error: &mut Option<String>,
 ) -> Outcome {
-    let url = match endpoint_url(ep, "events") {
+    let url = match events_url(ep, &opts.features) {
         Ok(u) => u,
         Err(e) => {
             note_error(last_error, &e);
@@ -254,9 +280,13 @@ async fn connect_once(
             match item {
                 SseItem::Event(ev) => {
                     delivered = true;
-                    // A view engine that owns the panels gets the op
+                    // A loop op drives the agent, not the panels: it
+                    // takes the decoder whoever owns the panels. A view
+                    // engine that owns them gets every other op
                     // undecoded; otherwise the UI's own decoder runs.
-                    if crate::ui::view::owns_feed() {
+                    if ops::is_loop_op(&ev.data) {
+                        ops::route(&ev.data, sink);
+                    } else if crate::ui::view::owns_feed() {
                         if let Some(event) = ops::feed_event(&ev.data) {
                             crate::ui::view::submit(event);
                         }
@@ -361,6 +391,14 @@ mod tests {
         assert_eq!(
             endpoint_url(&bare, "reply").unwrap().as_str(),
             "http://127.0.0.1:9/reply"
+        );
+        assert_eq!(
+            events_url(&ep, &["loop".into()]).unwrap().as_str(),
+            "http://127.0.0.1:9/feed/events?token=a+b%26c&features=spans%2Ckeys%2Ccursor%2Copen-file%2Cloop"
+        );
+        assert_eq!(
+            events_url(&bare, &[]).unwrap(),
+            endpoint_url(&bare, "events").unwrap()
         );
     }
 }

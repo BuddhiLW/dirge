@@ -1658,6 +1658,10 @@ pub async fn run_interactive(
     // Optional external panel feed (off by default). Its handle lives for
     // the loop; dropping it on exit stops the subscription task.
     let _panel_feed = crate::extras::panel_feed::start(cfg.panel_feed.as_ref());
+    // External loop directives (the feed's `loop/*` ops). While a run is
+    // active they reach it through its steering / follow-up hooks; while
+    // idle, the select arm below opens a turn on them.
+    let loop_inbox = crate::agent::agent_loop::loop_inbox::installed();
 
     let (user_tx, mut user_rx) = mpsc::unbounded_channel::<UserEvent>();
     input_reader::spawn_input_reader(user_tx.clone());
@@ -4983,6 +4987,20 @@ pub async fn run_interactive(
                         }
                         view_model = update.model;
                         renderer.request_repaint();
+                    }
+                    _ = async {
+                        match &loop_inbox {
+                            Some(inbox) => inbox.ready().await,
+                            None => std::future::pending().await,
+                        }
+                    }, if !ui.is_running => {
+                        // A directive arrived (or a run ended leaving some
+                        // queued) with no run to take it: it opens a turn,
+                        // as a prompt the user typed would.
+                        if let Some(prompt) = loop_inbox.as_ref().and_then(|inbox| inbox.take_for_new_run()) {
+                            start_prompt_turn!(prompt);
+                            renderer.request_repaint();
+                        }
                     }
                     Some(panel_op) = async {
                         if let Some(rx) = &mut panel_rx {
