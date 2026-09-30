@@ -3064,29 +3064,13 @@ pub async fn run_interactive(
                                             renderer.request_repaint();
                                             continue;
                                         }
-                                        // dirge-nfa: read-only inspection
-                                        // commands run during agent activity.
-                                        // The busy gate ONLY blocks commands
-                                        // that mutate state (clear, compress,
-                                        // cd, model switch, prompt switch,
-                                        // etc.). Looking at chat windows /
-                                        // help / sessions list / tree show
-                                        // doesn't need the agent idle.
-                                        //
-                                        // List matches:
-                                        //   - the existing always-allowed
-                                        //     set (/quit, /help, /reasoning)
-                                        //   - inspection commands surfaced
-                                        //     by the multi-chat work (/tasks)
-                                        //   - read-only variants of other
-                                        //     commands (no-arg /sessions,
-                                        //     /tree, /model, /prompt,
-                                        //     /memory list, /skill list)
-                                        //
-                                        // No-arg detection: the head word
-                                        // matches alone; if there's an
-                                        // argument, treat as potentially
-                                        // mutating and gate.
+                                        // dirge-nfa: the busy gate blocks only
+                                        // commands whose declared class is
+                                        // mutating. Each command declares its
+                                        // class where it is registered (the
+                                        // built-in slash table, an addon's
+                                        // `:dirge/commands` entry); unknown
+                                        // commands are mutating.
                                         let safe_during_agent = is_safe_during_agent(&expanded);
                                         if ui.is_running && !safe_during_agent {
                                             write_outside_chamber(
@@ -3095,7 +3079,7 @@ pub async fn run_interactive(
                                                 &mut ui.tool_chamber_open,
                                             &mut ui.chamber_top_start,
                                             &mut ui.chamber_top_end,
-                                                "agent is busy — wait, interrupt (Ctrl+C), or use /quit. (/mode /tasks /help /sessions /tree /model /prompt run during agent activity.)",
+                                                &busy_notice(),
                                                 c_error(),
                                             )?;
                                             renderer.request_repaint();
@@ -3288,11 +3272,20 @@ pub async fn run_interactive(
                                                 // `addon_phase` arm lands its result. The loop
                                                 // stays live meanwhile, so a permission prompt
                                                 // the job raises can be answered, and Ctrl+C
-                                                // stops waiting for it. `is_running` makes the
-                                                // busy gate refuse a second job meanwhile.
-                                                ui.addon_phase = Some(crate::ui::addon_phase::spawn(job));
-                                                ui.is_running = true;
-                                                renderer.set_avatar_state(avatar::AvatarState::Thinking);
+                                                // stops waiting for it. One job at a time: a
+                                                // non-mutating command passes the busy gate,
+                                                // so the slot is checked here too.
+                                                if ui.addon_phase.is_some() {
+                                                    renderer.write_line(
+                                                        "an addon command is still running — wait for it or press Ctrl+C",
+                                                        c_error(),
+                                                    )?;
+                                                } else {
+                                                    let owns_busy = !ui.is_running;
+                                                    ui.addon_phase = Some(crate::ui::addon_phase::spawn(job, owns_busy));
+                                                    ui.is_running = true;
+                                                    renderer.set_avatar_state(avatar::AvatarState::Thinking);
+                                                }
                                             }
                                             Err(e) => {
                                                 if e.downcast_ref::<std::io::Error>().is_some_and(|e: &std::io::Error| e.kind() == std::io::ErrorKind::Interrupted) {
@@ -4684,9 +4677,14 @@ pub async fn run_interactive(
                             std::future::pending().await
                         }
                     } => {
-                        let _ = ui.addon_phase.take();
+                        let finished = ui.addon_phase.take();
                         #[cfg(feature = "addons")]
                         {
+                            // A job the busy gate admitted beside a turn (its
+                            // command is not mutating) does not own the busy
+                            // state: its prompt queues behind that turn.
+                            let beside_a_turn = ui.is_running
+                                && finished.as_ref().is_some_and(|ph| !ph.owns_busy);
                             let landing = crate::ui::addon_phase::land(
                                 addon_done, &mut agent, &permission, &ask_tx,
                             );
@@ -4694,12 +4692,16 @@ pub async fn run_interactive(
                                 renderer.write_line(&line.text, line.tone.color())?;
                             }
                             match landing.prompt {
+                                Some(prompt) if !prompt.is_empty() && beside_a_turn => {
+                                    ui.interjection_queue.lock().unwrap().push_back(prompt);
+                                }
                                 Some(prompt) if !prompt.is_empty() => start_prompt_turn!(prompt),
+                                _ if beside_a_turn => {}
                                 _ => drain_interjections!(),
                             }
                         }
                         #[cfg(not(feature = "addons"))]
-                        let _ = addon_done;
+                        let _ = (addon_done, finished);
                         renderer.set_avatar_state(avatar::AvatarState::settled(ui.is_running));
                         renderer.request_repaint();
                     }
@@ -5985,22 +5987,19 @@ pub(crate) fn begin_snapshot_turn(session: &crate::session::Session) {
     }
 }
 
-/// Whether a slash command is safe to run while the agent is active.
-/// Read-only inspection commands don't need the agent idle.
+/// Whether a slash command may run while the loop is busy: its declared
+/// class is not mutating. The class lives where the command is registered.
 fn is_safe_during_agent(text: &str) -> bool {
-    let head = text.split_whitespace().next().unwrap_or("");
-    let args = text.split_whitespace().nth(1).map(|s| s.to_string());
-    let always_safe = matches!(
-        head,
-        "/quit" | "/help" | "/reasoning" | "/tasks" | "/mode" | "/cache" | "/effort"
-    );
-    let safe_when_no_arg =
-        matches!(head, "/sessions" | "/tree" | "/model" | "/prompt") && args.is_none();
-    let safe_when_list = matches!(
-        (head, args.as_deref()),
-        ("/memory", Some("list")) | ("/skill", Some("list")) | ("/sessions", Some("list"))
-    );
-    always_safe || safe_when_no_arg || safe_when_list
+    crate::ui::slash::command_class(text).runs_while_busy()
+}
+
+/// The notice for a command the busy gate refused, naming the built-ins
+/// that do run mid-turn.
+fn busy_notice() -> String {
+    format!(
+        "agent is busy — wait, interrupt (Ctrl+C), or use /quit. ({} run during agent activity.)",
+        crate::ui::slash::commands_runnable_while_busy().join(" ")
+    )
 }
 
 /// When the chat is scrolled up off the newest content, what a key that's about
