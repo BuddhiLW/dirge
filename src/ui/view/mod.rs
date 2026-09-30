@@ -26,6 +26,7 @@ pub(crate) mod engine;
 pub(crate) mod native;
 pub(crate) mod port;
 pub(crate) mod promote;
+pub(crate) mod supervise;
 /// Only engines that speak plain data use the codec (the cljrs one).
 #[cfg(any(feature = "addons", test))]
 pub(crate) mod wire;
@@ -46,8 +47,20 @@ pub type EngineFactory = fn(UpdateSink) -> Result<(ThreadEngine, ViewModel), Str
 /// Stack for the native view thread.
 const NATIVE_STACK_BYTES: usize = 2 * 1024 * 1024;
 
-/// Picks the preferred engine by name (`cljrs`, `native`).
+/// Environment override naming the preferred engine (`cljrs`,
+/// `native`); it wins over the `view_engine` config key.
 const ENGINE_ENV: &str = "DIRGE_VIEW_ENGINE";
+
+/// The engine name to prefer: the [`ENGINE_ENV`] value `env`, else the
+/// `configured` one; a blank name counts as unset (pure).
+fn wanted_engine(env: Option<String>, configured: Option<&str>) -> Option<String> {
+    [env.as_deref(), configured]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|name| !name.is_empty())
+        .map(str::to_string)
+}
 
 /// The engines this build has, in default preference order. A new
 /// engine is one more entry.
@@ -73,6 +86,11 @@ fn preferred(
     all
 }
 
+/// `wanted` when no engine in `all` has that name (pure).
+fn unknown<'a>(all: &[(&'static str, EngineFactory)], wanted: Option<&'a str>) -> Option<&'a str> {
+    wanted.filter(|w| all.iter().all(|(name, _)| name != w))
+}
+
 fn native_engine(sink: UpdateSink) -> Result<(ThreadEngine, ViewModel), String> {
     ThreadEngine::spawn(
         "dirge-view",
@@ -85,13 +103,18 @@ fn native_engine(sink: UpdateSink) -> Result<(ThreadEngine, ViewModel), String> 
 /// The running engine, set once by [`start`].
 static ENGINE: OnceLock<Box<dyn ViewEngine>> = OnceLock::new();
 
-/// Start the first engine that boots (see [`engines`], [`ENGINE_ENV`]);
-/// its updates go to `sink`. The initial model; the default model (the
-/// view owns nothing) when no engine boots. A second call keeps the
-/// first engine.
-pub fn start(sink: UpdateSink) -> ViewModel {
-    let wanted = std::env::var(ENGINE_ENV).ok();
-    for (name, make) in preferred(engines(), wanted.as_deref()) {
+/// Start the first engine that boots (see [`engines`]), preferring the
+/// one [`ENGINE_ENV`] names, else the one `configured` (the
+/// `view_engine` config key) names; its updates go to `sink`. The
+/// initial model; the default model (the view owns nothing) when no
+/// engine boots. A second call keeps the first engine.
+pub fn start(sink: UpdateSink, configured: Option<&str>) -> ViewModel {
+    let wanted = wanted_engine(std::env::var(ENGINE_ENV).ok(), configured);
+    let all = engines();
+    if let Some(name) = unknown(&all, wanted.as_deref()) {
+        tracing::warn!(target: "dirge::view", engine = name, "no such view engine; trying the others");
+    }
+    for (name, make) in preferred(all, wanted.as_deref()) {
         match make(sink.clone()) {
             Ok((engine, model)) => {
                 tracing::info!(target: "dirge::view", engine = name, "view engine started");

@@ -1155,6 +1155,12 @@ pub struct Config {
     /// `/display` command overrides it at runtime. Absent → both side
     /// panels follow the automatic width-based behavior.
     pub display: Option<String>,
+    /// Preferred view engine for the view commands and the swarm grid:
+    /// `cljrs` (builds with the `addons` feature) or `native`. The
+    /// `DIRGE_VIEW_ENGINE` environment variable overrides it. Absent →
+    /// `cljrs` when built in, else `native`; an engine that fails to
+    /// start falls through to the next.
+    pub view_engine: Option<String>,
     pub tool_result_max_chars: Option<usize>,
     /// Cap on tool-result body lines shown by default inside a tool
     /// chamber. Anything past this collapses to a

@@ -1658,7 +1658,7 @@ pub async fn run_interactive(
     // off this loop and apart from the agent. Updates arrive on `view_rx`;
     // the latest model decides locally which keys and commands it owns.
     let (view_tx, mut view_rx) = mpsc::unbounded_channel::<crate::ui::view::ViewUpdate>();
-    let mut view_model = crate::ui::view::start(view_tx);
+    let mut view_model = crate::ui::view::start(view_tx, cfg.view_engine.as_deref());
 
     let (user_tx, mut user_rx) = mpsc::unbounded_channel::<UserEvent>();
     input_reader::spawn_input_reader(user_tx.clone());
