@@ -206,27 +206,17 @@ impl AnyAgent {
         }
 
         let command_hooks = crate::agent::command_hooks::global();
-        let mut prompt = prompt;
-        if let Some(hooks) = &command_hooks {
-            system_prompt = crate::agent::command_hooks::loop_hooks::with_session_context(
-                hooks,
-                system_prompt,
-                self.session_id.as_deref(),
-                !history.is_empty(),
-            );
-            use crate::agent::command_hooks::domain::Submission;
-            match crate::agent::command_hooks::loop_hooks::submitted_prompt(
-                hooks,
-                self.session_id.as_deref(),
-                prompt.text,
-            ) {
-                Submission::Proceed(text) => prompt.text = text,
-                Submission::Blocked(message) => return AgentRunner::refused(message),
-            }
-        }
-        // The session's start and the addon prompt hooks open the run inside
-        // its task, off this thread: they may wait on addon code and MCP.
+        // The session's start, the prompt's hooks and the addon prompt hooks
+        // open the run inside its task, off this thread: they may wait on
+        // addon code and MCP.
         let first_prompt = history.is_empty();
+        let hooks_open_run = command_hooks.clone().and_then(|hooks| {
+            crate::agent::command_hooks::loop_hooks::open_run(
+                hooks,
+                self.session_id.clone(),
+                !first_prompt,
+            )
+        });
         let open_run = crate::agent::session_lifecycle::installed().map(|lifecycle| {
             lifecycle.open_run(crate::agent::session_lifecycle::collect::start_facts(
                 self.session_id.as_deref(),
@@ -240,7 +230,7 @@ impl AnyAgent {
                 .as_ref()
                 .and_then(|addons| addons.open_run(self.session_id.clone(), first_prompt)),
         );
-
+        let open_run = crate::agent::agent_loop::hooks::compose_open_run(hooks_open_run, open_run);
         // Convert rig history → loop messages (Session-side
         // user/assistant/toolResult shapes).
         let loop_history = rig_history_to_loop_messages(history);
@@ -605,19 +595,17 @@ impl AnyAgent {
             None => self.build_stream_fn(tool_defs),
         };
         let command_hooks = crate::agent::command_hooks::global();
-        let system_prompt = match &command_hooks {
-            Some(hooks) => crate::agent::command_hooks::loop_hooks::with_subagent_context(
-                hooks,
-                system_prompt,
-                child_session_id,
-            ),
-            None => system_prompt,
-        };
         let mut cfg = LoopSpawnConfig::minimal(
             retrying_stream_fn(inner_stream_fn, RecoveryPolicy::default()),
             prompt,
         );
         cfg.system_prompt = system_prompt;
+        cfg.open_run = command_hooks.clone().and_then(|hooks| {
+            crate::agent::command_hooks::loop_hooks::subagent_open_run(
+                hooks,
+                child_session_id.to_string(),
+            )
+        });
         cfg.command_hooks = command_hooks.map(|h| {
             crate::agent::command_hooks::HookBinding::subagent(h).with_ask(self.hook_ask_tx.clone())
         });

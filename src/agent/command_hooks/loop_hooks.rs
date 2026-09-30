@@ -12,7 +12,7 @@ use super::{CommandHooks, HookBinding};
 use super::{dialect, policy};
 use crate::agent::agent_loop::hooks::{
     AfterToolCallContext, AfterToolCallFn, BeforeToolCallContext, BeforeToolCallFn,
-    BeforeToolCallReturn, GetFollowupMessagesFn,
+    BeforeToolCallReturn, GetFollowupMessagesFn, OpenRunFn, RunOpening,
 };
 use crate::agent::agent_loop::message::{LoopMessage, UserMessage};
 use crate::agent::agent_loop::result::{AfterToolCallResult, BeforeToolCallResult, LoopToolResult};
@@ -392,6 +392,72 @@ fn append_context(base: String, event: HookEvent, context: Option<String>) -> St
         Some(text) => format!("{base}\n\n{}", system_reminder(event, &text)),
         None => base,
     }
+}
+
+/// The step that runs `SessionStart` and `UserPromptSubmit` as a run of
+/// `session_id` opens, on a blocking thread of the agent runtime, where an
+/// addon entry may reach MCP. `None` when neither event has a hook.
+pub fn open_run(
+    hooks: Arc<CommandHooks>,
+    session_id: Option<String>,
+    resumed: bool,
+) -> Option<OpenRunFn> {
+    if !hooks.has(HookEvent::SessionStart) && !hooks.has(HookEvent::UserPromptSubmit) {
+        return None;
+    }
+    Some(off_the_caller(move |opening| {
+        open_session(&hooks, opening, session_id.as_deref(), resumed)
+    }))
+}
+
+/// The step that runs `SubagentStart` as the child run `agent_id` opens,
+/// off the caller's thread like [`open_run`]. `None` without a hook.
+pub fn subagent_open_run(hooks: Arc<CommandHooks>, agent_id: String) -> Option<OpenRunFn> {
+    if !hooks.has(HookEvent::SubagentStart) {
+        return None;
+    }
+    Some(off_the_caller(move |mut opening: RunOpening| {
+        opening.system_prompt = with_subagent_context(&hooks, opening.system_prompt, &agent_id);
+        opening
+    }))
+}
+
+/// `opening` with the session's start context, and the submitted prompt's
+/// answer: the prompt the model receives, or the refusal of a blocked one.
+fn open_session(
+    hooks: &CommandHooks,
+    mut opening: RunOpening,
+    session_id: Option<&str>,
+    resumed: bool,
+) -> RunOpening {
+    opening.system_prompt = with_session_context(hooks, opening.system_prompt, session_id, resumed);
+    let prompt = std::mem::take(&mut opening.prompt);
+    match submitted_prompt(hooks, session_id, prompt) {
+        Submission::Proceed(text) => opening.prompt = text,
+        Submission::Blocked(message) => opening.refusal = Some(message),
+    }
+    opening
+}
+
+/// An open-run step running `amend` on a blocking thread. Each hook entry
+/// keeps its own timeout; a failed thread opens the run unchanged.
+fn off_the_caller<F>(amend: F) -> OpenRunFn
+where
+    F: Fn(RunOpening) -> RunOpening + Send + Sync + 'static,
+{
+    let amend = Arc::new(amend);
+    Arc::new(move |opening: RunOpening| {
+        let amend = amend.clone();
+        Box::pin(async move {
+            let unchanged = opening.clone();
+            tokio::task::spawn_blocking(move || amend(opening))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(target: "dirge::hooks", error = %e, "start hooks failed, run opened without them");
+                    unchanged
+                })
+        })
+    })
 }
 
 /// Installs a binding's hooks on a loop config, composing with what is
