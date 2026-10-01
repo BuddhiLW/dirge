@@ -185,6 +185,20 @@ pub struct HookReply {
     pub result: Result<Value, String>,
 }
 
+/// The ctx key under which an emit site names the fields its hook reads as
+/// keywords. The host converts them and drops the key before any hook runs;
+/// the fields the host already converts for a hook key apply as well.
+pub const KEYWORD_FIELDS: &str = "dirge/keyword-fields";
+
+/// `ctx` with `fields` declared as keywords for the hook it is emitted to.
+/// A ctx that is not a map is returned as is.
+pub fn with_keyword_fields(mut ctx: Value, fields: &[&str]) -> Value {
+    if let Value::Object(map) = &mut ctx {
+        map.insert(KEYWORD_FIELDS.into(), fields.into());
+    }
+    ctx
+}
+
 /// The folded answer of every addon to `BeforeToolCall`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BeforeOutcome {

@@ -239,18 +239,25 @@
       (failure t))))
 
 (def hook-keyword-fields
-  "Context fields a hook reads as keywords, by hook key. They reach the host
-   as strings."
+  "Context fields a hook reads as keywords, by hook key, whatever the emit
+   site declares. They reach the host as strings."
   {:dirge/session-end [:reason]
    :dirge/event       [:event]})
 
+(def keyword-fields-key
+  "The ctx key under which an emit site names, as a vector of strings, more
+   fields its hook reads as keywords. No hook sees it."
+  :dirge/keyword-fields)
+
 (defn hook-ctx
-  "`ctx` as the hook keyed `k` reads it."
+  "`ctx` as the hook keyed `k` reads it: the fields `hook-keyword-fields`
+   names for `k`, and those the emit site declared, are keywords."
   [k ctx]
   (reduce (fn [c field]
             (cond-> c (string? (get c field)) (update field keyword)))
-          ctx
-          (get hook-keyword-fields k)))
+          (dissoc ctx keyword-fields-key)
+          (concat (get hook-keyword-fields k)
+                  (map keyword (get ctx keyword-fields-key)))))
 
 (defn run-hook
   "Call every loaded addon's `hook-key` hook with `ctx`, in load order:

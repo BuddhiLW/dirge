@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::domain::HookPoint;
+use super::domain::{HookPoint, with_keyword_fields};
 use super::host::AddonHost;
 use crate::agent::session_lifecycle::{
     Budgets, Lifecycle, LifecycleHook, SessionEnd, SessionLifecycle, SessionStart, collect,
@@ -75,11 +75,14 @@ pub fn start_ctx(event: &SessionStart) -> Value {
 
 /// `:dirge/session-end`'s ctx; the host hands `reason` over as a keyword.
 pub fn end_ctx(event: &SessionEnd) -> Value {
-    json!({
-        "session-id": event.session_id,
-        "cwd": event.cwd,
-        "reason": event.reason.key(),
-    })
+    with_keyword_fields(
+        json!({
+            "session-id": event.session_id,
+            "cwd": event.cwd,
+            "reason": event.reason.key(),
+        }),
+        &["reason"],
+    )
 }
 
 /// Make the addon host the session lifecycle of this process.
@@ -131,7 +134,12 @@ mod tests {
         });
         assert_eq!(
             ctx,
-            json!({"session-id": null, "cwd": "/w", "reason": "swap"})
+            json!({
+                "session-id": null,
+                "cwd": "/w",
+                "reason": "swap",
+                "dirge/keyword-fields": ["reason"],
+            })
         );
     }
 
