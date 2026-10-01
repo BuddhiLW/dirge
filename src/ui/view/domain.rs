@@ -103,6 +103,59 @@ pub struct SwarmModel {
     pub selected: Option<GridCell>,
 }
 
+/// A slash command the view owns, as `/help` and completion show it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(from = "ViewCommandWire")]
+pub struct ViewCommand {
+    /// Command name, no slash.
+    pub name: String,
+    /// One line for `/help`.
+    pub summary: String,
+    /// First-argument words completion offers.
+    pub args: Vec<String>,
+}
+
+impl From<&str> for ViewCommand {
+    /// A command known by name only.
+    fn from(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            ..Self::default()
+        }
+    }
+}
+
+/// A view command as an engine writes it: a bare name, or a map.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ViewCommandWire {
+    Name(String),
+    Spec {
+        name: String,
+        #[serde(default)]
+        summary: String,
+        #[serde(default)]
+        args: Vec<String>,
+    },
+}
+
+impl From<ViewCommandWire> for ViewCommand {
+    fn from(wire: ViewCommandWire) -> Self {
+        match wire {
+            ViewCommandWire::Name(name) => name.as_str().into(),
+            ViewCommandWire::Spec {
+                name,
+                summary,
+                args,
+            } => Self {
+                name,
+                summary,
+                args,
+            },
+        }
+    }
+}
+
 /// What the engine publishes after every event.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ViewModel {
@@ -115,10 +168,10 @@ pub struct ViewModel {
     /// Keys claimed by the focused panel (published by the reducer).
     #[serde(default)]
     pub panel_keys: Vec<String>,
-    /// Slash command names (no slash) the view owns, sorted. They run
+    /// The slash commands the view owns, sorted by name. They run
     /// whether or not the agent is busy.
     #[serde(default)]
-    pub view_commands: Vec<String>,
+    pub view_commands: Vec<ViewCommand>,
     /// The engine owns the external panels: panel-feed ops come to it
     /// as [`ViewEvent::Feed`] and it answers with `paint`/`unpaint`.
     /// When false the UI applies feed ops itself.
@@ -132,7 +185,12 @@ impl ViewModel {
     }
 
     pub fn owns_command(&self, name: &str) -> bool {
-        self.view_commands.iter().any(|c| c == name)
+        self.view_commands.iter().any(|c| c.name == name)
+    }
+
+    /// The names of the view commands, in model order.
+    pub fn command_names(&self) -> Vec<&str> {
+        self.view_commands.iter().map(|c| c.name.as_str()).collect()
     }
 
     pub fn panel_consumes(&self, key: &str) -> bool {

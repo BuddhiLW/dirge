@@ -730,7 +730,7 @@ pub async fn handle_slash(
         "/tree" => cmd::tree::cmd_tree(&mut ctx, &parts).await?,
         "/fork" => cmd::fork::cmd_fork(&mut ctx, &parts).await?,
         "/clone" => cmd::clone::cmd_clone(&mut ctx, &parts).await?,
-        "/panel" | "/display" | "/swarm" => cmd::view::cmd_view(&parts),
+        name if is_view_command(name) => cmd::view::cmd_view(&parts),
         "/btw" => return cmd::btw::cmd_btw(&mut ctx, &parts).await,
         "/learn" => return cmd::learn::cmd_learn(&mut ctx, &parts).await,
         "/code-review" => cmd::code_review::cmd_code_review(&mut ctx).await?,
@@ -878,7 +878,6 @@ fn slash_commands() -> Vec<(&'static str, &'static str)> {
             "summarize and compact the conversation (alias of /compress)",
         ),
         ("/compress", "summarize and compact the conversation"),
-        ("/display", "choose which panes (left/main/right) to show"),
         #[cfg(unix)]
         ("/edit", "open the input buffer in $EDITOR"),
         (
@@ -908,10 +907,6 @@ fn slash_commands() -> Vec<(&'static str, &'static str)> {
         ),
         ("/mode", "view or set the permission/security mode"),
         ("/model", "list configured models, or switch to one"),
-        (
-            "/panel",
-            "toggle the side panels; next|prev|refresh|focus <id>|unfocus drive an external panel",
-        ),
         ("/plan", "run the phased plan workflow on a request"),
         ("/plugins", "list or load plugins"),
         ("/prompt", "list, switch, or reset the active prompt layer"),
@@ -929,10 +924,6 @@ fn slash_commands() -> Vec<(&'static str, &'static str)> {
         ),
         ("/sessions", "list, switch, or delete saved sessions"),
         ("/spec", "inspect the spec-driven workflow tracker"),
-        (
-            "/swarm",
-            "open or close the full-screen grid of external panels (Alt+S)",
-        ),
         ("/tasks", "list subagent chats and background shells"),
         ("/toggle", "turn a feature (e.g. todo tools) on or off"),
         ("/tree", "show the conversation tree, or switch to a branch"),
@@ -977,18 +968,38 @@ pub fn slash_command_names() -> Vec<&'static str> {
     slash_commands().into_iter().map(|(name, _)| name).collect()
 }
 
-/// `(name, description)` pairs for the `/help` render.
-pub fn slash_command_descriptions() -> Vec<(&'static str, &'static str)> {
-    slash_commands()
+/// `(name, description)` pairs for the `/help` render: the built-ins
+/// and the commands the view owns, sorted by name.
+pub fn slash_command_descriptions() -> Vec<(String, String)> {
+    descriptions_with(&crate::ui::view::commands())
+}
+
+/// The built-in rows plus one per `view` command, sorted by name.
+fn descriptions_with(view: &[crate::ui::view::ViewCommand]) -> Vec<(String, String)> {
+    let builtins = slash_commands()
+        .into_iter()
+        .map(|(n, d)| (n.to_string(), d.to_string()));
+    let owned = view
+        .iter()
+        .map(|c| (format!("/{}", c.name), c.summary.clone()));
+    let mut rows: Vec<(String, String)> = builtins.chain(owned).collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+/// True when `name` (with leading `/`) is a command the view owns.
+pub fn is_view_command(name: &str) -> bool {
+    name.strip_prefix('/')
+        .is_some_and(|n| crate::ui::view::command(n).is_some())
 }
 
 /// Returns true if `name` (with leading `/`) is a built-in slash
-/// command. Used by `handle_slash`'s default arm to distinguish
-/// "command name we should have dispatched but didn't" (internal
-/// error) from "command name we don't know about" (plugin fallback /
-/// unknown).
+/// command or one the view owns. Used by `handle_slash`'s default arm
+/// to distinguish "command name we should have dispatched but didn't"
+/// (internal error) from "command name we don't know about" (plugin
+/// fallback / unknown).
 pub fn is_known_slash_command(name: &str) -> bool {
-    slash_command_names().contains(&name)
+    slash_command_names().contains(&name) || is_view_command(name)
 }
 
 #[cfg(test)]
@@ -1401,7 +1412,6 @@ mod tests {
             "/clone",
             "/compact",
             "/compress",
-            "/display",
             "/effort",
             "/fork",
             "/graph",
@@ -1410,7 +1420,6 @@ mod tests {
             "/memory",
             "/mode",
             "/model",
-            "/panel",
             "/plan",
             "/plugins",
             "/prompt",
@@ -1419,7 +1428,6 @@ mod tests {
             "/regen-prompts",
             "/retry",
             "/sessions",
-            "/swarm",
             "/tasks",
             "/toggle",
             "/tree",
@@ -1451,6 +1459,44 @@ mod tests {
             total,
             "duplicate command name in slash_commands()",
         );
+    }
+
+    /// A command the view publishes gets a `/help` row from the view
+    /// model alone, sorted in among the built-ins.
+    #[test]
+    fn a_published_view_command_gets_a_help_row() {
+        let lens = crate::ui::view::ViewCommand {
+            name: "lens".into(),
+            summary: "open the lens".into(),
+            args: vec!["on".into()],
+        };
+        let rows = descriptions_with(&[lens]);
+        let row = ("/lens".to_string(), "open the lens".to_string());
+        assert!(rows.contains(&row));
+        let names: Vec<&str> = rows.iter().map(|(n, _)| n.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted);
+        assert_eq!(rows.len(), slash_commands().len() + 1);
+    }
+
+    /// `/swarm`, `/panel` and `/display` have no static row: `/help`,
+    /// dispatch and the reserved names read them off the view model.
+    #[test]
+    fn view_commands_come_from_the_view_model() {
+        let view = crate::ui::view::commands();
+        let names: Vec<&str> = view.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["display", "panel", "swarm"]);
+        let help = slash_command_descriptions();
+        for c in &view {
+            let slash = format!("/{}", c.name);
+            assert!(!slash_command_names().contains(&slash.as_str()), "{slash}");
+            assert!(is_known_slash_command(&slash), "{slash}");
+            assert!(is_view_command(&slash), "{slash}");
+            assert!(help.iter().any(|(n, d)| *n == slash && *d == c.summary));
+        }
+        assert!(!is_view_command("/help"));
+        assert!(!is_view_command("swarm"));
     }
 
     /// `/swarm` is dispatched, listed in `/help` and parses its argument

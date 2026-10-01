@@ -33,10 +33,11 @@ pub(crate) mod wire;
 #[cfg(test)]
 pub(crate) mod tests;
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
-pub(crate) use domain::{ViewEvent, ViewModel, ViewUpdate};
+use crate::sync_util::LockExt;
+pub(crate) use domain::{ViewCommand, ViewEvent, ViewModel, ViewUpdate};
 use engine::ThreadEngine;
 use native::NativeReducer;
 use port::{UpdateSink, ViewEngine};
@@ -103,7 +104,7 @@ pub fn start(sink: UpdateSink) -> ViewModel {
                 submit(crate::extras::panel_feed::producer_event_now());
                 // The feed may deliver its first SSE event immediately on
                 // subscription; publish ownership before starting that task.
-                set_owns_feed(model.owns_feed);
+                publish(&model);
                 return model;
             }
             Err(error) => {
@@ -128,9 +129,32 @@ pub fn submit(event: ViewEvent) {
 /// so it is a flag, not the model.
 static OWNS_FEED: AtomicBool = AtomicBool::new(false);
 
-/// Set from every applied update (see `boundary::apply`).
-pub(crate) fn set_owns_feed(owns: bool) {
-    OWNS_FEED.store(owns, Ordering::Relaxed);
+/// The view commands the running engine last published; `None` before
+/// any engine has.
+static COMMANDS: Mutex<Option<Vec<ViewCommand>>> = Mutex::new(None);
+
+/// Record what `model` says the view owns: from the initial model and
+/// every applied update (see `boundary::apply`).
+pub(crate) fn publish(model: &ViewModel) {
+    OWNS_FEED.store(model.owns_feed, Ordering::Relaxed);
+    let mut commands = COMMANDS.lock_ignore_poison();
+    if commands.as_ref() != Some(&model.view_commands) {
+        *commands = Some(model.view_commands.clone());
+    }
+}
+
+/// The slash commands the view owns, for `/help`, completion and
+/// dispatch: the running engine's, else the native reducer's.
+pub fn commands() -> Vec<ViewCommand> {
+    match COMMANDS.lock_ignore_poison().as_ref() {
+        Some(commands) => commands.clone(),
+        None => NativeReducer::default().model().view_commands,
+    }
+}
+
+/// The view command named `name` (no slash), if the view owns one.
+pub fn command(name: &str) -> Option<ViewCommand> {
+    commands().into_iter().find(|c| c.name == name)
 }
 
 /// True when panel-feed ops should go to the engine as
