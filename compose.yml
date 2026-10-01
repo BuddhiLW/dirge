@@ -91,6 +91,8 @@ services:
     volumes:
       - ${DIRGE_BIN:-./target/debug/dirge}:/usr/local/bin/dirge:ro
       - ./plugins/vigil_lev.janet:/work/.dirge/plugins/vigil_lev.janet:ro
+      - ./plugins/lev_classify.janet:/work/.dirge/plugins/lev_classify.janet:ro
+      - ./plugins/vigil_fire.janet:/work/.dirge/plugins/vigil_fire.janet:ro
       - ./compose/vigils:/work/compose/vigils:ro
     depends_on:
       lev:

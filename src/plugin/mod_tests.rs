@@ -736,7 +736,7 @@ fn on_vigil_observance_hook_drains_toil_for_act() {
 /// `on-vigil-outcome` classifies a finished observance via `harness/outcome`;
 /// the host drains the JSON `{"label":...,"useful":...}` slot to persist the
 /// (signal, outcome) pair feeding the empirical prior.
-#[cfg(feature = "plugin")]
+#[cfg(feature = "vigil")]
 #[test]
 fn on_vigil_outcome_hook_captures_outcome_slot() {
     let mut mgr = PluginManager::try_new().unwrap();
@@ -761,7 +761,7 @@ fn on_vigil_outcome_hook_captures_outcome_slot() {
 /// `on-vigil-rite` reports an oracle confidence via `harness/verdict`; the
 /// host drains the JSON `{"p":0.0..1.0}` slot and compares it to the vigil's
 /// wake threshold, so the plugin never bakes in its own magic number.
-#[cfg(feature = "plugin")]
+#[cfg(feature = "vigil")]
 #[test]
 fn on_vigil_rite_hook_captures_verdict_slot() {
     let mut mgr = PluginManager::try_new().unwrap();
