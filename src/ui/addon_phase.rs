@@ -33,6 +33,9 @@ use crate::provider::AnyAgent;
 #[cfg_attr(not(feature = "addons"), allow(dead_code))]
 pub(crate) struct AddonPhaseHandle {
     pub core: PhaseHandle<AddonDone>,
+    /// The job started on an idle loop and holds its busy state. A job the
+    /// busy gate admitted beside a turn does not.
+    pub owns_busy: bool,
 }
 
 /// Never constructed: no job runs without the `addons` feature.
@@ -107,9 +110,9 @@ impl AddonDone {
 }
 
 /// Start `job` on a blocking thread. Returns at once; the result arrives on
-/// the handle's channel.
+/// the handle's channel. `owns_busy` says the loop was idle when it started.
 #[cfg(feature = "addons")]
-pub(crate) fn spawn(job: AddonJob) -> AddonPhaseHandle {
+pub(crate) fn spawn(job: AddonJob, owns_busy: bool) -> AddonPhaseHandle {
     let name = job.command_name();
     let core = PhaseHandle::spawn(1, move |tx| async move {
         let done = tokio::task::spawn_blocking(move || job.run())
@@ -117,7 +120,7 @@ pub(crate) fn spawn(job: AddonJob) -> AddonPhaseHandle {
             .unwrap_or_else(|e| AddonDone::died(name, format!("addon task failed: {e}")));
         let _ = tx.send(done).await;
     });
-    AddonPhaseHandle { core }
+    AddonPhaseHandle { core, owns_busy }
 }
 
 /// How a chat line is colored.
@@ -418,6 +421,7 @@ mod tests {
             addon_id: "a".into(),
             name: name.into(),
             description: String::new(),
+            class: Default::default(),
         }
     }
 
@@ -432,11 +436,14 @@ mod tests {
             Vec::new(),
             Vec::new(),
         ));
-        let mut phase = spawn(AddonJob::Command {
-            host,
-            command: command("ls"),
-            args: "src".into(),
-        });
+        let mut phase = spawn(
+            AddonJob::Command {
+                host,
+                command: command("ls"),
+                args: "src".into(),
+            },
+            true,
+        );
 
         let ask = tokio::time::timeout(Duration::from_secs(10), ask_rx.recv())
             .await

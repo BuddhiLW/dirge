@@ -9,7 +9,7 @@ use ratatui::style::{Color as RColor, Style};
 use ratatui::widgets::{Clear, Widget};
 
 use crate::ui::panels_ext::ExternalPanels;
-use crate::ui::swarm::{GRID_HINT, SwarmAgent, SwarmView, grid_geometry, swarm_cells};
+use crate::ui::swarm::{SwarmAgent, SwarmView, grid_geometry, swarm_cells};
 
 use super::chat::crossterm_to_ratatui;
 use super::panels::{SubPanel, ellipsize_width, panel_row, subagent_preview_line};
@@ -78,7 +78,7 @@ impl<'a> Widget for SwarmGrid<'a> {
             count.push_str(" · ");
             count.push_str(&plural(self.agents.len(), "subagent", "subagents"));
         }
-        let header = format!(" SWARM · {count} · {GRID_HINT}");
+        let header = format!(" SWARM · {count} · {}", self.view.hint());
         buf.set_stringn(
             area.x,
             area.y,
@@ -362,6 +362,24 @@ mod tests {
         assert!(
             text.contains("subagent") && text.contains("zzz999 3/3"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn header_lists_the_keys_the_producer_binds() {
+        let mut s = ExternalPanels::default();
+        show(&mut s, "a", "Alpha", &["x"]);
+        let open = crate::ui::view::domain::ProducerKey {
+            key: "Enter".into(),
+            verb: "open".into(),
+            invoke: true,
+        };
+        let v = SwarmView::selecting(None).binding(&[open]);
+        let header = &paint(&s, &v, 120, 6)[0];
+        assert!(header.contains("Enter open ·"), "{header}");
+        assert!(
+            !header.contains("Tab") && !header.contains("refresh"),
+            "{header}"
         );
     }
 }

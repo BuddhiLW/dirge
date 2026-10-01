@@ -702,6 +702,7 @@ pub(crate) mod tests {
             addon_id: "a".into(),
             name: "go".into(),
             description: String::new(),
+            class: Default::default(),
         }];
         let (host, rt) = host(
             ScriptedRuntime {
@@ -734,6 +735,7 @@ pub(crate) mod tests {
                 addon_id: "a".into(),
                 name: n.to_string(),
                 description: String::new(),
+                class: Default::default(),
             })
             .collect();
         let (host, _) = host(ScriptedRuntime::default(), vec![a]);

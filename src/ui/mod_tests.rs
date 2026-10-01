@@ -908,11 +908,28 @@ fn the_cwd_scan_can_actually_see_a_call() {
 }
 
 #[test]
-fn memory_skill_list_safe_during_agent() {
+fn memory_list_safe_during_agent() {
     assert!(is_safe_during_agent("/memory list"));
-    assert!(is_safe_during_agent("/skill list"));
     assert!(!is_safe_during_agent("/memory add key value"));
+}
+
+/// `/skill` is not a dirge command (no built-in, and an addon or plugin
+/// that registers one declares its own class), so the gate treats it as it
+/// treats every unknown command: mutating.
+#[test]
+fn a_command_nothing_registered_is_gated() {
+    assert!(!is_safe_during_agent("/skill list"));
     assert!(!is_safe_during_agent("/skill load foo"));
+    assert!(!is_safe_during_agent("/no-such-command"));
+}
+
+#[test]
+fn the_busy_notice_names_the_commands_that_run_mid_turn() {
+    let notice = busy_notice();
+    for name in ["/help", "/mode", "/sessions", "/tasks", "/quit"] {
+        assert!(notice.contains(name), "{name} missing from {notice:?}");
+    }
+    assert!(!notice.contains("/cd"), "{notice:?}");
 }
 
 // ============================================================

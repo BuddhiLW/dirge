@@ -287,6 +287,7 @@ The `:dirge/commands` entry of the hooks map registers slash commands:
 ```clojure
 {:dirge/commands
  {"rows" {:description "Count rows in the side panel"
+          :class       :read-only
           :handler     (fn [{:keys [args argv cwd]}] ...)}}}
 ```
 
@@ -297,6 +298,20 @@ It returns `nil`, a string, or a map:
 |---|---|
 | `:text` or `:markdown` | shown in the chat area |
 | `:prompt` | submitted as the next prompt, starting a turn |
+
+`:class` tells dirge whether the command may run while an agent turn is in
+flight:
+
+| `:class` | Meaning | While a turn runs |
+|---|---|---|
+| `:view` | changes only what is shown, or a setting the turn reads live | runs |
+| `:read-only` | reads state and shows it, changes nothing | runs |
+| `:mutating` | changes conversation, agent or working-directory state | refused |
+
+A command without `:class`, or with any other value, is `:mutating`. Built-in
+commands declare their class the same way. A command admitted mid-turn runs
+beside it: a `:prompt` it returns is queued behind the turn instead of
+starting one, and only one addon command runs at a time.
 
 Command names are 1 to 32 characters of `[a-z0-9_:-]` starting with a letter.
 Built-in commands and Janet plugin commands take precedence; between addons

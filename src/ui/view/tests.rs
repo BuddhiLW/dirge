@@ -180,6 +180,17 @@ pub(crate) fn custom_producer() -> ViewEvent {
 fn a_producer_binds_its_own_keys_and_verbs() {
     let mut r = NativeReducer::default();
     let u = run(&mut r, custom_producer());
+    let bound: Vec<&str> = u
+        .model
+        .producer_keys
+        .iter()
+        .map(|k| k.key.as_str())
+        .collect();
+    assert_eq!(
+        bound,
+        ["Enter", "o", "p"],
+        "the model publishes what is bound"
+    );
     assert!(u.model.grid_consumes("p") && u.model.grid_consumes("o"));
     assert!(!u.model.grid_consumes("Tab"), "next-tab is not advertised");
     assert!(
@@ -440,4 +451,28 @@ fn a_wanted_engine_goes_first() {
     assert_eq!(names(preferred(all.clone(), Some("b"))), ["b", "a"]);
     assert_eq!(names(preferred(all.clone(), Some("zzz"))), ["a", "b"]);
     assert_eq!(names(preferred(all, None)), ["a", "b"]);
+}
+
+#[test]
+fn the_env_var_wins_over_the_config_key() {
+    let env = |s: &str| Some(s.to_string());
+    assert_eq!(
+        wanted_engine(env("native"), Some("cljrs")).as_deref(),
+        Some("native")
+    );
+    assert_eq!(wanted_engine(None, Some("cljrs")).as_deref(), Some("cljrs"));
+    assert_eq!(
+        wanted_engine(env("  "), Some(" native ")).as_deref(),
+        Some("native")
+    );
+    assert_eq!(wanted_engine(None, Some("")), None);
+    assert_eq!(wanted_engine(None, None), None);
+}
+
+#[test]
+fn an_unknown_engine_name_is_reported() {
+    let all = engines();
+    assert_eq!(unknown(&all, Some("zzz")), Some("zzz"));
+    assert_eq!(unknown(&all, Some("native")), None);
+    assert_eq!(unknown(&all, None), None);
 }

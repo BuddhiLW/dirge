@@ -6,6 +6,7 @@ mod auth;
 /// stdio child processes and bash subtrees.
 mod child_guard;
 mod cli;
+mod command_class;
 mod compression;
 mod config;
 mod context;

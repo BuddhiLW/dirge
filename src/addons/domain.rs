@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::command_class::CommandClass;
+
 /// A dirge hook point an addon may contribute to through its IAddon `hooks`
 /// map. The set is closed: an addon keyed on anything else is ignored by
 /// dirge, which is what lets one addon carry hooks for several hosts.
@@ -109,7 +111,7 @@ impl ToolSpec {
 
 /// One slash command an addon contributes, listed under the `:dirge/commands`
 /// key of its `hooks` map:
-/// `{:dirge/commands {"name" {:description "..." :handler (fn [ctx] ...)}}}`.
+/// `{:dirge/commands {"name" {:description "..." :class :read-only :handler (fn [ctx] ...)}}}`.
 /// The handler gets `{:args "rest of the line" :argv [...] :cwd ...}` and
 /// answers nil, a string, or a map read as a [`CommandOutput`].
 #[derive(Debug, Clone, PartialEq)]
@@ -118,6 +120,9 @@ pub struct CommandSpec {
     /// The name typed after `/`.
     pub name: String,
     pub description: String,
+    /// Whether it may run while a turn is in flight; mutating when the
+    /// addon declares none.
+    pub class: CommandClass,
 }
 
 /// What an addon command asked dirge to do with its answer.
