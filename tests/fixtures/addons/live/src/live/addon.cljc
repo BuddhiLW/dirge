@@ -66,7 +66,10 @@
                                      {:thinking "high"
                                       :context  (str (count tool-results) " tool results")})
      :dirge/should-stop-after-turn (fn [{:keys [text]}]
-                                     {:stop (when (= text "done") "said done")})})
+                                     {:stop (when (= text "done") "said done")})
+     :dirge.hook/Notification
+     (fn [{:keys [message]}]
+       {:hookSpecificOutput {:additionalContext (str "live heard " message)}})})
   (health [_]
     {:status :ok}))
 

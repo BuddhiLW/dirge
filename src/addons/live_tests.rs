@@ -115,6 +115,26 @@ fn open_hook_keys_reach_addons_by_name() {
     assert!(host.emit("acme/other", &json!({})).is_empty());
 }
 
+/// A command-hook event dirge has no variant for reaches the addon that
+/// registered `:dirge.hook/<Event>`, and its answer reads as a command's.
+#[test]
+fn an_open_command_hook_event_reaches_the_addon_keyed_on_it() {
+    use crate::agent::command_hooks::domain::HookEvent;
+    use crate::agent::command_hooks::policy;
+
+    let host = live_host(IsolateOptions::default());
+    let event = HookEvent::named("Notification");
+    let payload = json!({"hook_event_name": "Notification", "message": "idle"});
+
+    let answers = super::command_hooks::answers(&host, event.as_str(), &payload);
+
+    assert_eq!(answers.len(), 1, "{answers:?}");
+    let exited = answers[0].clone().expect("the addon answers");
+    let outcome = policy::interpret(event, exited).expect("a verdict");
+    assert_eq!(outcome.context, vec!["live heard idle".to_string()]);
+    assert!(super::command_hooks::answers(&host, "PreCompact", &json!({})).is_empty());
+}
+
 #[test]
 fn compaction_hooks_reach_a_running_addon() {
     use super::domain::HookPoint;

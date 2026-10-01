@@ -823,6 +823,10 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
             cfg.session_id.clone(),
         );
     }
+    crate::agent::command_hooks::loop_hooks::install_pre_compact(
+        &mut loop_config,
+        cfg.session_id.clone(),
+    );
 
     if let Some(addons) = &cfg.addon_hooks {
         addons.install_tool_hooks(&mut loop_config);

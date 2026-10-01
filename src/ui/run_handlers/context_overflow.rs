@@ -121,6 +121,7 @@ pub(crate) async fn handle_context_overflow(
     match crate::ui::slash::prepare_compaction(
         None,
         false, // forced: auto-compaction stays threshold-gated [dirge-fgtj]
+        crate::agent::command_hooks::CompactTrigger::Auto,
         agent,
         client,
         ctx.renderer,

@@ -66,11 +66,17 @@ pub fn global() -> Option<Arc<AddonHost>> {
 /// thread, and addon code must not wait on the loop while it waits.
 pub fn install_from_config(cfg: &crate::config::Config) {
     cljrs::isolate::mark_event_loop_thread();
-    // `type: "addon"` command hooks reach whatever host runs at call time,
-    // this one or the one a later `/addons reload` starts.
-    crate::agent::command_hooks::boundary::install_addon_runner(Arc::new(
-        command_hooks::LiveAddonHookRunner,
-    ));
+    // `type: "addon"` command hooks and the command-hook events dirge does
+    // not fire itself reach whatever host runs at call time, this one or
+    // the one a later `/addons reload` starts.
+    crate::agent::command_hooks::boundary::install_runner(
+        "addon",
+        Arc::new(command_hooks::LiveAddonHookRunner),
+    );
+    crate::agent::command_hooks::boundary::install_listener(
+        "addons",
+        Arc::new(command_hooks::LiveAddonHookListener),
+    );
     let settings = cfg.addons.clone().unwrap_or_default();
     if settings.enabled == Some(false) {
         return;

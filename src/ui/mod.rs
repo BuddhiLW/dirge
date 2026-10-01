@@ -3134,6 +3134,7 @@ pub async fn run_interactive(
                                                 match crate::ui::slash::prepare_compaction(
                                                     instructions.as_deref(),
                                                     true,
+                                                    crate::agent::command_hooks::CompactTrigger::Manual,
                                                     &agent, &client, &mut renderer, session, cfg,
                                                 ) {
                                                     Ok(crate::ui::slash::CompactionDecision::Ready(req)) => {
