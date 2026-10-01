@@ -105,41 +105,17 @@ pub fn face_of(name: Option<&str>) -> PanelFace {
     }
 }
 
-/// hive-vessel's `:json` dialect, the first panel-feed producer, onto the
-/// neutral op names. The only place its vocabulary lives: delete an entry
-/// once no producer sends it.
-const OP_ALIASES: &[(&str, &str)] = &[
-    ("ui/show-panel", "show"),
-    ("ui/close-panel", "close"),
-    ("ui/focus-tab", "focus"),
-    ("ui/append-tab", "append"),
-    ("ui/notify", "notify"),
-    ("ui/open-file", "open-file"),
-];
-
-/// One op in the neutral vocabulary (pure): an aliased `op` renamed, a
-/// `panel/id` moved to `id` (it wins over one already there, as it always
-/// has), and a `doc`'s title lifted to `title` when there is none.
+/// One op as the view engines read it (pure): one with no `title` takes
+/// its `doc`'s title when that is a string.
 pub fn normalize(mut value: Value) -> Value {
     let Some(obj) = value.as_object_mut() else {
         return value;
     };
-    let neutral = obj
-        .get("op")
-        .and_then(Value::as_str)
-        .and_then(|op| OP_ALIASES.iter().find(|(alias, _)| *alias == op))
-        .map(|(_, name)| *name);
-    if let Some(name) = neutral {
-        obj.insert("op".into(), name.into());
-    }
-    if let Some(id) = obj.remove("panel/id") {
-        obj.insert("id".into(), id);
-    }
     if !obj.contains_key("title") {
         let doc_title = obj
             .get("doc")
             .and_then(Value::as_object)
-            .and_then(|d| d.get("doc/title").or_else(|| d.get("title")))
+            .and_then(|d| d.get("title"))
             .filter(|t| t.is_string())
             .cloned();
         if let Some(title) = doc_title {
@@ -288,7 +264,7 @@ fn loop_directive(op: &str, obj: &Map<String, Value>) -> Result<FeedEffect, Skip
 }
 
 /// Decode one event's `data`. The event type is not consulted: every
-/// op names itself in its `op` field, neutral or aliased ([`normalize`]).
+/// op names itself in its `op` field ([`normalize`]d first).
 pub fn decode(data: &str) -> Result<FeedEffect, Skip> {
     let value: Value = serde_json::from_str(data).map_err(|_| Skip::NotAnObject)?;
     let value = normalize(value);
@@ -460,8 +436,8 @@ pub(crate) mod tests {
 
     #[test]
     fn show_panel_with_rendered_lines() {
-        let data = r#"{"op":"ui/show-panel","panel/id":"feed/main",
-            "doc":{"doc/title":"Workers","doc/blocks":[]},
+        let data = r#"{"op":"show","id":"feed/main",
+            "doc":{"title":"Workers","blocks":[]},
             "lines":[{"text":"Workers","face":"title"},{"text":"","face":"plain"},
                      {"text":"a  running","face":"success"},
                      {"text":"b  failed","face":"error"},
@@ -482,7 +458,7 @@ pub(crate) mod tests {
 
     #[test]
     fn show_panel_title_and_multiline_text() {
-        let data = r#"{"op":"ui/show-panel","id":"p","title":"T",
+        let data = r#"{"op":"show","id":"p","title":"T",
             "lines":[{"text":"one\ntwo","face":"warn"},"bare"]}"#;
         assert_eq!(
             decode(data),
@@ -500,7 +476,7 @@ pub(crate) mod tests {
 
     #[test]
     fn show_panel_without_title_uses_id() {
-        let data = r#"{"op":"ui/show-panel","panel/id":"p","lines":[]}"#;
+        let data = r#"{"op":"show","id":"p","lines":[]}"#;
         let Ok(FeedEffect::Panel(PanelOp::Show { title, lines, .. })) = decode(data) else {
             panic!("show expected");
         };
@@ -511,39 +487,39 @@ pub(crate) mod tests {
     #[test]
     fn close_focus_append_notify() {
         assert_eq!(
-            decode(r#"{"op":"ui/close-panel","panel/id":"p"}"#),
+            decode(r#"{"op":"close","id":"p"}"#),
             Ok(FeedEffect::Panel(PanelOp::Close { id: "p".into() }))
         );
         assert_eq!(
-            decode(r#"{"op":"ui/focus-tab","panel/id":"t","title":"Tab"}"#),
+            decode(r#"{"op":"focus","id":"t","title":"Tab"}"#),
             Ok(FeedEffect::Panel(PanelOp::FocusTab {
                 id: "t".into(),
                 title: "Tab".into()
             }))
         );
         assert_eq!(
-            decode(r#"{"op":"ui/append-tab","panel/id":"t","line":{"text":"x","face":"dim"}}"#),
+            decode(r#"{"op":"append","id":"t","line":{"text":"x","face":"dim"}}"#),
             Ok(FeedEffect::Panel(PanelOp::AppendTab {
                 id: "t".into(),
                 line: line("x", PanelFace::Dim)
             }))
         );
         assert_eq!(
-            decode(r#"{"op":"ui/append-tab","panel/id":"t","text":"y","face":"added"}"#),
+            decode(r#"{"op":"append","id":"t","text":"y","face":"added"}"#),
             Ok(FeedEffect::Panel(PanelOp::AppendTab {
                 id: "t".into(),
                 line: line("y", PanelFace::Success)
             }))
         );
         assert_eq!(
-            decode(r#"{"op":"ui/notify","message":"hi","level":"warn"}"#),
+            decode(r#"{"op":"notify","message":"hi","level":"warn"}"#),
             Ok(FeedEffect::Notify {
                 level: NotifyLevel::Warn,
                 message: "hi".into()
             })
         );
         assert_eq!(
-            decode(r#"{"op":"ui/notify","message":"hi"}"#),
+            decode(r#"{"op":"notify","message":"hi"}"#),
             Ok(FeedEffect::Notify {
                 level: NotifyLevel::Info,
                 message: "hi".into()
@@ -554,7 +530,7 @@ pub(crate) mod tests {
     #[test]
     fn unknown_and_malformed_ops_are_skipped() {
         assert_eq!(
-            decode(r#"{"op":"ui/open-file","file":"x"}"#),
+            decode(r#"{"op":"open-file","file":"x"}"#),
             Err(Skip::UnknownOp("open-file".into())),
             "open-file belongs to the view engine, not the panel decoder"
         );
@@ -562,14 +538,14 @@ pub(crate) mod tests {
         assert_eq!(decode("[1]"), Err(Skip::NotAnObject));
         assert_eq!(decode(r#"{"x":1}"#), Err(Skip::NoOp));
         assert_eq!(
-            decode(r#"{"op":"ui/close-panel","panel/id":"  "}"#),
+            decode(r#"{"op":"close","id":"  "}"#),
             Err(Skip::Missing {
                 op: "close",
                 field: "id"
             })
         );
         assert!(matches!(
-            decode(r#"{"op":"ui/append-tab","panel/id":"t"}"#),
+            decode(r#"{"op":"append","id":"t"}"#),
             Err(Skip::Missing { field: "line", .. })
         ));
     }
@@ -577,11 +553,8 @@ pub(crate) mod tests {
     #[test]
     fn route_records_effects_and_reports_touched_panels() {
         let sink = RecordingSink::default();
-        assert_eq!(
-            route(r#"{"op":"ui/show-panel","panel/id":"a"}"#, &sink),
-            Some("a".into())
-        );
-        assert_eq!(route(r#"{"op":"ui/notify","message":"m"}"#, &sink), None);
+        assert_eq!(route(r#"{"op":"show","id":"a"}"#, &sink), Some("a".into()));
+        assert_eq!(route(r#"{"op":"notify","message":"m"}"#, &sink), None);
         assert_eq!(route(r#"{"op":"json/event","event":"e"}"#, &sink), None);
         let got = sink.take();
         assert_eq!(got.len(), 2, "unknown op produced no effect: {got:?}");
@@ -606,51 +579,39 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_hive_vessel_dialect_decodes_like_the_neutral_ops() {
-        let pairs = [
-            (
-                r#"{"op":"ui/show-panel","panel/id":"p","doc":{"doc/title":"T"},"lines":["a"]}"#,
-                r#"{"op":"show","id":"p","title":"T","lines":["a"]}"#,
-            ),
-            (
-                r#"{"op":"ui/close-panel","panel/id":"p"}"#,
-                r#"{"op":"close","id":"p"}"#,
-            ),
-            (
-                r#"{"op":"ui/focus-tab","panel/id":"t","title":"Tab"}"#,
-                r#"{"op":"focus","id":"t","title":"Tab"}"#,
-            ),
-            (
-                r#"{"op":"ui/append-tab","panel/id":"t","text":"x"}"#,
-                r#"{"op":"append","id":"t","text":"x"}"#,
-            ),
-            (
-                r#"{"op":"ui/notify","message":"m"}"#,
-                r#"{"op":"notify","message":"m"}"#,
-            ),
-        ];
-        for (aliased, neutral) in pairs {
-            assert_eq!(decode(aliased), decode(neutral), "{aliased}");
-            assert!(decode(neutral).is_ok(), "{neutral}");
+    fn the_retired_hive_vessel_names_are_unknown_ops() {
+        for op in [
+            "ui/show-panel",
+            "ui/close-panel",
+            "ui/focus-tab",
+            "ui/append-tab",
+            "ui/notify",
+        ] {
+            let data = format!(r#"{{"op":"{op}","id":"p","message":"m","text":"x"}}"#);
+            assert_eq!(decode(&data), Err(Skip::UnknownOp(op.into())), "{op}");
         }
+        assert!(
+            decode(r#"{"op":"close","panel/id":"p"}"#).is_err(),
+            "panel/id is no longer read as id"
+        );
     }
 
     #[test]
-    fn normalize_renames_aliases_and_keeps_everything_else() {
+    fn normalize_lifts_the_doc_title_and_keeps_everything_else() {
         use serde_json::json;
         assert_eq!(
-            normalize(json!({"op": "ui/open-file", "path": "a"})),
-            json!({"op": "open-file", "path": "a"})
+            normalize(json!({"op": "show", "id": "p", "doc": {"title": "D"}})),
+            json!({"op": "show", "id": "p", "title": "D", "doc": {"title": "D"}})
         );
         assert_eq!(
-            normalize(json!({"op": "x", "panel/id": "p", "id": "q"})),
-            json!({"op": "x", "id": "p"}),
-            "panel/id wins over id"
-        );
-        assert_eq!(
-            normalize(json!({"op": "show", "title": "T", "doc": {"doc/title": "D"}})),
-            json!({"op": "show", "title": "T", "doc": {"doc/title": "D"}}),
+            normalize(json!({"op": "show", "title": "T", "doc": {"title": "D"}})),
+            json!({"op": "show", "title": "T", "doc": {"title": "D"}}),
             "an explicit title is kept"
+        );
+        assert_eq!(
+            normalize(json!({"op": "ui/open-file", "panel/id": "p"})),
+            json!({"op": "ui/open-file", "panel/id": "p"}),
+            "no names are rewritten"
         );
         assert_eq!(normalize(json!([1])), json!([1]));
     }

@@ -134,7 +134,7 @@ async fn serve(listener: TcpListener, seen: mpsc::UnboundedSender<Seen>) {
             // the socket boundary.
             let frames = [
                 "retry: 100\n\n",
-                "id: 1\nevent: feed\ndata: {\"op\":\"ui/show-panel\",\"panel/id\":\"p\",",
+                "id: 1\nevent: feed\ndata: {\"op\":\"show\",\"id\":\"p\",",
                 "\"title\":\"P\",\"lines\":[{\"text\":\"row\",\"face\":\"success\"}]}\n\n",
                 ": ping\n\n",
             ];
@@ -146,7 +146,7 @@ async fn serve(listener: TcpListener, seen: mpsc::UnboundedSender<Seen>) {
             drop(sock);
         } else {
             let _ = sock
-                .write_all(b"id: 2\nevent: feed\ndata: {\"op\":\"ui/notify\",\"message\":\"back\",\"level\":\"warn\"}\n\n")
+                .write_all(b"id: 2\nevent: feed\ndata: {\"op\":\"notify\",\"message\":\"back\",\"level\":\"warn\"}\n\n")
                 .await;
             open.push(sock);
         }
