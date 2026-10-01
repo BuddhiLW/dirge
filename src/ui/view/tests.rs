@@ -228,7 +228,11 @@ fn a_producer_binds_its_own_keys_and_verbs() {
 #[test]
 fn the_model_publishes_what_the_view_owns() {
     let u = run(&mut NativeReducer::default(), ViewEvent::Init);
-    assert_eq!(u.model.view_commands, ["display", "panel", "swarm"]);
+    assert_eq!(u.model.command_names(), ["display", "panel", "swarm"]);
+    let panel = &u.model.view_commands[1];
+    assert!(panel.args.starts_with(&["on".into(), "off".into()]));
+    assert!(panel.args.contains(&"refresh".to_string()));
+    assert!(!panel.summary.is_empty());
     assert!(u.model.grid_consumes("BackTab") && u.model.grid_consumes("9"));
     assert!(u.model.grid_consumes("m"));
     assert!(!u.model.grid_consumes("x"));

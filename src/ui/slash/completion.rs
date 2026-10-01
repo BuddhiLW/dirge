@@ -81,6 +81,12 @@ pub fn all_commands() -> Vec<String> {
             cmds.push(with_slash);
         }
     }
+    for view in crate::ui::view::commands() {
+        let with_slash = format!("/{}", view.name);
+        if !cmds.contains(&with_slash) {
+            cmds.push(with_slash);
+        }
+    }
     cmds.sort();
     cmds
 }
@@ -195,19 +201,11 @@ static SUBCOMMAND_ENTRIES: &[(&str, &[&str])] = &[
             "help",
         ],
     ),
-    (
-        "/panel",
-        &[
-            "on", "off", "auto", "debug", "next", "prev", "refresh", "focus", "unfocus",
-        ],
-    ),
     ("/plugins", &["load"]),
-    ("/swarm", &["on", "off"]),
-    ("/display", &[]), // dynamic: pane spec
-    ("/kill", &[]),    // dynamic: subagent ID
-    ("/cd", &[]),      // dynamic: directory path
-    ("/btw", &[]),     // freeform
-    ("/why", &[]),     // dynamic: tool name
+    ("/kill", &[]), // dynamic: subagent ID
+    ("/cd", &[]),   // dynamic: directory path
+    ("/btw", &[]),  // freeform
+    ("/why", &[]),  // dynamic: tool name
 ];
 
 /// Build the parent command name for subcommand lookup.
@@ -226,17 +224,24 @@ fn parent_command(input: &str, spans: &[(usize, usize)], token_idx: usize) -> St
 /// Return subcommand candidates for a (command, prefix) pair.
 #[cfg(feature = "slash-completion")]
 fn sub_candidates(command: &str, prefix: &str) -> Vec<String> {
-    SUBCOMMAND_ENTRIES
+    let words = SUBCOMMAND_ENTRIES
         .iter()
         .find(|(cmd, _)| *cmd == command)
-        .map(|(_, entries)| {
-            entries
-                .iter()
-                .filter(|e| e.starts_with(prefix))
-                .map(|e| e.to_string())
-                .collect()
-        })
+        .map(|(_, entries)| entries.iter().map(|e| e.to_string()).collect())
+        .or_else(|| view_args(&crate::ui::view::commands(), command));
+    words
         .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.starts_with(prefix))
+        .collect()
+}
+
+/// The first-argument words of the view command `command` (with its
+/// `/`) among `view`.
+#[cfg(feature = "slash-completion")]
+fn view_args(view: &[crate::ui::view::ViewCommand], command: &str) -> Option<Vec<String>> {
+    let name = command.strip_prefix('/')?;
+    view.iter().find(|c| c.name == name).map(|c| c.args.clone())
 }
 
 /// Cycle `current` through `candidates`. Returns the next candidate
@@ -630,6 +635,35 @@ mod tests {
     fn sub_candidates_filtered() {
         let c = sub_candidates("/mode", "s");
         assert_eq!(c, vec!["standard"]);
+    }
+
+    #[cfg(feature = "slash-completion")]
+    #[test]
+    fn view_commands_complete_from_the_view_model() {
+        let cmds = all_commands();
+        for name in ["/display", "/panel", "/swarm"] {
+            assert!(cmds.contains(&name.to_string()), "{name}");
+        }
+        assert_eq!(sub_candidates("/swarm", "o"), ["on", "off"]);
+        let panel = sub_candidates("/panel", "");
+        for word in ["on", "debug", "refresh", "next-tab"] {
+            assert!(panel.contains(&word.to_string()), "{word}");
+        }
+    }
+
+    #[cfg(feature = "slash-completion")]
+    #[test]
+    fn a_published_view_command_offers_its_args() {
+        let lens = crate::ui::view::ViewCommand {
+            name: "lens".to_string(),
+            summary: String::new(),
+            args: vec!["open".to_string(), "close".to_string()],
+        };
+        let view = [lens];
+        let want = vec!["open".to_string(), "close".to_string()];
+        assert_eq!(view_args(&view, "/lens"), Some(want));
+        assert_eq!(view_args(&view, "/other"), None);
+        assert_eq!(view_args(&view, "lens"), None);
     }
 
     #[cfg(all(feature = "slash-completion", feature = "plugin"))]

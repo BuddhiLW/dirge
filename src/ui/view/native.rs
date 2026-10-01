@@ -8,7 +8,7 @@
 
 use super::domain::{
     GridCell, NoticeLevel, PanelScope, ProducerKey, ProducerVerb, ReplyTarget, SwarmModel,
-    ViewEffect, ViewEvent, ViewModel, ViewUpdate,
+    ViewCommand, ViewEffect, ViewEvent, ViewModel, ViewUpdate,
 };
 use super::port::Reducer;
 use crate::extras::panel_feed::{ReplyAction, ReplyVerb};
@@ -19,12 +19,45 @@ use crate::ui::swarm::SwarmCmd;
 /// the effects.
 type Command = fn(&mut NativeReducer, &[&str]) -> Vec<ViewEffect>;
 
+/// A view command's first-argument words, from the view state.
+type Args = fn(&NativeReducer) -> Vec<String>;
+
+/// One registered view command: what `/help` says, what completion
+/// offers, and what runs.
+struct CommandRow {
+    name: &'static str,
+    summary: &'static str,
+    args: Args,
+    run: Command,
+}
+
 /// The view commands, by name (no slash).
-const COMMANDS: &[(&str, Command)] = &[
-    ("display", NativeReducer::display),
-    ("panel", NativeReducer::panel),
-    ("swarm", NativeReducer::swarm),
+const COMMANDS: &[CommandRow] = &[
+    CommandRow {
+        name: "display",
+        summary: "choose which panes (left/main/right) to show",
+        args: NativeReducer::no_args,
+        run: NativeReducer::display,
+    },
+    CommandRow {
+        name: "panel",
+        summary: "toggle the side panels, or send the external panel producer a verb",
+        args: NativeReducer::panel_args,
+        run: NativeReducer::panel,
+    },
+    CommandRow {
+        name: "swarm",
+        summary: "open or close the full-screen grid of external panels (Alt+S)",
+        args: NativeReducer::swarm_args,
+        run: NativeReducer::swarm,
+    },
 ];
+
+/// `/panel`'s display modes.
+const PANEL_MODES: &[&str] = &["on", "off", "auto", "debug"];
+
+/// What `/swarm` completes to.
+const SWARM_ARGS: &[&str] = &["on", "off"];
 
 /// A cursor move in the grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,7 +243,7 @@ impl NativeReducer {
                 keys
             },
             panel_keys: vec![],
-            view_commands: sorted(COMMANDS.iter().map(|(n, _)| *n)),
+            view_commands: self.view_commands(),
             // The native view leaves feed ops to the UI's own decoder.
             owns_feed: false,
         }
@@ -218,8 +251,8 @@ impl NativeReducer {
 
     fn command(&mut self, name: &str, args: &[String]) -> Vec<ViewEffect> {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        match COMMANDS.iter().find(|(n, _)| *n == name) {
-            Some((_, run)) => run(self, &args),
+        match COMMANDS.iter().find(|c| c.name == name) {
+            Some(c) => (c.run)(self, &args),
             None => vec![notify(
                 NoticeLevel::Error,
                 format!("not a view command: /{name}"),
@@ -361,6 +394,37 @@ impl NativeReducer {
             self.keys = keys.clone();
         }
         Vec::new()
+    }
+
+    /// The view commands as `/help` and completion show them, sorted.
+    fn view_commands(&self) -> Vec<ViewCommand> {
+        let mut out: Vec<ViewCommand> = COMMANDS
+            .iter()
+            .map(|c| ViewCommand {
+                name: c.name.to_string(),
+                summary: c.summary.to_string(),
+                args: (c.args)(self),
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    fn no_args(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn swarm_args(&self) -> Vec<String> {
+        SWARM_ARGS.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The display modes, then the producer's reply verbs.
+    fn panel_args(&self) -> Vec<String> {
+        PANEL_MODES
+            .iter()
+            .map(|s| s.to_string())
+            .chain(self.replies.iter().map(|v| v.name.clone()))
+            .collect()
     }
 
     fn reply_verbs(&self) -> Vec<ReplyVerb> {

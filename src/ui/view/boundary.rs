@@ -47,7 +47,7 @@ enum Outcome {
 /// UI loop.
 pub fn apply(renderer: &mut Renderer, update: &ViewUpdate) -> Applied {
     renderer.set_swarm(update.model.swarm.as_ref());
-    super::set_owns_feed(update.model.owns_feed);
+    super::publish(&update.model);
     let mut applied = Applied::default();
     for effect in &update.effects {
         match interpret(renderer, effect) {

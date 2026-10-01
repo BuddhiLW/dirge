@@ -280,15 +280,36 @@
 ;; ---------------------------------------------------------------------------
 ;; Registries and entry points
 
+(def panel-mode-words
+  "What `/panel` completes to before the producer's verbs."
+  ["on" "off" "auto" "debug"])
+
 (def commands
-  "Slash command (no slash) -> (fn [state args] [state' effects])."
-  {"display" display-cmd
-   "panel"   panel-cmd
-   "swarm"   swarm-cmd})
+  "Slash command (no slash) -> {:run (fn [state args] [state' effects])
+   :summary its /help line, :args (fn [state] words completion offers)}."
+  {"display" {:run     display-cmd
+              :summary "choose which panes (left/main/right) to show"
+              :args    (fn [_] [])}
+   "panel"   {:run     panel-cmd
+              :summary "toggle the side panels, or send the external panel producer a verb"
+              :args    (fn [state]
+                         (vec (concat panel-mode-words
+                                      (map :name (:replies (:producer state))))))}
+   "swarm"   {:run     swarm-cmd
+              :summary "open or close the full-screen grid of external panels (Alt+S)"
+              :args    (fn [_] ["on" "off"])}})
+
+(defn view-commands
+  "The view commands as /help and completion show them, sorted by name."
+  [state]
+  (mapv (fn [n]
+          (let [c (get commands n)]
+            {:name n :summary (:summary c) :args ((:args c) state)}))
+        (sort (keys commands))))
 
 (defn command-step
   [state event]
-  (if-let [f (get commands (:name event))]
+  (if-let [f (:run (get commands (:name event)))]
     (f state (vec (:args event)))
     [state [(notify :error (str "not a view command: /" (:name event)))]]))
 
@@ -316,7 +337,7 @@
    :grid_keys     (vec (sort (distinct (concat (keys grid-keymap)
                                                (map :key (:keys (:producer state)))))))
    :panel_keys    (panels/panel-keys (:panels state))
-   :view_commands (vec (sort (keys commands)))
+   :view_commands (view-commands state)
    :owns_feed     true})
 
 (defn step
