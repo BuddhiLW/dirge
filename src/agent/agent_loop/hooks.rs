@@ -185,6 +185,9 @@ pub struct RunOpening {
     pub system_prompt: String,
     pub prompt: String,
     pub reminders: Vec<String>,
+    /// Why the run must not start, such as a prompt a hook blocked. The run
+    /// then ends with it as its error, without calling the model.
+    pub refusal: Option<String>,
 }
 
 impl RunOpening {
@@ -203,12 +206,20 @@ impl RunOpening {
 pub type OpenRunFn =
     Arc<dyn Fn(RunOpening) -> Pin<Box<dyn Future<Output = RunOpening> + Send>> + Send + Sync>;
 
-/// `first`, then `second` on what `first` answered.
+/// `first`, then `second` on what `first` answered. A refusal from `first`
+/// ends the opening: `second` does not run.
 pub fn compose_open_run(first: Option<OpenRunFn>, second: Option<OpenRunFn>) -> Option<OpenRunFn> {
     match (first, second) {
         (Some(first), Some(second)) => Some(Arc::new(move |opening: RunOpening| {
             let (first, second) = (first.clone(), second.clone());
-            Box::pin(async move { second(first(opening).await).await })
+            Box::pin(async move {
+                let opened = first(opening).await;
+                if opened.refusal.is_some() {
+                    opened
+                } else {
+                    second(opened).await
+                }
+            })
         })),
         (first, second) => first.or(second),
     }
@@ -245,6 +256,20 @@ mod tests {
         assert_eq!(both(RunOpening::default()).await.system_prompt, "ab");
         let second = compose_open_run(None, Some(appending("b"))).unwrap();
         assert_eq!(second(RunOpening::default()).await.system_prompt, "b");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_ends_the_opening() {
+        let refusing: OpenRunFn = Arc::new(|mut opening: RunOpening| {
+            Box::pin(async move {
+                opening.refusal = Some("no".into());
+                opening
+            })
+        });
+        let both = compose_open_run(Some(refusing), Some(appending("b"))).unwrap();
+        let opened = both(RunOpening::default()).await;
+        assert_eq!(opened.refusal.as_deref(), Some("no"));
+        assert_eq!(opened.system_prompt, "");
     }
 
     #[test]

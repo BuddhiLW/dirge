@@ -6,6 +6,7 @@
 //! action allowed.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -14,6 +15,29 @@ use serde_json::Value;
 use crate::agent::command_hooks::boundary::HookRunner;
 use crate::agent::command_hooks::domain::{Exited, HookCommand, HookError};
 use crate::agent::command_hooks::policy;
+
+/// Port: runs one addon's command-hook handler.
+pub trait HookHandlers: Send + Sync {
+    /// `handler` of `addon` on a hook's JSON `payload`. `Ok` carries the
+    /// handler's answer, `Err` why there is none.
+    fn run_hook_handler(
+        &self,
+        addon: &str,
+        handler: &str,
+        payload: &Value,
+    ) -> Result<Value, String>;
+}
+
+impl HookHandlers for super::host::AddonHost {
+    fn run_hook_handler(
+        &self,
+        addon: &str,
+        handler: &str,
+        payload: &Value,
+    ) -> Result<Value, String> {
+        super::host::AddonHost::run_hook_handler(self, addon, handler, payload)
+    }
+}
 
 /// Adapter: answers addon entries from the process-wide addon host.
 #[derive(Debug, Default, Clone, Copy)]
@@ -26,27 +50,37 @@ impl HookRunner for LiveAddonHookRunner {
         payload: &str,
         _project_dir: &Path,
     ) -> Result<Exited, HookError> {
-        let (addon, handler) = cmd
-            .addon_target()
-            .ok_or_else(|| HookError::SpawnFailed("not an addon hook entry".to_string()))?;
-        let host = super::global()
-            .ok_or_else(|| HookError::SpawnFailed("the addon host is not running".to_string()))?;
-        let payload: Value = serde_json::from_str(payload)
-            .map_err(|e| HookError::SpawnFailed(format!("hook payload is not JSON: {e}")))?;
-        let (addon, handler) = (addon.to_string(), handler.to_string());
-        let call = move || host.run_hook_handler(&addon, &handler, &payload);
-        let secs = cmd.timeout_secs();
-        let answer = if super::cljrs::isolate::on_event_loop_thread() {
-            // The isolate bounds this caller itself and refuses it anything
-            // that waits on the loop (an MCP call), so it cannot hang it.
-            call()
-        } else {
-            within(Duration::from_secs(secs), call).ok_or(HookError::TimedOut(secs))?
-        };
-        answer
-            .map(|value| policy::addon_answer(&value))
-            .map_err(|stderr| HookError::NonZeroExit { code: None, stderr })
+        let host = super::global().map(|host| host as Arc<dyn HookHandlers>);
+        answer(host, cmd, payload)
     }
+}
+
+/// `cmd`'s answer from `handlers`, read as the process it stands in for.
+fn answer(
+    handlers: Option<Arc<dyn HookHandlers>>,
+    cmd: &HookCommand,
+    payload: &str,
+) -> Result<Exited, HookError> {
+    let (addon, handler) = cmd
+        .addon_target()
+        .ok_or_else(|| HookError::SpawnFailed("not an addon hook entry".to_string()))?;
+    let handlers = handlers
+        .ok_or_else(|| HookError::SpawnFailed("the addon host is not running".to_string()))?;
+    let payload: Value = serde_json::from_str(payload)
+        .map_err(|e| HookError::SpawnFailed(format!("hook payload is not JSON: {e}")))?;
+    let (addon, handler) = (addon.to_string(), handler.to_string());
+    let call = move || handlers.run_hook_handler(&addon, &handler, &payload);
+    let secs = cmd.timeout_secs();
+    let answer = if super::cljrs::isolate::on_event_loop_thread() {
+        // The isolate bounds this caller itself and refuses it anything
+        // that waits on the loop (an MCP call), so it cannot hang it.
+        call()
+    } else {
+        within(Duration::from_secs(secs), call).ok_or(HookError::TimedOut(secs))?
+    };
+    answer
+        .map(|value| policy::addon_answer(&value))
+        .map_err(|stderr| HookError::NonZeroExit { code: None, stderr })
 }
 
 /// `work`'s answer, or `None` when it has none within `budget`. The work
@@ -69,6 +103,16 @@ fn within<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    use serde_json::json;
+
+    use crate::agent::agent_loop::hooks::{OpenRunFn, RunOpening};
+    use crate::agent::command_hooks::CommandHooks;
+    use crate::agent::command_hooks::domain::Submission;
+    use crate::agent::command_hooks::loop_hooks;
 
     #[test]
     fn within_answers_in_time_and_gives_up_after() {
@@ -90,5 +134,157 @@ mod tests {
                 Err(HookError::SpawnFailed(_))
             ));
         }
+    }
+
+    /// The addon runner over `handlers` instead of the process-wide host.
+    struct Answering(Arc<dyn HookHandlers>);
+
+    impl HookRunner for Answering {
+        fn run(&self, cmd: &HookCommand, payload: &str, _: &Path) -> Result<Exited, HookError> {
+            answer(Some(self.0.clone()), cmd, payload)
+        }
+    }
+
+    /// A guard whose handlers judge through an MCP call: refused on the
+    /// event-loop thread, as the isolate refuses one there; elsewhere the
+    /// call blocks for `takes`, then answers. Records each handler run and
+    /// whether it ran on the event loop.
+    struct McpJudge {
+        takes: Duration,
+        seen: Mutex<Vec<(String, bool)>>,
+    }
+
+    impl McpJudge {
+        fn taking(takes: Duration) -> Arc<Self> {
+            Arc::new(Self {
+                takes,
+                seen: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn seen(&self) -> Vec<(String, bool)> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    impl HookHandlers for McpJudge {
+        fn run_hook_handler(&self, _: &str, handler: &str, _: &Value) -> Result<Value, String> {
+            let on_loop = crate::addons::cljrs::isolate::on_event_loop_thread();
+            self.seen
+                .lock()
+                .unwrap()
+                .push((handler.to_string(), on_loop));
+            if on_loop {
+                return Err("mcp-call is unavailable while dirge waits on the addon".into());
+            }
+            std::thread::sleep(self.takes);
+            Ok(match handler {
+                "prompt" => json!({"exit": 2, "stderr": "judged: no secrets"}),
+                other => json!(format!("judged {other}")),
+            })
+        }
+    }
+
+    /// A registry whose three start events each run one `guard` handler,
+    /// under a one-second entry timeout.
+    fn registry(judge: Arc<McpJudge>) -> Arc<CommandHooks> {
+        let entry = |handler: &str| json!([{"hooks": [{"type": "addon", "addon": "guard", "handler": handler, "timeout": 1}]}]);
+        let events = serde_json::from_value(json!({
+            "SessionStart": entry("session"),
+            "UserPromptSubmit": entry("prompt"),
+            "SubagentStart": entry("subagent"),
+        }))
+        .unwrap();
+        let runner = Arc::new(Answering(judge));
+        Arc::new(CommandHooks::new(events, PathBuf::from("."), runner))
+    }
+
+    fn opening() -> RunOpening {
+        RunOpening {
+            system_prompt: "sys".into(),
+            prompt: "my password is x".into(),
+            reminders: Vec::new(),
+            refusal: None,
+        }
+    }
+
+    /// `open` run from a thread marked as dirge's event loop, on a
+    /// current-thread runtime like the loop's own; with how long it took.
+    fn open_from_the_event_loop(open: OpenRunFn) -> (RunOpening, Duration) {
+        std::thread::spawn(move || {
+            crate::addons::cljrs::isolate::mark_event_loop_thread();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let started = Instant::now();
+            let opened = runtime.block_on(open(opening()));
+            (opened, started.elapsed())
+        })
+        .join()
+        .unwrap()
+    }
+
+    #[test]
+    fn start_hooks_are_judged_off_the_event_loop() {
+        let judge = McpJudge::taking(Duration::from_millis(50));
+        let hooks = registry(judge.clone());
+
+        let main = loop_hooks::open_run(hooks.clone(), Some("s".into()), false).expect("hooked");
+        let (opened, _) = open_from_the_event_loop(main);
+        assert!(
+            opened.system_prompt.contains("judged session"),
+            "{opened:?}"
+        );
+        let refusal = opened.refusal.unwrap_or_default();
+        assert!(refusal.contains("judged: no secrets"), "{refusal}");
+
+        let child = loop_hooks::subagent_open_run(hooks, "child-1".into()).expect("hooked");
+        let (opened, _) = open_from_the_event_loop(child);
+        assert!(
+            opened.system_prompt.contains("judged subagent"),
+            "{opened:?}"
+        );
+
+        let off_loop = |name: &str| (name.to_string(), false);
+        let expected = vec![
+            off_loop("session"),
+            off_loop("prompt"),
+            off_loop("subagent"),
+        ];
+        assert_eq!(judge.seen(), expected);
+    }
+
+    #[test]
+    fn run_inline_on_the_event_loop_a_start_hook_goes_unjudged() {
+        let judge = McpJudge::taking(Duration::ZERO);
+        let hooks = registry(judge.clone());
+        let submitted = std::thread::spawn(move || {
+            crate::addons::cljrs::isolate::mark_event_loop_thread();
+            loop_hooks::submitted_prompt(&hooks, Some("s"), "my password is x".into())
+        })
+        .join()
+        .unwrap();
+        assert!(matches!(submitted, Submission::Proceed(_)), "{submitted:?}");
+        assert_eq!(judge.seen(), vec![("prompt".to_string(), true)]);
+    }
+
+    #[test]
+    fn a_start_hook_past_its_timeout_fails_open() {
+        let judge = McpJudge::taking(Duration::from_secs(5));
+        let hooks = registry(judge);
+
+        let main = loop_hooks::open_run(hooks.clone(), Some("s".into()), false).expect("hooked");
+        let (opened, took) = open_from_the_event_loop(main);
+        assert_eq!(opened, opening(), "the run opens as if unhooked");
+        assert!(
+            took < Duration::from_secs(4),
+            "two 1s entries took {took:?}"
+        );
+
+        let child = loop_hooks::subagent_open_run(hooks, "child-1".into()).expect("hooked");
+        let (opened, took) = open_from_the_event_loop(child);
+        assert_eq!(opened, opening());
+        assert!(took < Duration::from_secs(3), "one 1s entry took {took:?}");
     }
 }

@@ -692,6 +692,7 @@ fn opening() -> crate::agent::agent_loop::hooks::RunOpening {
         system_prompt: "sys".into(),
         prompt: "hi".into(),
         reminders: Vec::new(),
+        refusal: None,
     }
 }
 

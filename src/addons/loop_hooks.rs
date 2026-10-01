@@ -358,6 +358,7 @@ mod tests {
             system_prompt: "base".into(),
             prompt: "do it".into(),
             reminders: Vec::new(),
+            refusal: None,
         })
         .await;
         assert_eq!(opening.system_prompt, "base\n\naddon text");

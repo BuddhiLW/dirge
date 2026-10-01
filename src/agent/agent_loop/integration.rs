@@ -895,12 +895,18 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         // must not.
         let initial_text = match open_run {
             Some(open) => {
-                let opening = open(super::hooks::RunOpening {
+                let mut opening = open(super::hooks::RunOpening {
                     system_prompt: std::mem::take(&mut context.system_prompt),
                     prompt: initial_prompt,
                     reminders: Vec::new(),
+                    refusal: None,
                 })
                 .await;
+                if let Some(refusal) = opening.refusal.take() {
+                    settled.mark();
+                    let _ = event_tx.send(AgentEvent::Error(refusal.into())).await;
+                    return;
+                }
                 context.system_prompt = opening.system_prompt.clone();
                 opening.first_turn_text()
             }
@@ -1367,6 +1373,32 @@ mod tests {
             super::super::run_end::is_terminal(last),
             "the stream ended with {:?} after {kinds:?}",
             agent_event_kind(last)
+        );
+    }
+
+    /// A refused opening ends the run with the refusal as its only terminal
+    /// event, before any model call: the provider here panics if reached.
+    #[tokio::test]
+    async fn a_refused_opening_ends_the_run_without_calling_the_model() {
+        let panicking: StreamFn = Arc::new(|_ctx, _opts| panic!("the model was called"));
+        let mut cfg = LoopSpawnConfig::minimal(panicking, "my password is x");
+        cfg.open_run = Some(Arc::new(|mut opening: super::super::hooks::RunOpening| {
+            Box::pin(async move {
+                opening.refusal = Some("blocked: no secrets".into());
+                opening
+            })
+        }));
+        let runner = spawn_loop_runner(cfg);
+        let events = drain(runner.event_rx).await;
+        runner.task.await.expect("a refused run does not crash");
+        let terminal: Vec<&AgentEvent> = events
+            .iter()
+            .filter(|e| super::super::run_end::is_terminal(e))
+            .collect();
+        assert_eq!(terminal.len(), 1, "{events:?}");
+        assert!(
+            matches!(terminal[0], AgentEvent::Error(m) if m.as_str() == "blocked: no secrets"),
+            "{events:?}"
         );
     }
 
