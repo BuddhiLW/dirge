@@ -337,6 +337,7 @@
    :grid_keys     (vec (sort (distinct (concat (keys grid-keymap)
                                                (map :key (:keys (:producer state)))))))
    :panel_keys    (panels/panel-keys (:panels state))
+   :producer_keys (vec (:keys (:producer state)))
    :view_commands (view-commands state)
    :owns_feed     true})
 

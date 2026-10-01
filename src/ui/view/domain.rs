@@ -79,7 +79,7 @@ pub struct ProducerVerb {
 
 /// A grid key the producer binds: to a reply verb, or (`invoke`) to a
 /// verb invoked on the selected panel cell.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProducerKey {
     pub key: String,
     pub verb: String,
@@ -168,6 +168,9 @@ pub struct ViewModel {
     /// Keys claimed by the focused panel (published by the reducer).
     #[serde(default)]
     pub panel_keys: Vec<String>,
+    /// Grid keys the panel producer binds, as it advertised them.
+    #[serde(default)]
+    pub producer_keys: Vec<ProducerKey>,
     /// The slash commands the view owns, sorted by name. They run
     /// whether or not the agent is busy.
     #[serde(default)]
