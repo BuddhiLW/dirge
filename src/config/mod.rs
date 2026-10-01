@@ -745,6 +745,10 @@ pub struct AddonsConfig {
     /// Seconds a fold waits for `:dirge/compact` or `:dirge/before-compact`
     /// before it goes on without the answer. Default 60.
     pub compact_timeout_secs: Option<u64>,
+    /// Seconds each `:dirge/transform-context`, `:dirge/prepare-next-turn`
+    /// and `:dirge/should-stop-after-turn` call waits for its answer before
+    /// the loop goes on without it. Default 10.
+    pub turn_timeout_secs: Option<u64>,
 }
 
 /// The `addons.nrepl` key.

@@ -37,7 +37,8 @@ pub const TRANSFORM_CONTEXT: &str = "dirge/transform-context";
 pub const PREPARE_NEXT_TURN: &str = "dirge/prepare-next-turn";
 pub const SHOULD_STOP_AFTER_TURN: &str = "dirge/should-stop-after-turn";
 
-/// How long one turn hook may take before the loop goes on without it.
+/// How long one turn hook may take before the loop goes on without it, when
+/// `addons.turn_timeout_secs` does not say.
 pub const BUDGET: Duration = Duration::from_secs(10);
 
 /// Install the host's turn hooks on `config`, each after the one already

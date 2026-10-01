@@ -228,19 +228,26 @@ fn cwd() -> Value {
 /// The process-wide addon host as the agent's [`AddonHooks`], looked up on
 /// every call: `/addons reload` may start it after boot.
 pub struct LiveAddonHooks {
+    turn_budget: Duration,
     compact_budget: Duration,
 }
 
 impl LiveAddonHooks {
-    /// Compaction hooks bounded by `addons.compact_timeout_secs`.
+    /// Turn hooks bounded by `addons.turn_timeout_secs`, compaction hooks
+    /// by `addons.compact_timeout_secs`.
     pub fn new(settings: &crate::config::AddonsConfig) -> Self {
         Self {
-            compact_budget: settings
-                .compact_timeout_secs
-                .map(Duration::from_secs)
-                .unwrap_or(super::compaction::DEFAULT_BUDGET),
+            turn_budget: secs_or(settings.turn_timeout_secs, super::turn_hooks::BUDGET),
+            compact_budget: secs_or(
+                settings.compact_timeout_secs,
+                super::compaction::DEFAULT_BUDGET,
+            ),
         }
     }
+}
+
+fn secs_or(secs: Option<u64>, default: Duration) -> Duration {
+    secs.map(Duration::from_secs).unwrap_or(default)
 }
 
 impl AddonHooks for LiveAddonHooks {
@@ -267,7 +274,7 @@ impl AddonHooks for LiveAddonHooks {
 
     fn install_turn_hooks(&self, config: &mut LoopConfig) {
         if let Some(host) = super::global() {
-            super::turn_hooks::install(config, &host, super::turn_hooks::BUDGET);
+            super::turn_hooks::install(config, &host, self.turn_budget);
         }
     }
 
@@ -483,5 +490,23 @@ mod tests {
     fn no_step_when_no_addon_listens_on_the_prompt() {
         let deaf = host_with(&[HookPoint::BeforeToolCall], vec![reply(json!("never"))]);
         assert!(open_run(deaf, None, true).is_none());
+    }
+
+    #[test]
+    fn configured_timeouts_bound_the_turn_and_compaction_hooks() {
+        let settings = crate::config::AddonsConfig {
+            turn_timeout_secs: Some(3),
+            compact_timeout_secs: Some(7),
+            ..Default::default()
+        };
+        let hooks = LiveAddonHooks::new(&settings);
+        assert_eq!(hooks.turn_budget, Duration::from_secs(3));
+        assert_eq!(hooks.compact_budget, Duration::from_secs(7));
+        let defaults = LiveAddonHooks::new(&crate::config::AddonsConfig::default());
+        assert_eq!(defaults.turn_budget, super::super::turn_hooks::BUDGET);
+        assert_eq!(
+            defaults.compact_budget,
+            super::super::compaction::DEFAULT_BUDGET
+        );
     }
 }
