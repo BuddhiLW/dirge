@@ -2,9 +2,10 @@
 
 dirge can host addons written in Clojure. They run on an embedded
 [clojurust](https://github.com/BuddhiLW/clojurust) interpreter, beside Janet
-plugins, and implement an `IAddon` protocol defined by a small Clojure
-library that dirge loads by namespace. Written as portable `.cljc`, the same
-addon also runs in any JVM host of that protocol.
+plugins, and implement hive-addon's `IAddon` protocol (`hive-addon.protocol`,
+MIT). dirge embeds that namespace unchanged, so an addon needs no protocol
+library on its source path. Written as portable `.cljc`, the same addon also
+runs in any JVM host of that protocol.
 
 Build with the feature enabled:
 
@@ -39,8 +40,12 @@ and dirge finds it there without a second copy.
 The addon's `src/` and `resources/` go on the interpreter's source path, plus
 the `src/` of every `:local/root` dependency named in its `deps.edn`
 (followed transitively). Anything else can be added with `addons.source_paths`
-or the `DIRGE_ADDON_PATH` environment variable (a `:`-separated list). The
+or the `DIRGE_ADDON_PATH` environment variable (a `:`-separated list). An
+addon on the embedded `hive-addon.protocol` needs nothing more; any other
 protocol library's source must be reachable one of these ways.
+
+Manifests in another directory under `META-INF` are read when that directory
+name is listed in `addons.manifest_dirs`.
 
 A manifest whose init namespace has no `.cljc` or `.cljrs` source on that path
 is skipped, so JVM-only addons can share a repository with portable ones.
@@ -50,17 +55,37 @@ is skipped, so JVM-only addons can share a repository with portable ones.
   "addons": {
     "enabled": true,
     "paths": ["~/src/my-addons"],
-    "source_paths": ["~/src/addon-protocol/src"],
-    "protocol_ns": "my.addon-protocol"
+    "manifest_dirs": ["other-host-addons"],
+    "source_paths": ["~/src/addon-protocol/src"]
   }
 }
 ```
 
 ## The protocol
 
-`addons.protocol_ns` names the namespace that defines the protocol. dirge
-resolves these functions from it at startup and refuses to start the host if
-a required one is missing:
+dirge binds one protocol namespace per run, chosen in this order:
+
+1. `addons.protocol_ns` in `config.json`
+2. the `:addon/protocol-ns` a manifest declares (the first one found, when
+   manifests disagree; the others are logged)
+3. `hive-addon.protocol`, embedded in dirge byte for byte from hive-addon
+
+```clojure
+(ns my-addon.core
+  (:require [hive-addon.protocol :as p]))
+
+(defrecord MyAddon []
+  p/IAddon
+  (addon-id [_] "my.addon")
+  (initialize! [_ _] {:success? true :errors []})
+  (shutdown! [_] {:success? true})
+  (tools [_] [])
+  (hooks [_] {})
+  (health [_] {:status :ok}))
+```
+
+dirge resolves these functions from the bound namespace at startup and
+refuses to start the host if a required one is missing:
 
 | Function | Required | Meaning |
 |---|---|---|
@@ -79,6 +104,9 @@ a required one is missing:
  :addon/init-fn "addon-ctor"
  :addon/config  {}}
 ```
+
+`:addon/protocol-ns` is optional: it names the protocol namespace the addon
+implements when that is not `hive-addon.protocol`.
 
 `init-fn` is called with `:addon/config` and must return an addon. dirge then
 calls `initialize!` with `{:addon/id … :addon/config … :dirge/host {…}}`.
@@ -440,6 +468,36 @@ before every tool runs. Text longer than 16 KiB is cut and marked. The hook's
 answer is ignored and nothing waits for it: events are queued to the addon
 runtime and run in order after whatever it is doing, and when more than 256
 are waiting new ones are dropped.
+
+### Extending the host: `dirge/addon/host.cljc`
+
+The Clojure half of the addon host, `dirge.addon.host`, is built into dirge.
+It decides how an addon's hooks map becomes tools, commands and hook keys,
+how a hook's context reaches it, and how answers come back. A source root
+can extend it without a rebuild: when a root holds `dirge/addon/host.cljc`,
+its forms are evaluated in `dirge.addon.host` after the built-in ones, so
+the file only needs the definitions it changes.
+
+```clojure
+;; <root>/dirge/addon/host.cljc
+(ns dirge.addon.host)
+
+(defn tool-view [tool]
+  (assoc (select-keys tool [:name :inputSchema])
+         :description (str "[team] " (:description tool))))
+```
+
+Overlays load at start and again on each `/addons reload`. The built-in host
+is evaluated first each time, so a form removed from the overlay goes back
+to the built-in one. With several roots holding an overlay, each is
+evaluated over the ones before it, in root order.
+
+dirge calls `use-protocol!`, `load-addon!`, `shutdown-addon!`,
+`reload-sources!`, `refresh!`, `call-tool`, `run-command`, `run-hook`,
+`run-hook-handler` and `shutdown-all!`. An overlay may redefine any of them,
+but each must still be a function afterwards. An overlay that fails to load,
+or that leaves one of them without a function, is undone whole, and the
+reason is logged at start and listed among the reload's source errors.
 
 ## Example
 

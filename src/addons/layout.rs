@@ -9,17 +9,24 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Directories under `META-INF` that hold manifests.
+/// Directories under `META-INF` that hold manifests by default: dirge's
+/// `addons` and hive-addon's own `hive-addons` (its mount layout). Others
+/// are added by `addons.manifest_dirs`.
 pub const MANIFEST_DIRS: [&str; 2] = ["addons", "hive-addons"];
 
-/// True when `path` is `.../META-INF/<manifest dir>/<name>.edn`.
-pub fn is_manifest(path: &Path) -> bool {
+/// [`MANIFEST_DIRS`] as the owned list [`is_manifest`] takes.
+pub fn default_manifest_dirs() -> Vec<String> {
+    MANIFEST_DIRS.iter().map(|d| d.to_string()).collect()
+}
+
+/// True when `path` is `.../META-INF/<one of manifest_dirs>/<name>.edn`.
+pub fn is_manifest(path: &Path, manifest_dirs: &[String]) -> bool {
     let is_edn = path.extension().is_some_and(|e| e == "edn");
     let mut dirs = path.parent().into_iter().flat_map(Path::iter).rev();
     let parent = dirs.next();
     let grandparent = dirs.next();
     is_edn
-        && parent.is_some_and(|p| MANIFEST_DIRS.iter().any(|d| p == *d))
+        && parent.is_some_and(|p| manifest_dirs.iter().any(|d| p == d.as_str()))
         && grandparent.is_some_and(|g| g == "META-INF")
 }
 
@@ -123,6 +130,20 @@ pub fn namespace_in(roots: &[PathBuf], file: &Path) -> Option<String> {
         .map(|(_, ns)| ns)
 }
 
+/// Where a source root extends dirge's builtin Clojure host: the forms of
+/// this file are evaluated in `dirge.addon.host` after the builtin ones, so
+/// host policy changes without a rebuild.
+pub const HOST_OVERLAY: &str = "dirge/addon/host.cljc";
+
+/// Every host overlay under `roots`, in root order.
+pub fn host_overlays(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .map(|root| root.join(HOST_OVERLAY))
+        .filter(|path| path.is_file())
+        .collect()
+}
+
 /// Sorted, de-duplicated source roots.
 pub fn merge_roots<I: IntoIterator<Item = PathBuf>>(roots: I) -> Vec<PathBuf> {
     roots
@@ -167,12 +188,29 @@ mod tests {
 
     #[test]
     fn recognizes_only_manifests_under_meta_inf() {
-        assert!(is_manifest(Path::new(MANIFEST)));
-        assert!(is_manifest(Path::new("/w/x/META-INF/hive-addons/a.edn")));
-        assert!(!is_manifest(Path::new("/w/x/resources/addons/a.edn")));
-        assert!(!is_manifest(Path::new("/w/x/META-INF/addons/a.clj")));
-        assert!(!is_manifest(Path::new("/w/x/META-INF/other/a.edn")));
-        assert!(!is_manifest(Path::new("a.edn")));
+        let dirs = default_manifest_dirs();
+        assert!(is_manifest(Path::new(MANIFEST), &dirs));
+        assert!(is_manifest(
+            Path::new("/w/x/META-INF/hive-addons/a.edn"),
+            &dirs
+        ));
+        assert!(!is_manifest(
+            Path::new("/w/x/resources/addons/a.edn"),
+            &dirs
+        ));
+        assert!(!is_manifest(Path::new("/w/x/META-INF/addons/a.clj"), &dirs));
+        assert!(!is_manifest(Path::new("/w/x/META-INF/other/a.edn"), &dirs));
+        assert!(!is_manifest(Path::new("a.edn"), &dirs));
+    }
+
+    #[test]
+    fn another_hosts_manifest_dir_counts_only_when_configured() {
+        let other = Path::new("/w/x/META-INF/other-addons/a.edn");
+        assert!(!is_manifest(other, &default_manifest_dirs()));
+        let mut dirs = default_manifest_dirs();
+        dirs.push("other-addons".to_string());
+        assert!(is_manifest(other, &dirs));
+        assert!(is_manifest(Path::new(MANIFEST), &dirs));
     }
 
     #[test]
@@ -223,6 +261,24 @@ mod tests {
             PathBuf::from("/w/my-addon/../proto/src")
         );
         assert_eq!(dependency_root(repo, "/abs/y"), PathBuf::from("/abs/y/src"));
+    }
+
+    #[test]
+    fn host_overlays_are_found_on_the_roots_in_order() {
+        let base = std::env::temp_dir().join(format!("dirge-overlays-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (a, b, none) = (base.join("a"), base.join("b"), base.join("none"));
+        for root in [&a, &b] {
+            let file = root.join(HOST_OVERLAY);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "(ns dirge.addon.host)").unwrap();
+        }
+        std::fs::create_dir_all(&none).unwrap();
+        assert_eq!(
+            host_overlays(&[b.clone(), none, a.clone()]),
+            vec![b.join(HOST_OVERLAY), a.join(HOST_OVERLAY)]
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The classpath is a function of the SET of roots, never of the order

@@ -125,7 +125,11 @@ fn fixtures() -> PathBuf {
 const PROTOCOL: &str = "fixture.addon-protocol";
 
 fn echo_plan(addons: &Path) -> super::domain::AddonPlan {
-    discovery::plan(&[addons.to_path_buf()], &[fixtures().join("protocol/src")])
+    discovery::plan(
+        &[addons.to_path_buf()],
+        &[fixtures().join("protocol/src")],
+        &super::layout::default_manifest_dirs(),
+    )
 }
 
 #[test]
@@ -157,6 +161,91 @@ fn fixture_addon_loads_runs_hooks_and_notifies() {
 
     host.shutdown();
     assert!(host.call_tool(&tool, &json!({})).is_err());
+}
+
+/// A directory of its own under the system temp dir, emptied first.
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("dirge-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn write_overlay(root: &Path, src: &str) -> PathBuf {
+    let path = root.join(super::layout::HOST_OVERLAY);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, src).unwrap();
+    path
+}
+
+const ECHO_TOOL: &str = "Counts the rows it is handed";
+
+#[test]
+fn a_host_overlay_changes_host_policy_and_reload_undoes_a_broken_one() {
+    let root = scratch("host-overlay");
+    let overlay = write_overlay(
+        &root,
+        r#"(ns dirge.addon.host)
+(defn tool-view [tool]
+  (assoc (select-keys tool [:name :inputSchema])
+         :description (str "overlaid: " (:description tool))))"#,
+    );
+    let plan = discovery::plan(
+        &[fixtures().join("echo")],
+        &[fixtures().join("protocol/src"), root.clone()],
+        &super::layout::default_manifest_dirs(),
+    );
+    let settings_plan = plan.clone();
+    let host = super::start(
+        plan,
+        Harness::with_sink(Arc::new(RecordingSink::default())),
+        PROTOCOL,
+    )
+    .expect("host starts");
+    assert_eq!(
+        host.tools()[0].description,
+        format!("overlaid: {ECHO_TOOL}")
+    );
+
+    // An overlay that leaves run-hook without a function is undone whole,
+    // its tool-view included, and named as a source error.
+    write_overlay(
+        &root,
+        r#"(ns dirge.addon.host)
+(def run-hook 42)
+(defn tool-view [tool] (assoc (select-keys tool [:name]) :description "broken"))"#,
+    );
+    let report = host.reload(super::load_set(&settings_plan, true));
+    let errors: Vec<_> = report
+        .source_errors
+        .iter()
+        .filter(|e| e.manifest == overlay)
+        .collect();
+    assert_eq!(errors.len(), 1, "{:?}", report.source_errors);
+    assert!(errors[0].error.contains("run-hook"), "{}", errors[0].error);
+    assert_eq!(host.tools()[0].description, ECHO_TOOL);
+    assert_eq!(
+        host.texts(HookPoint::SystemPrompt, &json!({})),
+        vec!["echo addon active".to_string()]
+    );
+
+    // A working overlay applies again, and deleting it reverts its forms:
+    // with no overlay left, the builtin host runs alone.
+    write_overlay(
+        &root,
+        r#"(ns dirge.addon.host)
+(defn tool-view [tool] (assoc (select-keys tool [:name]) :description "again"))"#,
+    );
+    let report = host.reload(super::load_set(&settings_plan, true));
+    assert!(report.source_errors.is_empty(), "{:?}", report.source_errors);
+    assert_eq!(host.tools()[0].description, "again");
+    std::fs::remove_file(&overlay).unwrap();
+    let report = host.reload(super::load_set(&settings_plan, true));
+    assert!(report.source_errors.is_empty(), "{:?}", report.source_errors);
+    assert_eq!(host.tools()[0].description, ECHO_TOOL);
+
+    host.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -873,4 +962,92 @@ fn an_emit_site_declares_the_fields_its_hook_reads_as_keywords() {
         json!({"reason": "keyword", "cwd": "keyword"})
     );
     host.shutdown();
+}
+
+#[test]
+fn an_addon_on_the_embedded_hive_addon_protocol_needs_no_protocol_library() {
+    let plan = discovery::plan(
+        &[fixtures().join("native")],
+        &[],
+        &super::layout::default_manifest_dirs(),
+    );
+    assert_eq!(plan.manifests.len(), 1, "{:?}", plan.manifests);
+    let protocol = super::protocol_ns(&crate::config::AddonsConfig::default(), &plan);
+    assert_eq!(protocol, super::DEFAULT_PROTOCOL_NS);
+    let host = super::start(
+        plan,
+        Harness::with_sink(Arc::new(RecordingSink::default())),
+        &protocol,
+    )
+    .expect("host starts");
+    assert!(host.failures().is_empty(), "{:?}", host.failures());
+    let tool = host.tools()[0].clone();
+    assert_eq!(tool.model_name(), "native-ping");
+    let (content, _) = host.call_tool(&tool, &json!({})).expect("tool runs");
+    assert_eq!(content[0]["text"], "pong");
+    host.shutdown();
+}
+
+#[test]
+fn another_hosts_addon_loads_through_its_manifest_dir_and_declared_protocol() {
+    let roots = [fixtures().join("protocol/src")];
+    let unseen = discovery::plan(
+        &[fixtures().join("foreign")],
+        &roots,
+        &super::layout::default_manifest_dirs(),
+    );
+    assert!(unseen.manifests.is_empty(), "not a default manifest dir");
+
+    let settings = crate::config::AddonsConfig {
+        manifest_dirs: vec!["other-addons".to_string()],
+        ..Default::default()
+    };
+    let plan = discovery::plan(
+        &[fixtures().join("foreign")],
+        &roots,
+        &super::manifest_dirs(&settings),
+    );
+    assert_eq!(plan.manifests.len(), 1, "{:?}", plan.manifests);
+    let protocol = super::protocol_ns(&settings, &plan);
+    assert_eq!(protocol, PROTOCOL, "the manifest's :addon/protocol-ns");
+
+    let pinned = crate::config::AddonsConfig {
+        protocol_ns: Some("pinned.protocol".to_string()),
+        ..settings.clone()
+    };
+    assert_eq!(super::protocol_ns(&pinned, &plan), "pinned.protocol");
+
+    let host = super::start(
+        plan,
+        Harness::with_sink(Arc::new(RecordingSink::default())),
+        &protocol,
+    )
+    .expect("host starts");
+    assert!(host.failures().is_empty(), "{:?}", host.failures());
+    let ids: Vec<String> = host.addons().into_iter().map(|a| a.id).collect();
+    assert_eq!(ids, vec!["foreign"]);
+    host.shutdown();
+}
+
+/// The embedded `hive-addon.protocol` is hive-addon's file, unchanged. To
+/// update it, copy the upstream file over the vendored one and set this to
+/// the digest the failure prints.
+const VENDORED_PROTOCOL_SHA256: &str =
+    "271c99cb65a01787959dc330b8e2d17ba1a699c6e567d777728c996480a107c1";
+
+#[test]
+fn the_embedded_protocol_is_hive_addons_file_unchanged() {
+    use sha2::{Digest, Sha256};
+    let digest: String = Sha256::digest(super::cljrs::isolate::PROTOCOL_SRC.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        digest, VENDORED_PROTOCOL_SHA256,
+        "vendored protocol.cljc changed"
+    );
+    assert!(
+        super::cljrs::isolate::PROTOCOL_SRC.starts_with("(ns hive-addon.protocol"),
+        "the embedded namespace must stay hive-addon.protocol"
+    );
 }

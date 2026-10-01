@@ -30,7 +30,11 @@ fn fixtures() -> PathBuf {
 }
 
 fn live_plan(addons: &Path) -> AddonPlan {
-    discovery::plan(&[addons.to_path_buf()], &[fixtures().join("protocol/src")])
+    discovery::plan(
+        &[addons.to_path_buf()],
+        &[fixtures().join("protocol/src")],
+        &super::layout::default_manifest_dirs(),
+    )
 }
 
 fn live_host(options: IsolateOptions) -> AddonHost {
