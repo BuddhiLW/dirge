@@ -329,6 +329,18 @@ impl AddonHost {
         }
     }
 
+    /// Every addon's answer to the hook keyed `key`, folded by the runtime
+    /// into one value; failures logged. `None` when no addon listens or the
+    /// fold gives no answer.
+    pub fn fold(&self, key: &str, ctx: &Value) -> Option<Value> {
+        if !self.listens_key(key) {
+            return None;
+        }
+        let folded = self.runtime.fold_hook(key, ctx);
+        log_key_failures(key, &folded.failures);
+        folded.value
+    }
+
     /// Take in what the runtime re-read since the last call (after a REPL
     /// evaluation or `dirge.harness/refresh!`): the addons' tools, hooks and
     /// commands are replaced, their lifecycles untouched. `None` when
@@ -466,7 +478,7 @@ fn log_key_failures(key: &str, replies: &[super::domain::HookReply]) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::addons::domain::HookReply;
+    use crate::addons::domain::{Folded, HookReply};
     use serde_json::json;
     use std::collections::VecDeque;
     use std::path::Path;
@@ -477,6 +489,8 @@ pub(crate) mod tests {
         pub tool_answer: Option<Result<Value, String>>,
         pub command_answer: Option<Result<Value, String>>,
         pub hook_answers: Vec<HookReply>,
+        /// What every fold answers.
+        pub folded: Folded,
         /// Load reports, answered in order.
         pub load_answers: Mutex<VecDeque<Value>>,
         pub source_errors: Vec<(PathBuf, String)>,
@@ -527,6 +541,11 @@ pub(crate) mod tests {
         fn run_hook(&self, point: HookPoint, ctx: &Value) -> Vec<HookReply> {
             self.record(format!("hook {} {ctx}", point.key()));
             self.hook_answers.clone()
+        }
+
+        fn fold_hook(&self, key: &str, ctx: &Value) -> Folded {
+            self.record(format!("fold {key} {ctx}"));
+            self.folded.clone()
         }
 
         fn take_refreshed(&self) -> Option<Vec<Value>> {
@@ -603,6 +622,31 @@ pub(crate) mod tests {
         assert_eq!(
             *rt.calls.lock().unwrap(),
             vec![r#"hook dirge/system-prompt {"cwd":"/w"}"#.to_string()]
+        );
+    }
+
+    #[test]
+    fn a_fold_answers_the_runtime_folded_value_only_when_an_addon_listens() {
+        let folded = Folded {
+            value: Some(json!({"x": 1})),
+            failures: vec![HookReply {
+                addon_id: "a".into(),
+                result: Err("boom".into()),
+            }],
+        };
+        let (host, rt) = host(
+            ScriptedRuntime {
+                folded,
+                ..Default::default()
+            },
+            vec![summary("a", &[], &[HookPoint::SystemPrompt])],
+        );
+        let key = HookPoint::SystemPrompt.key();
+        assert_eq!(host.fold(key, &json!({"n": 1})), Some(json!({"x": 1})));
+        assert_eq!(host.fold("acme/unheard", &json!({})), None);
+        assert_eq!(
+            *rt.calls.lock().unwrap(),
+            vec![format!(r#"fold {key} {{"n":1}}"#)]
         );
     }
 

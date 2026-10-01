@@ -576,6 +576,14 @@ answer is ignored and nothing waits for it: events are queued to the addon
 runtime and run in order after whatever it is doing, and when more than 256
 are waiting new ones are dropped.
 
+The renames in the table, and the way the addons' answers to a hook are
+combined into the one answer dirge reads (the first well-formed
+`:messages`, the first addon asking to stop, merged `_meta`, ...), are
+Clojure in the host namespace `dirge.addon.host`, each a method of a
+multimethod: `event-ctx` on `:event`, `shape-ctx` on the hook key (what a
+hook hears), and `fold-answers` on the hook key (how answers combine).
+Code running in the addon runtime can add a `defmethod` to any of them.
+
 ### Extending the host: `dirge/addon/host.cljc`
 
 The Clojure half of the addon host, `dirge.addon.host`, is built into dirge.

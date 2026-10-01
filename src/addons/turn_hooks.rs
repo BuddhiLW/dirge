@@ -8,10 +8,11 @@
 //!   add a note to its context.
 //! - `:dirge/should-stop-after-turn` may end the run after the turn.
 //!
-//! Each runs on a blocking thread of the agent runtime, where addon code
-//! may reach MCP, within a budget. No answer in time, a failed hook, or an
-//! answer of the wrong shape is no answer, and the loop goes on as it would
-//! without them.
+//! The addon host folds the addons' answers to each key into one; this
+//! module reads that answer. Each runs on a blocking thread of the agent
+//! runtime, where addon code may reach MCP, within a budget. No answer in
+//! time, a failed hook, or an answer of the wrong shape is no answer, and
+//! the loop goes on as it would without them.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,8 +66,8 @@ pub fn install(config: &mut LoopConfig, host: &Arc<AddonHost>, budget: Duration)
     }
 }
 
-/// `:dirge/transform-context`: the first well-formed `{:messages [...]}`
-/// answer replaces the messages of this one model call.
+/// `:dirge/transform-context`: a well-formed `{:messages [...]}` answer
+/// replaces the messages of this one model call.
 pub fn transform_context(
     host: Arc<AddonHost>,
     session_id: Option<String>,
@@ -77,7 +78,9 @@ pub fn transform_context(
         Box::pin(async move {
             let ctx = transform_ctx(&messages, session_id.as_deref());
             let answered = blocking_within(budget, move || {
-                policy::messages(&host.emit(TRANSFORM_CONTEXT, &ctx))
+                host.fold(TRANSFORM_CONTEXT, &ctx)
+                    .as_ref()
+                    .and_then(policy::folded_messages)
             })
             .await;
             match answered {
@@ -105,10 +108,9 @@ pub fn prepare_next_turn(
         Box::pin(async move {
             let ctx = turn_ctx(&turn, session_id.as_deref());
             let answered = blocking_within(budget, move || {
-                let replies = host.emit(PREPARE_NEXT_TURN, &ctx);
-                let thinking =
-                    policy::thinking(&replies, |s| ThinkingLevel::from_effort_str(s).is_some());
-                (thinking, policy::texts(&replies))
+                host.fold(PREPARE_NEXT_TURN, &ctx)
+                    .map(|answer| policy::folded_turn(&answer))
+                    .unwrap_or_default()
             })
             .await;
             match answered {
@@ -134,7 +136,9 @@ pub fn should_stop_after_turn(
         Box::pin(async move {
             let ctx = turn_ctx(&turn, session_id.as_deref());
             let answered = blocking_within(budget, move || {
-                policy::stop(&host.emit(SHOULD_STOP_AFTER_TURN, &ctx))
+                host.fold(SHOULD_STOP_AFTER_TURN, &ctx)
+                    .as_ref()
+                    .and_then(policy::folded_stop)
             })
             .await;
             match answered {
@@ -236,22 +240,22 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::addons::domain::{HookPoint, HookReply};
+    use crate::addons::domain::{Folded, HookPoint, HookReply};
     use crate::addons::host::LoadSet;
     use crate::addons::port::AddonRuntime;
     use crate::agent::agent_loop::message::{AssistantMessage, StopReason, ToolResultMessage};
 
-    /// One addon, `hd`, that registers the keys it answers and records every
-    /// ctx it is handed.
+    /// One addon, `hd`, that registers the keys it has a folded answer for
+    /// and records every ctx it is handed.
     #[derive(Default)]
     struct KeyedRuntime {
-        answers: HashMap<&'static str, Value>,
+        folded: HashMap<&'static str, Value>,
         calls: Mutex<Vec<(String, Value)>>,
     }
 
     impl AddonRuntime for KeyedRuntime {
         fn load(&self, _manifest: &Path, _host_config: &Value) -> Value {
-            json!({"id": "hd", "hooks": self.answers.keys().collect::<Vec<_>>()})
+            json!({"id": "hd", "hooks": self.folded.keys().collect::<Vec<_>>()})
         }
         fn unload(&self, _addon_id: &str) {}
         fn reload_sources(&self, _files: &[PathBuf]) -> Vec<(PathBuf, String)> {
@@ -269,22 +273,21 @@ mod tests {
         }
         fn run_hook_key(&self, key: &str, ctx: &Value) -> Vec<HookReply> {
             self.calls.lock().unwrap().push((key.into(), ctx.clone()));
-            self.answers
-                .get(key)
-                .map(|v| {
-                    vec![HookReply {
-                        addon_id: "hd".into(),
-                        result: Ok(v.clone()),
-                    }]
-                })
-                .unwrap_or_default()
+            Vec::new()
+        }
+        fn fold_hook(&self, key: &str, ctx: &Value) -> Folded {
+            self.calls.lock().unwrap().push((key.into(), ctx.clone()));
+            Folded {
+                value: self.folded.get(key).filter(|v| !v.is_null()).cloned(),
+                failures: Vec::new(),
+            }
         }
         fn shutdown(&self) {}
     }
 
-    fn host_answering(answers: &[(&'static str, Value)]) -> (Arc<AddonHost>, Arc<KeyedRuntime>) {
+    fn host_folding(folded: &[(&'static str, Value)]) -> (Arc<AddonHost>, Arc<KeyedRuntime>) {
         let rt = Arc::new(KeyedRuntime {
-            answers: answers.iter().cloned().collect(),
+            folded: folded.iter().cloned().collect(),
             ..Default::default()
         });
         let set = LoadSet {
@@ -348,7 +351,7 @@ mod tests {
 
     #[test]
     fn keys_no_addon_listens_on_install_nothing() {
-        let (host, _) = host_answering(&[("acme/other", json!(true))]);
+        let (host, _) = host_folding(&[("acme/other", json!(true))]);
         let mut config = config();
         install(&mut config, &host, BUDGET);
         assert!(config.transform_context.is_none());
@@ -359,7 +362,7 @@ mod tests {
     #[tokio::test]
     async fn transform_context_reaches_the_addon_and_its_messages_replace_the_call() {
         let only = json!([{"role": "user", "content": "just this"}]);
-        let (host, rt) = host_answering(&[(TRANSFORM_CONTEXT, json!({ "messages": only }))]);
+        let (host, rt) = host_folding(&[(TRANSFORM_CONTEXT, json!({ "messages": only }))]);
         let mut config = config();
         install(&mut config, &host, BUDGET);
         let transform = config.transform_context.expect("installed");
@@ -380,7 +383,7 @@ mod tests {
             json!({"messages": "text"}),
             json!("text"),
         ] {
-            let (host, _) = host_answering(&[(TRANSFORM_CONTEXT, answer.clone())]);
+            let (host, _) = host_folding(&[(TRANSFORM_CONTEXT, answer.clone())]);
             let transform = transform_context(host, None, BUDGET);
             assert_eq!(transform(msgs()).await, msgs(), "{answer}");
         }
@@ -388,9 +391,9 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_next_turn_sets_the_thinking_level_and_adds_a_note() {
-        let (host, rt) = host_answering(&[(
+        let (host, rt) = host_folding(&[(
             PREPARE_NEXT_TURN,
-            json!({"thinking": "high", "context": "3 lings running"}),
+            json!({"thinking": "high", "context": ["3 lings running"]}),
         )]);
         let mut config = config();
         install(&mut config, &host, BUDGET);
@@ -422,12 +425,17 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_level_or_no_answer_changes_nothing() {
-        for answer in [Value::Null, json!({"thinking": "loud"}), json!({})] {
-            let (host, _) = host_answering(&[(PREPARE_NEXT_TURN, answer.clone())]);
+        for answer in [
+            Value::Null,
+            json!({"thinking": "loud"}),
+            json!({"context": ["  ", 3]}),
+            json!({}),
+        ] {
+            let (host, _) = host_folding(&[(PREPARE_NEXT_TURN, answer.clone())]);
             let prepare = prepare_next_turn(host, None, BUDGET);
             assert!(prepare(turn()).await.is_none(), "{answer}");
         }
-        let (host, _) = host_answering(&[(PREPARE_NEXT_TURN, json!({"thinking": "low"}))]);
+        let (host, _) = host_folding(&[(PREPARE_NEXT_TURN, json!({"thinking": "low"}))]);
         let update = prepare_next_turn(host, None, BUDGET)(turn()).await.unwrap();
         assert_eq!(update.thinking_level, Some(ThinkingLevel::Low));
         assert!(update.context.is_none(), "no note, the context stays");
@@ -436,15 +444,13 @@ mod tests {
     #[tokio::test]
     async fn should_stop_after_turn_reaches_the_addon_and_its_verdict_stops() {
         for (answer, stops) in [
-            (json!(true), true),
-            (json!({"stop": true}), true),
-            (json!({"stop": "goal met"}), true),
-            (json!({"stop": false}), false),
-            (json!({"stop": ""}), false),
-            (json!(false), false),
+            (json!({"addon": "hd", "reason": "goal met"}), true),
+            (json!({"addon": "hd", "reason": null}), true),
+            (json!({"reason": "no addon named"}), false),
+            (json!(true), false),
             (Value::Null, false),
         ] {
-            let (host, rt) = host_answering(&[(SHOULD_STOP_AFTER_TURN, answer.clone())]);
+            let (host, rt) = host_folding(&[(SHOULD_STOP_AFTER_TURN, answer.clone())]);
             let mut config = config();
             install(&mut config, &host, BUDGET);
             let stop = config.should_stop_after_turn.expect("installed");
@@ -455,12 +461,12 @@ mod tests {
 
     #[tokio::test]
     async fn addon_hooks_run_after_the_ones_already_installed() {
-        let (host, _) = host_answering(&[
+        let (host, _) = host_folding(&[
             (
                 TRANSFORM_CONTEXT,
                 json!({"messages": [{"role": "user", "content": "addon"}]}),
             ),
-            (SHOULD_STOP_AFTER_TURN, json!(false)),
+            (SHOULD_STOP_AFTER_TURN, Value::Null),
         ]);
         let mut config = config();
         let seen = Arc::new(Mutex::new(0usize));

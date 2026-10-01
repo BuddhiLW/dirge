@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use crate::command_class::CommandClass;
 
 use super::domain::{
-    AddonSummary, BeforeOutcome, CommandOutput, CommandSpec, HookPoint, HookReply, LoadFailure,
-    PanelRequest, ToolSpec,
+    AddonSummary, BeforeOutcome, CommandOutput, CommandSpec, Folded, HookPoint, HookReply,
+    LoadFailure, PanelRequest, ToolSpec,
 };
 
 /// Longest tool name the providers accept.
@@ -365,43 +365,46 @@ pub fn summary(replies: &[HookReply], valid: impl Fn(&str) -> bool) -> Option<St
         .map(str::to_string)
 }
 
-/// The first `{:messages [...]}` answer holding at least one message and
-/// nothing but messages (maps with a string `role`). Other answers are
-/// passed over, so a malformed one never reaches the model.
-pub fn messages(replies: &[HookReply]) -> Option<Vec<Value>> {
-    replies
-        .iter()
-        .filter_map(|r| r.result.as_ref().ok())
-        .filter_map(|v| v.get("messages").and_then(Value::as_array))
-        .find(|ms| !ms.is_empty() && ms.iter().all(|m| str_field(m, "role").is_some()))
-        .cloned()
+/// The host's `emit-fold` answer, `{:value v :failed [{:addon id :error
+/// msg}]}`, as a [`Folded`]. A null value is no answer.
+pub fn folded(answer: &Value) -> Folded {
+    Folded {
+        value: answer.get("value").filter(|v| !v.is_null()).cloned(),
+        failures: answer.get("failed").map(hook_replies).unwrap_or_default(),
+    }
 }
 
-/// The first `{:thinking level}` an answer names that `known` accepts.
-pub fn thinking(replies: &[HookReply], known: impl Fn(&str) -> bool) -> Option<String> {
-    replies
-        .iter()
-        .filter_map(|r| r.result.as_ref().ok())
-        .filter_map(|v| str_field(v, "thinking"))
-        .find(|s| known(s))
+/// A folded `:dirge/transform-context` answer's messages: `{:messages
+/// [...]}` holding at least one message and nothing but messages (maps
+/// with a string `role`).
+pub fn folded_messages(answer: &Value) -> Option<Vec<Value>> {
+    let messages = answer.get("messages")?.as_array()?;
+    let well_formed = messages.iter().all(|m| str_field(m, "role").is_some());
+    (!messages.is_empty() && well_formed).then(|| messages.clone())
+}
+
+/// A folded `:dirge/prepare-next-turn` answer, `{:thinking level :context
+/// [text]}`, as the level named and the non-blank texts.
+pub fn folded_turn(answer: &Value) -> (Option<String>, Vec<String>) {
+    let thinking = str_field(answer, "thinking").map(str::to_string);
+    let notes = answer
+        .get("context")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
         .map(str::to_string)
+        .collect();
+    (thinking, notes)
 }
 
-/// The first addon that asked to stop, answering `true`, `{:stop true}` or
-/// `{:stop "reason"}`, with its reason when it gave one.
-pub fn stop(replies: &[HookReply]) -> Option<(String, Option<String>)> {
-    replies.iter().find_map(|r| {
-        let v = r.result.as_ref().ok()?;
-        let reason = match v {
-            Value::Bool(true) => None,
-            _ => match v.get("stop")? {
-                Value::Bool(true) => None,
-                Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
-                _ => return None,
-            },
-        };
-        Some((r.addon_id.clone(), reason))
-    })
+/// A folded `:dirge/should-stop-after-turn` answer, `{:addon id :reason
+/// r}`, as the addon that asked to stop and its reason.
+pub fn folded_stop(answer: &Value) -> Option<(String, Option<String>)> {
+    let addon = str_field(answer, "addon")?.to_string();
+    Some((addon, str_field(answer, "reason").map(str::to_string)))
 }
 
 /// Fold `BeforeToolCall` replies: the first block wins and stops the fold,
@@ -490,6 +493,63 @@ mod tests {
             addon_id: addon.to_string(),
             result: Ok(v),
         }
+    }
+
+    #[test]
+    fn a_fold_envelope_reads_as_its_value_and_failures() {
+        let answer = json!({"value": {"x": 1}, "failed": [{"addon": "a", "error": "boom"}]});
+        assert_eq!(
+            folded(&answer),
+            Folded {
+                value: Some(json!({"x": 1})),
+                failures: vec![HookReply {
+                    addon_id: "a".into(),
+                    result: Err("boom".into()),
+                }],
+            }
+        );
+        assert_eq!(folded(&json!({"value": null})), Folded::default());
+        assert_eq!(folded(&json!("not an envelope")), Folded::default());
+    }
+
+    #[test]
+    fn folded_messages_need_one_or_more_messages_each_with_a_role() {
+        let one = json!({"messages": [{"role": "user", "content": "x"}]});
+        assert_eq!(
+            folded_messages(&one),
+            Some(vec![json!({"role": "user", "content": "x"})])
+        );
+        for bad in [
+            json!({"messages": []}),
+            json!({"messages": [{"content": "no role"}]}),
+            json!({"messages": [{"role": 1}]}),
+            json!({"messages": "text"}),
+            json!("text"),
+        ] {
+            assert_eq!(folded_messages(&bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_folded_turn_reads_its_level_and_non_blank_notes() {
+        assert_eq!(
+            folded_turn(&json!({"thinking": "high", "context": [" a ", "", 3, "b"]})),
+            (Some("high".to_string()), vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(folded_turn(&json!({"context": "not a vector"})), (None, Vec::new()));
+    }
+
+    #[test]
+    fn a_folded_stop_names_its_addon() {
+        assert_eq!(
+            folded_stop(&json!({"addon": "a", "reason": "done"})),
+            Some(("a".to_string(), Some("done".to_string())))
+        );
+        assert_eq!(
+            folded_stop(&json!({"addon": "a", "reason": null})),
+            Some(("a".to_string(), None))
+        );
+        assert_eq!(folded_stop(&json!({"reason": "who?"})), None);
     }
 
     #[test]

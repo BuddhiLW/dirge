@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::domain::{HookPoint, HookReply, PanelRequest};
+use super::domain::{Folded, HookPoint, HookReply, PanelRequest};
 
 /// A running addon runtime. Calls are synchronous round trips: the only
 /// adapter serializes them onto one interpreter thread, so an async caller
@@ -53,6 +53,13 @@ pub trait AddonRuntime: Send + Sync + 'static {
     /// is backed up. The default runs it in place.
     fn post_hook(&self, key: &str, ctx: &Value) {
         let _ = self.run_hook_key(key, ctx);
+    }
+
+    /// Call every addon's hook keyed `key` with `ctx` and fold their answers
+    /// into one value, the way the host's fold for `key` does. The default
+    /// folds nothing.
+    fn fold_hook(&self, _key: &str, _ctx: &Value) -> Folded {
+        Folded::default()
     }
 
     /// The addons' summaries as the runtime re-read them since the last
