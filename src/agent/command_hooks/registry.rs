@@ -1,8 +1,9 @@
 //! L3 pipeline: the registry of configured hooks and the per-event run.
 //!
 //! Each command runs down one track:
-//! `runner.run(..).and_then(policy::interpret)`. A failure on that track
-//! allows the action and is logged at the end.
+//! `runner.run(..).and_then(policy::interpret)`, and so does each answer a
+//! listener gives to an open event. A failure on that track allows the
+//! action and is logged at the end.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,8 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use super::boundary::{self, HookRunner};
-use super::domain::{HookCommand, HookError, HookEvent, HookOutcome, HooksConfig};
+use super::boundary::{self, HookRunner, Listeners};
+use super::domain::{Exited, HookCommand, HookError, HookEvent, HookOutcome, HooksConfig};
 use super::policy;
 
 /// The resolved hook registry.
@@ -19,6 +20,7 @@ pub struct CommandHooks {
     events: HooksConfig,
     project_dir: PathBuf,
     runner: Arc<dyn HookRunner>,
+    listeners: Arc<Listeners>,
     session_context: Mutex<HashMap<String, Option<String>>>,
 }
 
@@ -37,8 +39,18 @@ impl CommandHooks {
             events: policy::normalize(events),
             project_dir,
             runner,
+            listeners: boundary::listeners(),
             session_context: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// This registry with `listeners` hearing its open events instead of
+    /// the process-wide ones; tests build registries this way around
+    /// scripted listeners.
+    #[cfg(test)]
+    pub fn with_listeners(mut self, listeners: Arc<Listeners>) -> Self {
+        self.listeners = listeners;
+        self
     }
 
     /// dirge's own `hooks` block plus, when `claude_hooks` is set, the
@@ -74,10 +86,20 @@ impl CommandHooks {
         self.events.contains_key(event.as_str())
     }
 
+    /// The configured events dirge fires, in [`HookEvent::ALL`] order, then
+    /// the open ones by name.
     pub fn configured_events(&self) -> Vec<HookEvent> {
+        let mut open: Vec<HookEvent> = self
+            .events
+            .keys()
+            .map(|name| HookEvent::named(name))
+            .filter(|e| e.is_open())
+            .collect();
+        open.sort_by_key(|e| e.as_str());
         HookEvent::ALL
             .into_iter()
             .filter(|e| self.has(*e))
+            .chain(open)
             .collect()
     }
 
@@ -95,32 +117,45 @@ impl CommandHooks {
             .unwrap_or_default()
     }
 
-    /// One command, start to verdict.
-    fn judge(
-        &self,
-        event: HookEvent,
-        cmd: &HookCommand,
-        payload: &str,
-    ) -> Result<HookOutcome, HookError> {
-        self.runner
-            .run(cmd, payload, &self.project_dir)
-            .and_then(|exited| policy::interpret(event, exited))
+    /// Listeners that would hear `event`: none for the events dirge fires.
+    fn listening(&self, event: HookEvent) -> Vec<(String, Arc<dyn boundary::HookListener>)> {
+        if !event.is_open() {
+            return Vec::new();
+        }
+        self.listeners
+            .all()
+            .into_iter()
+            .filter(|(_, l)| l.listens(event.as_str()))
+            .collect()
     }
 
-    /// Every matching command, folded. Blocking.
+    /// Nothing would answer `event` for `targets`.
+    fn idle(&self, event: HookEvent, targets: &[&str]) -> bool {
+        self.commands_for(event, targets).is_empty() && self.listening(event).is_empty()
+    }
+
+    /// Every matching command, then every listener of an open event, each
+    /// answer judged and folded. Blocking.
     pub fn run(&self, event: HookEvent, targets: &[&str], payload: &Value) -> HookOutcome {
         let payload = payload.to_string();
-        self.commands_for(event, targets)
+        let mut answers: Vec<(String, Result<Exited, HookError>)> = self
+            .commands_for(event, targets)
             .iter()
             .map(|cmd| {
-                self.judge(event, cmd, &payload).unwrap_or_else(|e| {
-                    tracing::warn!(
-                        target: "dirge::hooks",
-                        event = %event, command = %cmd.label(), error = %e,
-                        "hook produced no verdict, action allowed",
-                    );
-                    HookOutcome::default()
-                })
+                let answer = self.runner.run(cmd, &payload, &self.project_dir);
+                (cmd.label(), answer)
+            })
+            .collect();
+        for (name, listener) in self.listening(event) {
+            let heard = listener.hear(event.as_str(), &payload);
+            answers.extend(heard.into_iter().map(|a| (format!("listener:{name}"), a)));
+        }
+        answers
+            .into_iter()
+            .map(|(label, answer)| {
+                answer
+                    .and_then(|exited| policy::interpret(event, exited))
+                    .unwrap_or_else(|e| no_verdict(event, &label, &e))
             })
             .fold(HookOutcome::default(), HookOutcome::combine)
     }
@@ -133,7 +168,7 @@ impl CommandHooks {
         payload: Value,
     ) -> HookOutcome {
         let refs: Vec<&str> = targets.iter().map(String::as_str).collect();
-        if self.commands_for(event, &refs).is_empty() {
+        if self.idle(event, &refs) {
             return HookOutcome::default();
         }
         let this = self.clone();
@@ -150,7 +185,7 @@ impl CommandHooks {
 
     /// [`Self::run`] from synchronous code that may sit on a tokio worker.
     pub fn run_blocking(&self, event: HookEvent, targets: &[&str], payload: &Value) -> HookOutcome {
-        if self.commands_for(event, targets).is_empty() {
+        if self.idle(event, targets) {
             return HookOutcome::default();
         }
         let on_multi_thread_runtime = tokio::runtime::Handle::try_current()
@@ -228,6 +263,24 @@ impl CommandHooks {
         );
         self.run_blocking(HookEvent::UserPromptSubmit, &[], &payload)
     }
+}
+
+/// An answer that decided nothing: logged, the action allowed. An entry of a
+/// type nothing runs (Claude Code's `prompt`, say) is expected, so quieter.
+fn no_verdict(event: HookEvent, label: &str, error: &HookError) -> HookOutcome {
+    match error {
+        HookError::NoRunner(_) => tracing::debug!(
+            target: "dirge::hooks",
+            event = %event, command = %label, error = %error,
+            "hook entry skipped, action allowed",
+        ),
+        _ => tracing::warn!(
+            target: "dirge::hooks",
+            event = %event, command = %label, error = %error,
+            "hook produced no verdict, action allowed",
+        ),
+    }
+    HookOutcome::default()
 }
 
 fn load_settings_hooks(path: &Path) -> Result<HooksConfig, HookError> {

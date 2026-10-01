@@ -4,6 +4,10 @@
 //! ([`policy::addon_answer`]), so `policy::interpret` decodes both kinds of
 //! entry alike. Every way of getting no answer fails open: no verdict, the
 //! action allowed.
+//!
+//! An event dirge does not fire itself reaches addons with no entry at all:
+//! each addon that registered the open hook key [`event_key`] answers it,
+//! read the same way.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -12,8 +16,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::agent::command_hooks::boundary::HookRunner;
-use crate::agent::command_hooks::domain::{Exited, HookCommand, HookError};
+use super::host::AddonHost;
+use crate::agent::command_hooks::boundary::{HookListener, HookRunner};
+use crate::agent::command_hooks::domain::{DEFAULT_TIMEOUT_SECS, Exited, HookCommand, HookError};
 use crate::agent::command_hooks::policy;
 
 /// Port: runs one addon's command-hook handler.
@@ -70,17 +75,74 @@ fn answer(
         .map_err(|e| HookError::SpawnFailed(format!("hook payload is not JSON: {e}")))?;
     let (addon, handler) = (addon.to_string(), handler.to_string());
     let call = move || handlers.run_hook_handler(&addon, &handler, &payload);
-    let secs = cmd.timeout_secs();
-    let answer = if super::cljrs::isolate::on_event_loop_thread() {
-        // The isolate bounds this caller itself and refuses it anything
-        // that waits on the loop (an MCP call), so it cannot hang it.
-        call()
-    } else {
-        within(Duration::from_secs(secs), call).ok_or(HookError::TimedOut(secs))?
-    };
-    answer
+    bounded(cmd.timeout_secs(), call)?
         .map(|value| policy::addon_answer(&value))
-        .map_err(|stderr| HookError::NonZeroExit { code: None, stderr })
+        .map_err(failed)
+}
+
+/// The hook key an addon registers to hear command-hook event `event`,
+/// e.g. `:dirge.hook/Notification`.
+pub fn event_key(event: &str) -> String {
+    format!("dirge.hook/{event}")
+}
+
+/// Every addon's answer to `event`, each read as a command's.
+pub fn answers(host: &AddonHost, event: &str, payload: &Value) -> Vec<Result<Exited, HookError>> {
+    host.emit(&event_key(event), payload)
+        .into_iter()
+        .map(|reply| {
+            reply
+                .result
+                .map(|value| policy::addon_answer(&value))
+                .map_err(failed)
+        })
+        .collect()
+}
+
+/// Adapter: open events to the process-wide addon host.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LiveAddonHookListener;
+
+impl HookListener for LiveAddonHookListener {
+    fn listens(&self, event: &str) -> bool {
+        super::global().is_some_and(|host| host.listens_key(&event_key(event)))
+    }
+
+    fn hear(&self, event: &str, payload: &str) -> Vec<Result<Exited, HookError>> {
+        let Some(host) = super::global() else {
+            return Vec::new();
+        };
+        let payload: Value = match serde_json::from_str(payload) {
+            Ok(payload) => payload,
+            Err(e) => {
+                return vec![Err(HookError::SpawnFailed(format!(
+                    "hook payload is not JSON: {e}"
+                )))];
+            }
+        };
+        let event = event.to_string();
+        bounded(DEFAULT_TIMEOUT_SECS, move || {
+            answers(&host, &event, &payload)
+        })
+        .unwrap_or_else(|timed_out| vec![Err(timed_out)])
+    }
+}
+
+fn failed(stderr: String) -> HookError {
+    HookError::NonZeroExit { code: None, stderr }
+}
+
+/// `call`'s answer, or `TimedOut` after `secs`. On the event-loop thread it
+/// runs in place: the isolate bounds that caller itself and refuses it
+/// anything that waits on the loop (an MCP call), so it cannot hang it.
+fn bounded<T: Send + 'static>(
+    secs: u64,
+    call: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, HookError> {
+    if super::cljrs::isolate::on_event_loop_thread() {
+        return Ok(call());
+    }
+    within(Duration::from_secs(secs), call).ok_or(HookError::TimedOut(secs))
 }
 
 /// `work`'s answer, or `None` when it has none within `budget`. The work

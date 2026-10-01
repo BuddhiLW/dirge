@@ -54,7 +54,10 @@
           (map extra-tool @!extra)))
   (hooks [_]
     {:dirge/event (fn [ctx] (swap! !heard conj ctx) nil)
-     :acme/ping   (fn [{:keys [n]}] (str "pong " n))})
+     :acme/ping   (fn [{:keys [n]}] (str "pong " n))
+     :dirge.hook/Notification
+     (fn [{:keys [message]}]
+       {:hookSpecificOutput {:additionalContext (str "live heard " message)}})})
   (health [_]
     {:status :ok}))
 
