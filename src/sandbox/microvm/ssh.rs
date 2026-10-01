@@ -244,13 +244,17 @@ impl russh::client::Handler for HostKeyVerifier {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::ssh_key::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> anyhow::Result<bool> {
         let Some(expected) = &self.expected else {
             return Ok(true);
         };
         // Accept only if the guest presents the exact ed25519 key we injected.
-        match server_public_key.key_data().ed25519() {
+        // A certificate is never the pinned key, so it is refused.
+        let russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } = server_public_key else {
+            return Ok(false);
+        };
+        match key.key_data().ed25519() {
             Some(key) => Ok(key.0.as_slice() == expected.as_slice()),
             None => Ok(false),
         }
