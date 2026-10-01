@@ -265,6 +265,12 @@ impl AddonHooks for LiveAddonHooks {
         }
     }
 
+    fn install_turn_hooks(&self, config: &mut LoopConfig) {
+        if let Some(host) = super::global() {
+            super::turn_hooks::install(config, &host, super::turn_hooks::BUDGET);
+        }
+    }
+
     fn open_run(&self, session_id: Option<String>, first_prompt: bool) -> Option<OpenRunFn> {
         super::global().and_then(|host| open_run(host, session_id, first_prompt))
     }

@@ -59,7 +59,14 @@
      :dirge/compact        (fn [{:keys [span reason]}]
                              {:summary (str "## Active Task\nFold " (count span)
                                             " entries (" reason ").\n"
-                                            "## Completed Actions\nRead the span.")})})
+                                            "## Completed Actions\nRead the span.")})
+     :dirge/transform-context      (fn [{:keys [messages]}]
+                                     {:messages [(last messages)]})
+     :dirge/prepare-next-turn      (fn [{:keys [tool-results]}]
+                                     {:thinking "high"
+                                      :context  (str (count tool-results) " tool results")})
+     :dirge/should-stop-after-turn (fn [{:keys [text]}]
+                                     {:stop (when (= text "done") "said done")})})
   (health [_]
     {:status :ok}))
 

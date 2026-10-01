@@ -27,6 +27,7 @@ pub mod sink;
 pub mod tool;
 #[cfg(feature = "plugin")]
 pub mod tool_calls;
+pub mod turn_hooks;
 
 #[cfg(test)]
 mod acceptance_tests;

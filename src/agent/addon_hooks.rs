@@ -1,5 +1,5 @@
-//! The port the agent reaches addons through: their tools, their tool-call
-//! and compaction hooks, and the step that opens a run with their prompt
+//! The port the agent reaches addons through: their tools, their tool-call,
+//! turn and compaction hooks, and the step that opens a run with their prompt
 //! hooks. The composition root installs the one this process uses; a build
 //! or a process without one gets nothing from any of them.
 
@@ -23,6 +23,11 @@ pub trait AddonHooks: Send + Sync + 'static {
     /// Install the addons' tool-call hooks on `config`, after whatever is
     /// there.
     fn install_tool_hooks(&self, config: &mut LoopConfig);
+
+    /// Install the addons' turn hooks on `config` (the context one model
+    /// call sees, the next turn's settings, whether to stop after a turn),
+    /// after whatever is there.
+    fn install_turn_hooks(&self, _config: &mut LoopConfig) {}
 
     /// The step that runs the addons' prompt hooks as a run of `session_id`
     /// opens. `None` when no addon listens on them.
