@@ -425,6 +425,24 @@ impl AddonHost {
         self.emit(HookPoint::SessionEnd.key(), ctx);
     }
 
+    /// The first `:dirge/compact` summary that `valid` accepts.
+    pub fn compact(&self, ctx: &Value, valid: impl Fn(&str) -> bool) -> Option<String> {
+        if !self.listens(HookPoint::Compact) {
+            return None;
+        }
+        let replies = self.runtime.run_hook(HookPoint::Compact, ctx);
+        log_key_failures(HookPoint::Compact.key(), &replies);
+        policy::summary(&replies, valid)
+    }
+
+    /// Run `:dirge/before-compact`; answers are ignored and failures logged.
+    pub fn before_compact(&self, ctx: &Value) {
+        if self.listens(HookPoint::BeforeCompact) {
+            let replies = self.runtime.run_hook(HookPoint::BeforeCompact, ctx);
+            log_key_failures(HookPoint::BeforeCompact.key(), &replies);
+        }
+    }
+
     pub fn shutdown(&self) {
         self.runtime.shutdown();
     }

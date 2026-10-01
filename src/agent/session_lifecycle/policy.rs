@@ -163,6 +163,7 @@ mod tests {
             prompt: "hi".into(),
             reminders: Vec::new(),
             refusal: None,
+            usage: None,
         };
         assert_eq!(with_reminder(opening.clone(), None), opening);
         let with = with_reminder(opening, Some("r".into()));

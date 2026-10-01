@@ -219,6 +219,7 @@ async fn the_start_reminder_leads_the_first_turn_and_leaves_the_system_prompt() 
         prompt: "hi".into(),
         reminders: Vec::new(),
         refusal: None,
+        usage: None,
     };
 
     let first = open(opening.clone()).await;

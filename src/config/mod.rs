@@ -718,11 +718,16 @@ pub struct AddonsConfig {
     pub enabled: Option<bool>,
     /// Extra directories searched for `META-INF/addons/*.edn`.
     pub paths: Vec<String>,
+    /// Further directory names under `META-INF` that hold manifests,
+    /// beside `addons` and `hive-addons`.
+    pub manifest_dirs: Vec<String>,
     /// Extra source roots on the addon classpath (e.g. the `src` of the
     /// IAddon protocol library), before `DIRGE_ADDON_PATH`.
     pub source_paths: Vec<String>,
     /// Namespace defining the IAddon protocol functions (`addon?`,
     /// `initialize!`, `shutdown!`, `tools`, optionally `hooks` and `health`).
+    /// Absent = the manifests' `:addon/protocol-ns`, else the embedded
+    /// `hive-addon.protocol`.
     pub protocol_ns: Option<String>,
     /// Seconds a prompt's run waits for `:dirge/session-start` answers
     /// before it opens without them. Default 30.
@@ -737,6 +742,13 @@ pub struct AddonsConfig {
     /// addon's tools, hooks and commands again and hand the changes to the
     /// running agent. Default true.
     pub live_refresh: Option<bool>,
+    /// Seconds a fold waits for `:dirge/compact` or `:dirge/before-compact`
+    /// before it goes on without the answer. Default 60.
+    pub compact_timeout_secs: Option<u64>,
+    /// Seconds each `:dirge/transform-context`, `:dirge/prepare-next-turn`
+    /// and `:dirge/should-stop-after-turn` call waits for its answer before
+    /// the loop goes on without it. Default 10.
+    pub turn_timeout_secs: Option<u64>,
 }
 
 /// The `addons.nrepl` key.
