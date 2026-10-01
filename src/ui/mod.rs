@@ -1654,7 +1654,7 @@ pub async fn run_interactive(
     // off this loop and apart from the agent. Updates arrive on `view_rx`;
     // the latest model decides locally which keys and commands it owns.
     let (view_tx, mut view_rx) = mpsc::unbounded_channel::<crate::ui::view::ViewUpdate>();
-    let mut view_model = crate::ui::view::start(view_tx);
+    let mut view_model = crate::ui::view::start(view_tx, cfg.view_engine.as_deref());
     // Optional external panel feed (off by default). Its handle lives for
     // the loop; dropping it on exit stops the subscription task.
     let _panel_feed = crate::extras::panel_feed::start(cfg.panel_feed.as_ref());
