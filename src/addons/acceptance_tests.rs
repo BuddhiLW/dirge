@@ -237,11 +237,19 @@ fn a_host_overlay_changes_host_policy_and_reload_undoes_a_broken_one() {
 (defn tool-view [tool] (assoc (select-keys tool [:name]) :description "again"))"#,
     );
     let report = host.reload(super::load_set(&settings_plan, true));
-    assert!(report.source_errors.is_empty(), "{:?}", report.source_errors);
+    assert!(
+        report.source_errors.is_empty(),
+        "{:?}",
+        report.source_errors
+    );
     assert_eq!(host.tools()[0].description, "again");
     std::fs::remove_file(&overlay).unwrap();
     let report = host.reload(super::load_set(&settings_plan, true));
-    assert!(report.source_errors.is_empty(), "{:?}", report.source_errors);
+    assert!(
+        report.source_errors.is_empty(),
+        "{:?}",
+        report.source_errors
+    );
     assert_eq!(host.tools()[0].description, ECHO_TOOL);
 
     host.shutdown();

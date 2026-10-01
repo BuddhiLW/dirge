@@ -777,7 +777,10 @@ impl Interp {
         let mut applied = Vec::new();
         self.restore_builtin_host(&applied);
         for overlay in wanted {
-            match self.load_file(&overlay).and_then(|()| self.check_contract()) {
+            match self
+                .load_file(&overlay)
+                .and_then(|()| self.check_contract())
+            {
                 Ok(()) => applied.push(overlay),
                 Err(error) => {
                     self.restore_builtin_host(&applied);

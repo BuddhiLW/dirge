@@ -709,22 +709,26 @@ async fn loop_compaction_fires_pre_compact_then_the_existing_hooks() {
     let before_seen = Arc::new(Mutex::new(Vec::new()));
     let recorded = before_seen.clone();
     let existing = CompactionHooks {
-        on_before: Arc::new(move |count, tokens| {
-            recorded.lock().unwrap().push((count, tokens));
+        on_before: Arc::new(move |count, tokens, facts| {
+            recorded.lock().unwrap().push((count, tokens, facts.reason));
             Box::pin(async {})
         }),
-        on_compact: Arc::new(|_| Box::pin(async { Some("plugin summary".to_string()) })),
+        on_compact: Arc::new(|_, _| Box::pin(async { Some("plugin summary".to_string()) })),
     };
     let hooks = loop_hooks::with_pre_compact(Some(existing), compact_source, Some("s9".into()));
+    let facts = crate::agent::agent_loop::types::CompactionFacts {
+        reason: "pressure",
+        ..Default::default()
+    };
 
-    (hooks.on_before)(3, 100).await;
+    (hooks.on_before)(3, 100, facts.clone()).await;
 
     let seen = COMPACT_RUNNER.get().unwrap().seen();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].0, "on-auto");
     assert_eq!(seen[0].1["session_id"], "s9");
-    assert_eq!(*before_seen.lock().unwrap(), vec![(3, 100)]);
-    let summary = (hooks.on_compact)(Vec::new()).await;
+    assert_eq!(*before_seen.lock().unwrap(), vec![(3, 100, "pressure")]);
+    let summary = (hooks.on_compact)(Vec::new(), facts).await;
     assert_eq!(summary.as_deref(), Some("plugin summary"));
 }
 
@@ -732,9 +736,13 @@ async fn loop_compaction_fires_pre_compact_then_the_existing_hooks() {
 async fn loop_compaction_without_existing_hooks_supplies_no_summary() {
     let hooks = loop_hooks::with_pre_compact(None, || None, None);
 
-    (hooks.on_before)(1, 1).await;
+    (hooks.on_before)(1, 1, Default::default()).await;
 
-    assert!((hooks.on_compact)(Vec::new()).await.is_none());
+    assert!(
+        (hooks.on_compact)(Vec::new(), Default::default())
+            .await
+            .is_none()
+    );
 }
 
 // -------------------------------------------------------------- dialect

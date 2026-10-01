@@ -519,9 +519,9 @@ pub fn with_pre_compact(
     let before = existing.as_ref().map(|h| h.on_before.clone());
     let on_compact: OnCompactFn = match existing {
         Some(h) => h.on_compact,
-        None => Arc::new(|_| Box::pin(async { None })),
+        None => Arc::new(|_, _| Box::pin(async { None })),
     };
-    let on_before: OnBeforeCompactFn = Arc::new(move |count, tokens| {
+    let on_before: OnBeforeCompactFn = Arc::new(move |count, tokens, facts| {
         let before = before.clone();
         let session_id = session_id.clone();
         Box::pin(async move {
@@ -530,7 +530,7 @@ pub fn with_pre_compact(
                 super::pre_compact(hooks, subject, session_id).await;
             }
             if let Some(before) = before {
-                before(count, tokens).await;
+                before(count, tokens, facts).await;
             }
         })
     });
