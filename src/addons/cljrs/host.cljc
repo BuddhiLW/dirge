@@ -49,9 +49,12 @@
   (select-keys tool [:name :description :inputSchema]))
 
 (defn hook-names
-  "The hook keys an addon registered, as strings without the colon."
+  "The hook keys an addon registered, as strings without the colon.
+   :dirge/commands is the slash-command table, reported as :commands, so
+   it is not one of them."
   [hooks]
-  (vec (sort (map (fn [k] (subs (str k) 1)) (keys hooks)))))
+  (vec (sort (keep (fn [k] (when-not (= k :dirge/commands) (subs (str k) 1)))
+                   (keys hooks)))))
 
 (defn index-tools
   "tool-defs keyed by :name."

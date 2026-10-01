@@ -186,6 +186,13 @@ fn addon_commands_reach_the_panel_and_mcp_through_the_harness() {
 
     let names: Vec<String> = host.commands().into_iter().map(|c| c.name).collect();
     assert_eq!(names, vec!["ask", "echo", "run", "shout"]);
+    // The command table is reported as commands, never as a hook key.
+    for (id, keys) in host.hook_keys() {
+        assert!(
+            !keys.iter().any(|k| k == "dirge/commands"),
+            "{id}: {keys:?}"
+        );
+    }
 
     let echo = host.command("echo").expect("echo registered");
     let out = host.run_command(&echo, "hello there").expect("echo runs");
