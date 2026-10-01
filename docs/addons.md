@@ -149,6 +149,9 @@ keys and ignores the rest:
 | `:dirge/prepare-next-turn` | `{:text :stop-reason :tool-results :messages :tokens :session-id}` | `nil`, text, or `{:thinking "level" :context "text"}` |
 | `:dirge/should-stop-after-turn` | same as `:dirge/prepare-next-turn` | `true`, `{:stop true}` or `{:stop "reason"}` to end the run |
 | `:dirge/event` | one event of the run, see [Watching the run](#watching-the-run-dirgeevent) | ignored |
+| `:dirge/acp-ext-method` | `{:method :params}`, see [ACP](#acp-extension-methods-and-_meta) | the result, or `nil` to leave it to another addon |
+| `:dirge/acp-ext-notification` | `{:method :params}` | ignored |
+| `:dirge/acp-meta` | `{:method :session-id :meta :response-meta}` | a map whose keys are added to the response's `_meta` |
 
 A text answer may also be given as `{:context "text"}`. Hooks run for the
 main session only, after Janet plugin and command hooks. Subagents never run
@@ -587,6 +590,47 @@ dirge calls `use-protocol!`, `load-addon!`, `shutdown-addon!`,
 but each must still be a function afterwards. An overlay that fails to load,
 or that leaves one of them without a function, is undone whole, and the
 reason is logged at start and listed among the reload's source errors.
+
+### ACP: extension methods and `_meta`
+
+When dirge runs as an ACP agent (`dirge --acp`, see [acp.md](acp.md)),
+three hooks let an addon add to the protocol. They run for any ACP session,
+not only the main one.
+
+- `:dirge/acp-ext-method` gets every request whose method starts with `_`.
+  `:method` is the name as the client sent it, leading `_` included
+  (`"_zed.dev/workspace/info"`), and `:params` its parameters. Addons are
+  asked in load order and the first answer that is not `nil` is sent back
+  as the result, so an addon returns `nil` for methods it does not handle.
+  If every addon returns `nil` or throws, the client gets method-not-found.
+  If they do not answer within 30 seconds, it gets an internal error.
+- `:dirge/acp-ext-notification` gets every notification whose method starts
+  with `_`, with the same arguments. Its answer is ignored and nothing waits
+  for it.
+- `:dirge/acp-meta` runs before dirge answers `initialize`, `session/new` and
+  `session/prompt`. `:method` is one of those names, `:session-id` is `nil`
+  for `initialize`, `:meta` is the `_meta` the client sent with the request
+  (or `nil`), and `:response-meta` is the `_meta` dirge is about to send (for
+  a prompt, `{:usage {…}}` when the provider reported usage). Return a map:
+  its keys are added to the response's `_meta`. A key already there is kept,
+  so an addon cannot replace `usage`, and when two addons return the same
+  key the one loaded first wins. Anything other than a map is ignored. If
+  the addons do not answer within 30 seconds the response is sent without
+  their keys.
+
+Keys keep their namespace both ways: `_meta` key `"zed.dev/panel"` arrives
+as `:zed.dev/panel`, and an answer `{:zed.dev/panel {:open true}}` is sent
+as `"zed.dev/panel"`.
+
+```clojure
+(defn hooks [_]
+  {:dirge/acp-ext-method
+   (fn [{:keys [method params]}]
+     (when (= method "_example/echo") {:echo params}))
+   :dirge/acp-meta
+   (fn [{:keys [method]}]
+     (when (= method "initialize") {:example/methods ["_example/echo"]}))})
+```
 
 ## Example
 

@@ -7,6 +7,8 @@
 //! become slash commands. `/addons reload` swaps all of it in place. See
 //! docs/addons.md.
 
+#[cfg(feature = "acp")]
+pub mod acp;
 pub mod cljrs;
 pub mod command_hooks;
 pub mod compaction;
