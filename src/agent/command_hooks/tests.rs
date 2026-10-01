@@ -624,6 +624,119 @@ fn payload_carries_claude_envelope() {
     assert_eq!(p["tool_name"], "Bash");
 }
 
+// ----------------------------------------------------------- PreCompact
+
+use super::{CompactTrigger, PreCompact};
+use crate::agent::agent_loop::types::CompactionHooks;
+
+#[test]
+fn pre_compact_speaks_claude_code_fields() {
+    let manual = PreCompact::new(CompactTrigger::Manual, Some("keep the plan"));
+    assert_eq!(
+        manual.fields(),
+        json!({ "trigger": "manual", "custom_instructions": "keep the plan" })
+    );
+    assert_eq!(manual.target(), "manual");
+
+    let auto = PreCompact::new(CompactTrigger::Auto, None);
+    assert_eq!(
+        auto.fields(),
+        json!({ "trigger": "auto", "custom_instructions": "" })
+    );
+    assert!(PreCompact::event().is_open());
+    assert_eq!(PreCompact::event().as_str(), "PreCompact");
+}
+
+fn pre_compact_config() -> HooksConfig {
+    let mut cfg = HooksConfig::new();
+    cfg.insert(
+        PreCompact::EVENT.into(),
+        vec![
+            HookMatcher {
+                matcher: Some("manual".into()),
+                hooks: vec![cmd("on-manual")],
+            },
+            HookMatcher {
+                matcher: Some("auto".into()),
+                hooks: vec![cmd("on-auto")],
+            },
+        ],
+    );
+    cfg
+}
+
+#[test]
+fn pre_compact_runs_the_group_its_trigger_matches() {
+    let runner = ScriptedRunner::answering(vec![("on-auto", Ok(exit(2, "", "no")))]);
+    let hooks = registry(pre_compact_config(), runner.clone());
+    let subject = PreCompact::new(CompactTrigger::Auto, None);
+
+    let out = super::pre_compact_on(&hooks, &subject, Some("s1"));
+
+    let seen = runner.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "on-auto");
+    assert_eq!(seen[0].1["hook_event_name"], "PreCompact");
+    assert_eq!(seen[0].1["session_id"], "s1");
+    assert_eq!(seen[0].1["trigger"], "auto");
+    assert!(out.block.is_some(), "the answer is reported, not obeyed");
+}
+
+#[test]
+fn pre_compact_reaches_an_addon_listener() {
+    let listener = ScriptedListener::hearing(vec!["PreCompact"], Ok(exit(0, "", "")));
+    let hooks = CommandHooks::new(HooksConfig::new(), PathBuf::from("/proj"), dispatch(None))
+        .with_listeners(listening(listener.clone()));
+    assert!(hooks.answers(PreCompact::event()));
+    let subject = PreCompact::new(CompactTrigger::Manual, Some("focus"));
+
+    super::pre_compact_on(&hooks, &subject, None);
+
+    let heard = listener.heard.lock().unwrap();
+    assert_eq!(heard[0]["trigger"], "manual");
+    assert_eq!(heard[0]["custom_instructions"], "focus");
+}
+
+static COMPACT_RUNNER: std::sync::OnceLock<Arc<ScriptedRunner>> = std::sync::OnceLock::new();
+
+fn compact_source() -> Option<Arc<CommandHooks>> {
+    let runner = COMPACT_RUNNER.get_or_init(|| ScriptedRunner::answering(vec![]));
+    Some(registry(pre_compact_config(), runner.clone()))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn loop_compaction_fires_pre_compact_then_the_existing_hooks() {
+    let before_seen = Arc::new(Mutex::new(Vec::new()));
+    let recorded = before_seen.clone();
+    let existing = CompactionHooks {
+        on_before: Arc::new(move |count, tokens| {
+            recorded.lock().unwrap().push((count, tokens));
+            Box::pin(async {})
+        }),
+        on_compact: Arc::new(|_| Box::pin(async { Some("plugin summary".to_string()) })),
+    };
+    let hooks = loop_hooks::with_pre_compact(Some(existing), compact_source, Some("s9".into()));
+
+    (hooks.on_before)(3, 100).await;
+
+    let seen = COMPACT_RUNNER.get().unwrap().seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "on-auto");
+    assert_eq!(seen[0].1["session_id"], "s9");
+    assert_eq!(*before_seen.lock().unwrap(), vec![(3, 100)]);
+    let summary = (hooks.on_compact)(Vec::new()).await;
+    assert_eq!(summary.as_deref(), Some("plugin summary"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn loop_compaction_without_existing_hooks_supplies_no_summary() {
+    let hooks = loop_hooks::with_pre_compact(None, || None, None);
+
+    (hooks.on_before)(1, 1).await;
+
+    assert!((hooks.on_compact)(Vec::new()).await.is_none());
+}
+
 // -------------------------------------------------------------- dialect
 
 #[test]
