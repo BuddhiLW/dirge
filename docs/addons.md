@@ -23,13 +23,18 @@ my-addon/
   resources/META-INF/addons/my-addon.edn
 ```
 
-dirge searches for `META-INF/addons/*.edn` manifests under:
+dirge searches for manifests under:
 
 1. `<project>/.dirge/addons/`
 2. `~/.config/dirge/addons/`
 3. every directory listed in `addons.paths` in `config.json`
 
 A symlink to an addon checkout works in any of them.
+
+A manifest is any `.edn` file directly inside `META-INF/addons/` or
+`META-INF/hive-addons/`. The two directories are treated the same, so an
+addon that also ships to hive can keep its manifest under `hive-addons/`
+and dirge finds it there without a second copy.
 
 The addon's `src/` and `resources/` go on the interpreter's source path, plus
 the `src/` of every `:local/root` dependency named in its `deps.edn`
@@ -308,6 +313,57 @@ shows the endpoint.
 Evaluations run between dirge's calls into the addons, never during one, so
 a REPL form sees the same state a hook does. `mcp-call` and `call-tool` work
 from the REPL.
+
+### What the REPL can change, and what needs a rebuild
+
+Anything that is Clojure in the running interpreter can be changed from the
+REPL, and the change is used from the next call:
+
+- addon code: tools, hooks, commands and the functions behind them;
+- dirge's own host namespace, `dirge.addon.host`, which dirge calls by name
+  for every load, tool call, command and hook;
+- the `dirge.harness` vars. The functions behind them are written in Rust,
+  so from the REPL you can wrap or replace a var, but you cannot give the
+  harness a new ability.
+
+Anything that is Rust needs a rebuild: dirge's core, the Rust side of
+`dirge.harness`, and a new place in dirge that calls a hook key. An addon
+can register any key at the REPL (see [Open hook keys](#open-hook-keys)),
+but nothing calls it until a seam in dirge does. `dirge.addon.host` is
+compiled into the binary as well, so a change to its source file on disk
+also needs a rebuild.
+
+What you define at the REPL lives only in the running interpreter. Nothing
+is written to disk, so it is gone when dirge exits: put a change that
+should stay into the addon's source files. `/addons reload` evaluates those
+files again, which puts back the file's version of anything the REPL
+redefined under the addon's own `src/`.
+
+### How it differs from a JVM nREPL
+
+The server is clojurust's own nREPL, not the JVM's, and it does less than
+the nREPL of a shared JVM process such as hive's:
+
+- **One evaluation at a time.** Every request runs on the addon runtime's
+  single thread, in order, between dirge's own calls into the addons.
+  Sessions keep their own namespace and `*1`/`*2`/`*3`/`*e`, but they do not
+  run in parallel. While an evaluation runs, dirge's hooks, tools and
+  commands wait for it, so a long evaluation holds them up.
+- **Interrupt stops the running form.** `interrupt` drops an `eval` or
+  `load-file` that has not started yet and stops one that is running at its
+  next checkpoint, so a form that loops forever can be stopped from a
+  second connection and the addon runtime answers again. The eval replies
+  `interrupted`. Native code that never returns to the interpreter, such as
+  a blocking `mcp-call`, is not stopped until it returns.
+- **A fixed set of ops, no middleware.** The server answers `clone`,
+  `close`, `describe`, `eval`, `interrupt`, `load-file`, `lookup`,
+  `ls-sessions` and `completions`, plus two ops CIDER uses:
+  `macroexpand` and `analyze-last-stacktrace` (also as `stacktrace`).
+  Nothing else can be added: there is no `cider-nrepl` or `refactor-nrepl`
+  middleware, so the debugger, test runner and refactorings do not work.
+  Evaluation, completion, documentation lookup and macroexpansion do.
+  Printed output streams as `out` while a form runs. There is no `err`
+  stream, and a stack trace names each cause but lists no frames.
 
 ### Refreshing in place
 
