@@ -205,6 +205,7 @@ mod tests {
             prompt: "my password is x".into(),
             reminders: Vec::new(),
             refusal: None,
+            usage: None,
         }
     }
 
