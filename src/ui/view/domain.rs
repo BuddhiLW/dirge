@@ -189,6 +189,7 @@ impl ViewModel {
     }
 
     /// The names of the view commands, in model order.
+    #[cfg(test)]
     pub fn command_names(&self) -> Vec<&str> {
         self.view_commands.iter().map(|c| c.name.as_str()).collect()
     }
