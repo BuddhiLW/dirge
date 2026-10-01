@@ -4,6 +4,7 @@ use crossterm::style::Color;
 use smallvec::SmallVec;
 
 use crate::cli::Cli;
+use crate::command_class::{ArgForm, ClassRule, CommandClass};
 use crate::config::Config;
 use crate::context::ContextFiles;
 #[cfg(feature = "mcp")]
@@ -843,12 +844,51 @@ fn compress_instructions(parts: &[&str]) -> Option<String> {
     (parts.len() > 1).then(|| parts[1..].join(" "))
 }
 
-/// Canonical list of built-in slash commands paired with their
-/// short `/help` description. **Single source of truth** — both
-/// `slash_command_names()` (tab completion, `is_known_slash_command`)
-/// and `slash_command_descriptions()` (the `/help` render) derive
-/// from this, so adding a command means one entry here plus one
-/// match arm in `handle_slash`. Nothing else.
+/// A built-in slash command: its name, its `/help` line, and its class
+/// while a turn is in flight.
+#[derive(Debug, Clone, Copy)]
+pub struct SlashCommand {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub class: ClassRule,
+}
+
+impl SlashCommand {
+    /// The same command, classed by `class` instead of mutating.
+    fn class(self, class: ClassRule) -> Self {
+        SlashCommand { class, ..self }
+    }
+}
+
+/// A command that changes state a running turn depends on: gated while
+/// the loop is busy until [`SlashCommand::class`] says otherwise.
+fn cmd(name: &'static str, description: &'static str) -> SlashCommand {
+    SlashCommand {
+        name,
+        description,
+        class: ClassRule::always(CommandClass::Mutating),
+    }
+}
+
+/// Acts on the display or on a setting a running turn reads live.
+const VIEW: ClassRule = ClassRule::always(CommandClass::View);
+/// Shows state and changes nothing.
+const READ_ONLY: ClassRule = ClassRule::always(CommandClass::ReadOnly);
+/// Lists when bare; switches or changes something when given an argument.
+const READ_ONLY_BARE: ClassRule = ClassRule::read_only_when(&[ArgForm::Bare]);
+/// Lists when bare or given `list`.
+const READ_ONLY_LISTING: ClassRule =
+    ClassRule::read_only_when(&[ArgForm::Bare, ArgForm::Word("list")]);
+/// Lists only when given `list`.
+const READ_ONLY_LIST_ARG: ClassRule = ClassRule::read_only_when(&[ArgForm::Word("list")]);
+
+/// Canonical table of built-in slash commands: name, short `/help`
+/// description, and busy-gate class. **Single source of truth** —
+/// `slash_command_names()` (tab completion, `is_known_slash_command`),
+/// `slash_command_descriptions()` (the `/help` render) and
+/// `command_class()` (the busy gate) derive from this, so adding a
+/// command means one entry here plus one match arm in `handle_slash`.
+/// Nothing else.
 ///
 /// **When you add a new slash command to `handle_slash`'s match
 /// arms, add it here too.** A drift in the other direction (listed
@@ -859,105 +899,110 @@ fn compress_instructions(parts: &[&str]) -> Option<String> {
 /// Always-compiled (not feature-gated) because `handle_slash`'s
 /// default arm consults it regardless of the tab-completion
 /// feature.
-fn slash_commands() -> Vec<(&'static str, &'static str)> {
+fn slash_commands() -> Vec<SlashCommand> {
     let mut cmds = vec![
-        ("/addons", "list Clojure addons, or reload them in place"),
-        ("/agent", "switch to a named agent, or turn agents off"),
-        ("/agents", "list available agents"),
-        ("/allow", "manage the session permission allowlist"),
-        (
+        cmd("/addons", "list Clojure addons, or reload them in place"),
+        cmd("/agent", "switch to a named agent, or turn agents off"),
+        cmd("/agents", "list available agents"),
+        cmd("/allow", "manage the session permission allowlist"),
+        cmd(
             "/btw",
             "ask a one-shot side question without disrupting the session",
         ),
-        ("/cache", "show the cumulative prefix-cache hit ratio"),
-        ("/cd", "change the working directory"),
-        ("/clear", "clear the conversation and session state"),
-        ("/clone", "clone the conversation path up to a message"),
-        (
+        cmd("/cache", "show the cumulative prefix-cache hit ratio").class(READ_ONLY),
+        cmd("/cd", "change the working directory"),
+        cmd("/clear", "clear the conversation and session state"),
+        cmd("/clone", "clone the conversation path up to a message"),
+        cmd(
             "/compact",
             "summarize and compact the conversation (alias of /compress)",
         ),
-        ("/compress", "summarize and compact the conversation"),
+        cmd("/compress", "summarize and compact the conversation"),
         #[cfg(unix)]
-        ("/edit", "open the input buffer in $EDITOR"),
-        (
+        cmd("/edit", "open the input buffer in $EDITOR"),
+        cmd(
             "/effort",
             "set reasoning effort: off/minimal/low/medium/high/xhigh/max",
-        ),
-        (
+        )
+        .class(VIEW),
+        cmd(
             "/fork",
             "fork the conversation at a message; restore the original prompt",
         ),
-        ("/graph", "query the entity/relation graph"),
-        ("/help", "show this help"),
-        ("/issues", "view the native issue board"),
-        ("/kill", "kill a running subagent"),
-        ("/msg", "send a message to a running subagent"),
-        (
+        cmd("/graph", "query the entity/relation graph"),
+        cmd("/help", "show this help").class(READ_ONLY),
+        cmd("/issues", "view the native issue board"),
+        cmd("/kill", "kill a running subagent"),
+        cmd("/msg", "send a message to a running subagent"),
+        cmd(
             "/code-review",
             "review the working-tree diff for issues (needs critic_provider)",
         ),
-        (
+        cmd(
             "/learn",
             "distill sources or this session into a reusable skill",
         ),
-        (
+        cmd(
             "/memory",
             "show what is remembered; `edit` to change it, `review` to confirm queued writes, `reload` to refresh",
-        ),
-        ("/mode", "view or set the permission/security mode"),
-        ("/model", "list configured models, or switch to one"),
-        ("/plan", "run the phased plan workflow on a request"),
-        ("/plugins", "list or load plugins"),
-        ("/prompt", "list, switch, or reset the active prompt layer"),
-        ("/quit", "quit dirge"),
-        ("/reasoning", "toggle reasoning visibility"),
-        (
+        )
+        .class(READ_ONLY_LIST_ARG),
+        cmd("/mode", "view or set the permission/security mode").class(VIEW),
+        cmd("/model", "list configured models, or switch to one").class(READ_ONLY_BARE),
+        cmd("/plan", "run the phased plan workflow on a request"),
+        cmd("/plugins", "list or load plugins"),
+        cmd("/prompt", "list, switch, or reset the active prompt layer").class(READ_ONLY_BARE),
+        cmd("/quit", "quit dirge").class(VIEW),
+        cmd("/reasoning", "toggle reasoning visibility").class(VIEW),
+        cmd(
             "/regen-prompts",
             "regenerate built-in prompts and rebuild the agent",
         ),
-        ("/retry", "edit and resend your last message"),
+        cmd("/retry", "edit and resend your last message"),
         #[cfg(unix)]
-        (
+        cmd(
             "/sandbox",
             "attach, snapshot, or reboot the microVM sandbox",
         ),
-        ("/sessions", "list, switch, or delete saved sessions"),
-        ("/spec", "inspect the spec-driven workflow tracker"),
-        ("/tasks", "list subagent chats and background shells"),
-        ("/toggle", "turn a feature (e.g. todo tools) on or off"),
-        ("/tree", "show the conversation tree, or switch to a branch"),
-        ("/undo", "undo the last user/agent message pair"),
-        ("/why", "trace why an operation was allowed or denied"),
+        cmd("/sessions", "list, switch, or delete saved sessions").class(READ_ONLY_LISTING),
+        cmd("/spec", "inspect the spec-driven workflow tracker"),
+        cmd("/tasks", "list subagent chats and background shells").class(READ_ONLY),
+        cmd("/toggle", "turn a feature (e.g. todo tools) on or off"),
+        cmd("/tree", "show the conversation tree, or switch to a branch").class(READ_ONLY_BARE),
+        cmd("/undo", "undo the last user/agent message pair"),
+        cmd("/why", "trace why an operation was allowed or denied"),
     ];
     #[cfg(feature = "git-worktree")]
     {
-        cmds.push(("/worktree", "create and switch to a new git worktree"));
-        cmds.push(("/wt-exit", "leave a worktree and return to its base"));
-        cmds.push((
+        cmds.push(cmd("/worktree", "create and switch to a new git worktree"));
+        cmds.push(cmd("/wt-exit", "leave a worktree and return to its base"));
+        cmds.push(cmd(
             "/wt-merge",
             "merge a worktree's work back to its base branch",
         ));
     }
     #[cfg(feature = "mcp")]
-    cmds.push(("/mcp", "list connected MCP servers and their tools"));
+    cmds.push(cmd("/mcp", "list connected MCP servers and their tools"));
     // `/loop` is always dispatched (its handler prints a "requires the
     // 'loop' feature" message when built without it), so it's a KNOWN
     // command regardless of the feature — keep the canonical list in sync
     // (dirge-3p8j). The gated entry made it un-completable / "unknown" in
     // no-loop builds even though the arm handled it.
-    cmds.push(("/loop", "start, stop, or show a background prompt loop"));
+    cmds.push(cmd(
+        "/loop",
+        "start, stop, or show a background prompt loop",
+    ));
     #[cfg(feature = "dap")]
-    cmds.push((
+    cmds.push(cmd(
         "/debug",
         "control the DAP debugger (launch, step, breakpoints)",
     ));
     #[cfg(feature = "dap")]
-    cmds.push((
+    cmds.push(cmd(
         "/dap-repl",
         "evaluate expressions in the paused debug session",
     ));
-    cmds.sort_unstable_by_key(|(name, _)| *name);
+    cmds.sort_unstable_by_key(|c| c.name);
     cmds
 }
 
@@ -965,7 +1010,7 @@ fn slash_commands() -> Vec<(&'static str, &'static str)> {
 /// `slash_commands()` (sorted by name) — do not re-sort here; tab
 /// completion cycles previews in that stable order.
 pub fn slash_command_names() -> Vec<&'static str> {
-    slash_commands().into_iter().map(|(name, _)| name).collect()
+    slash_commands().into_iter().map(|c| c.name).collect()
 }
 
 /// `(name, description)` pairs for the `/help` render: the built-ins
@@ -978,7 +1023,7 @@ pub fn slash_command_descriptions() -> Vec<(String, String)> {
 fn descriptions_with(view: &[crate::ui::view::ViewCommand]) -> Vec<(String, String)> {
     let builtins = slash_commands()
         .into_iter()
-        .map(|(n, d)| (n.to_string(), d.to_string()));
+        .map(|c| (c.name.to_string(), c.description.to_string()));
     let owned = view
         .iter()
         .map(|c| (format!("/{}", c.name), c.summary.clone()));
@@ -1000,6 +1045,47 @@ pub fn is_view_command(name: &str) -> bool {
 /// fallback / unknown).
 pub fn is_known_slash_command(name: &str) -> bool {
     slash_command_names().contains(&name) || is_view_command(name)
+}
+
+/// The class a command declares where it is registered: a built-in's row,
+/// else the class an addon gave its command. Plugin commands declare none.
+fn class_rule(head: &str) -> Option<ClassRule> {
+    slash_commands()
+        .into_iter()
+        .find(|c| c.name == head)
+        .map(|c| c.class)
+        .or_else(|| addon_class_rule(head))
+}
+
+/// The class of the addon command `head` names, if an addon registered it.
+/// The host withholds names a built-in or plugin command takes, so this
+/// never shadows one.
+#[cfg(feature = "addons")]
+fn addon_class_rule(head: &str) -> Option<ClassRule> {
+    let host = crate::addons::global()?;
+    let command = host.command(head.strip_prefix('/')?)?;
+    Some(command.class.into())
+}
+
+#[cfg(not(feature = "addons"))]
+fn addon_class_rule(_head: &str) -> Option<ClassRule> {
+    None
+}
+
+/// The class of the slash line `text`: what the busy gate asks before
+/// running it while a turn is in flight. Unknown commands are mutating.
+pub fn command_class(text: &str) -> CommandClass {
+    crate::command_class::classify(text, class_rule)
+}
+
+/// Built-in commands some invocation of which runs while a turn is in
+/// flight, sorted, for the busy notice.
+pub fn commands_runnable_while_busy() -> Vec<&'static str> {
+    slash_commands()
+        .into_iter()
+        .filter(|c| c.class.ever_runs_while_busy())
+        .map(|c| c.name)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1451,7 +1537,7 @@ mod tests {
     fn slash_commands_have_no_duplicate_names() {
         let cmds = slash_commands();
         let total = cmds.len();
-        let mut names: Vec<&str> = cmds.iter().map(|(n, _)| *n).collect();
+        let mut names: Vec<&str> = cmds.iter().map(|c| c.name).collect();
         names.sort_unstable();
         names.dedup();
         assert_eq!(
@@ -1497,6 +1583,107 @@ mod tests {
         }
         assert!(!is_view_command("/help"));
         assert!(!is_view_command("swarm"));
+    }
+
+    /// The busy gate's answer for the forms the old hand-kept allowlist
+    /// named, pinned so moving the decision into the table changed nothing.
+    #[test]
+    fn busy_gate_classes_pin_the_previous_allowlist() {
+        let table: &[(&str, bool)] = &[
+            ("/quit", true),
+            ("/help", true),
+            ("/reasoning", true),
+            ("/tasks", true),
+            ("/tasks list", true),
+            ("/mode", true),
+            ("/mode yolo", true),
+            ("/cache", true),
+            ("/effort", true),
+            ("/effort high", true),
+            ("/sessions", true),
+            ("/sessions list", true),
+            ("/sessions 42", false),
+            ("/tree", true),
+            ("/tree 3", false),
+            ("/model", true),
+            ("/model gpt-4", false),
+            ("/prompt", true),
+            ("/prompt my-prompt", false),
+            ("/memory list", true),
+            ("/memory", false),
+            ("/memory add key value", false),
+            ("/cd", false),
+            ("/cd /tmp", false),
+            ("/clear", false),
+            ("/compress", false),
+            ("/compact", false),
+            ("/clone", false),
+            ("/fork", false),
+            ("/undo", false),
+            ("/retry", false),
+            ("/allow bash rm *", false),
+            ("/addons", false),
+            ("/panel", false),
+            ("/swarm", false),
+            ("/loop", false),
+            ("/not-a-command", false),
+        ];
+        for (text, runs) in table {
+            assert_eq!(command_class(text).runs_while_busy(), *runs, "{text:?}");
+        }
+    }
+
+    /// Every built-in command, bare and with a few arguments, answers as the
+    /// old allowlist did. The allowlist is restated here as the oracle.
+    #[test]
+    fn every_builtin_command_keeps_its_previous_busy_gate_answer() {
+        fn previous(text: &str) -> bool {
+            let head = text.split_whitespace().next().unwrap_or("");
+            let args = text.split_whitespace().nth(1);
+            let always_safe = matches!(
+                head,
+                "/quit" | "/help" | "/reasoning" | "/tasks" | "/mode" | "/cache" | "/effort"
+            );
+            let safe_when_no_arg =
+                matches!(head, "/sessions" | "/tree" | "/model" | "/prompt") && args.is_none();
+            let safe_when_list = matches!(
+                (head, args),
+                ("/memory", Some("list")) | ("/sessions", Some("list"))
+            );
+            always_safe || safe_when_no_arg || safe_when_list
+        }
+        for name in slash_command_names() {
+            for arg in ["", " list", " 42", " yolo", " list more"] {
+                let text = format!("{name}{arg}");
+                assert_eq!(
+                    command_class(&text).runs_while_busy(),
+                    previous(&text),
+                    "{text:?}"
+                );
+            }
+        }
+    }
+
+    /// The busy notice lists exactly the built-ins that can run mid-turn.
+    #[test]
+    fn the_busy_notice_names_every_command_that_runs_mid_turn() {
+        assert_eq!(
+            commands_runnable_while_busy(),
+            vec![
+                "/cache",
+                "/effort",
+                "/help",
+                "/memory",
+                "/mode",
+                "/model",
+                "/prompt",
+                "/quit",
+                "/reasoning",
+                "/sessions",
+                "/tasks",
+                "/tree",
+            ]
+        );
     }
 
     /// `/swarm` is dispatched, listed in `/help` and parses its argument

@@ -151,6 +151,7 @@ mod tests {
             addon_id: "a".into(),
             name: "rows".into(),
             description: String::new(),
+            class: Default::default(),
         };
         let outcome = command_job(host, command, "/rows 1 2  3");
         let SlashOutcome::DeferAddon(AddonJob::Command { command, args, .. }) = outcome else {

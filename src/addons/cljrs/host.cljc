@@ -69,20 +69,22 @@
 
 (defn command-index
   "The slash commands in a hooks map's :dirge/commands entry, keyed by
-   command-name: {\"name\" {:description d :handler f}}. Entries without a
-   handler are dropped."
+   command-name: {\"name\" {:description d :class c :handler f}}. Entries
+   without a handler are dropped."
   [hooks]
   (into {}
         (for [[k spec] (get hooks :dirge/commands)
               :when (some? (:handler spec))]
           [(command-name k) {:description (or (:description spec) "")
+                             :class       (:class spec)
                              :handler     (:handler spec)}])))
 
 (defn command-views
-  "What dirge needs of indexed commands: names and descriptions, sorted."
+  "What dirge needs of indexed commands: names, descriptions and declared
+   classes (a string, or nil when undeclared), sorted."
   [commands]
-  (vec (for [[n {:keys [description]}] (sort-by key commands)]
-         {:name n :description description})))
+  (vec (for [[n {:keys [description class]}] (sort-by key commands)]
+         {:name n :description description :class (some-> class name)})))
 
 (defn- resolve-fns
   [protocol-ns names]
