@@ -125,7 +125,11 @@ fn fixtures() -> PathBuf {
 const PROTOCOL: &str = "fixture.addon-protocol";
 
 fn echo_plan(addons: &Path) -> super::domain::AddonPlan {
-    discovery::plan(&[addons.to_path_buf()], &[fixtures().join("protocol/src")])
+    discovery::plan(
+        &[addons.to_path_buf()],
+        &[fixtures().join("protocol/src")],
+        &super::layout::default_manifest_dirs(),
+    )
 }
 
 #[test]
@@ -820,4 +824,92 @@ fn session_end_reaches_mcp_before_the_teardown_closes_it() {
         "the end ran before the teardown"
     );
     host.shutdown();
+}
+
+#[test]
+fn an_addon_on_the_embedded_hive_addon_protocol_needs_no_protocol_library() {
+    let plan = discovery::plan(
+        &[fixtures().join("native")],
+        &[],
+        &super::layout::default_manifest_dirs(),
+    );
+    assert_eq!(plan.manifests.len(), 1, "{:?}", plan.manifests);
+    let protocol = super::protocol_ns(&crate::config::AddonsConfig::default(), &plan);
+    assert_eq!(protocol, super::DEFAULT_PROTOCOL_NS);
+    let host = super::start(
+        plan,
+        Harness::with_sink(Arc::new(RecordingSink::default())),
+        &protocol,
+    )
+    .expect("host starts");
+    assert!(host.failures().is_empty(), "{:?}", host.failures());
+    let tool = host.tools()[0].clone();
+    assert_eq!(tool.model_name(), "native-ping");
+    let (content, _) = host.call_tool(&tool, &json!({})).expect("tool runs");
+    assert_eq!(content[0]["text"], "pong");
+    host.shutdown();
+}
+
+#[test]
+fn another_hosts_addon_loads_through_its_manifest_dir_and_declared_protocol() {
+    let roots = [fixtures().join("protocol/src")];
+    let unseen = discovery::plan(
+        &[fixtures().join("foreign")],
+        &roots,
+        &super::layout::default_manifest_dirs(),
+    );
+    assert!(unseen.manifests.is_empty(), "not a default manifest dir");
+
+    let settings = crate::config::AddonsConfig {
+        manifest_dirs: vec!["other-addons".to_string()],
+        ..Default::default()
+    };
+    let plan = discovery::plan(
+        &[fixtures().join("foreign")],
+        &roots,
+        &super::manifest_dirs(&settings),
+    );
+    assert_eq!(plan.manifests.len(), 1, "{:?}", plan.manifests);
+    let protocol = super::protocol_ns(&settings, &plan);
+    assert_eq!(protocol, PROTOCOL, "the manifest's :addon/protocol-ns");
+
+    let pinned = crate::config::AddonsConfig {
+        protocol_ns: Some("pinned.protocol".to_string()),
+        ..settings.clone()
+    };
+    assert_eq!(super::protocol_ns(&pinned, &plan), "pinned.protocol");
+
+    let host = super::start(
+        plan,
+        Harness::with_sink(Arc::new(RecordingSink::default())),
+        &protocol,
+    )
+    .expect("host starts");
+    assert!(host.failures().is_empty(), "{:?}", host.failures());
+    let ids: Vec<String> = host.addons().into_iter().map(|a| a.id).collect();
+    assert_eq!(ids, vec!["foreign"]);
+    host.shutdown();
+}
+
+/// The embedded `hive-addon.protocol` is hive-addon's file, unchanged. To
+/// update it, copy the upstream file over the vendored one and set this to
+/// the digest the failure prints.
+const VENDORED_PROTOCOL_SHA256: &str =
+    "271c99cb65a01787959dc330b8e2d17ba1a699c6e567d777728c996480a107c1";
+
+#[test]
+fn the_embedded_protocol_is_hive_addons_file_unchanged() {
+    use sha2::{Digest, Sha256};
+    let digest: String = Sha256::digest(super::cljrs::isolate::PROTOCOL_SRC.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        digest, VENDORED_PROTOCOL_SHA256,
+        "vendored protocol.cljc changed"
+    );
+    assert!(
+        super::cljrs::isolate::PROTOCOL_SRC.starts_with("(ns hive-addon.protocol"),
+        "the embedded namespace must stay hive-addon.protocol"
+    );
 }

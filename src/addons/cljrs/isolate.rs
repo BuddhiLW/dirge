@@ -33,6 +33,12 @@ pub const ISOLATE_STACK_BYTES: usize = 64 * 1024 * 1024;
 const HOST_NS: &str = "dirge.addon.host";
 const HOST_SRC: &str = include_str!("host.cljc");
 
+/// hive-addon's `hive-addon.protocol` (MIT), vendored byte for byte from
+/// hive-addon 1.0.14 (upstream commit 21b314a) so an addon that implements
+/// IAddon needs no protocol library on its source roots. Never edit it:
+/// replace it with the upstream file and update the pin in the tests below.
+pub(crate) const PROTOCOL_SRC: &str = include_str!("vendor/hive_addon/protocol.cljc");
+
 /// Private namespace through which a call's arguments reach Clojure.
 const BRIDGE_NS: &str = "dirge.bridge";
 
@@ -545,6 +551,7 @@ impl Interp {
             .execution_mode(ExecutionMode::Tiered)
             .source_paths(roots.clone())
             .builtin_source(HOST_NS, HOST_SRC)
+            .builtin_source(super::super::DEFAULT_PROTOCOL_NS, PROTOCOL_SRC)
             .build()
             .map_err(|e| format!("cannot build the cljrs runtime: {e}"))?;
         cljrs_stdlib::install(&runtime);

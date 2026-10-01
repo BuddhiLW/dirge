@@ -718,11 +718,16 @@ pub struct AddonsConfig {
     pub enabled: Option<bool>,
     /// Extra directories searched for `META-INF/addons/*.edn`.
     pub paths: Vec<String>,
+    /// Further directory names under `META-INF` that hold manifests,
+    /// beside `addons` and `hive-addons`.
+    pub manifest_dirs: Vec<String>,
     /// Extra source roots on the addon classpath (e.g. the `src` of the
     /// IAddon protocol library), before `DIRGE_ADDON_PATH`.
     pub source_paths: Vec<String>,
     /// Namespace defining the IAddon protocol functions (`addon?`,
     /// `initialize!`, `shutdown!`, `tools`, optionally `hooks` and `health`).
+    /// Absent = the manifests' `:addon/protocol-ns`, else the embedded
+    /// `hive-addon.protocol`.
     pub protocol_ns: Option<String>,
     /// Seconds a prompt's run waits for `:dirge/session-start` answers
     /// before it opens without them. Default 30.

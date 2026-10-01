@@ -25,11 +25,13 @@ fn skipped(name: &str) -> bool {
 /// nest deeper than manifests do.
 const MAX_SOURCE_DEPTH: usize = 12;
 
-/// Every manifest under `dirs`, sorted so load order is stable.
-pub fn manifests(dirs: &[PathBuf]) -> Vec<PathBuf> {
+/// Every manifest under `dirs` in a `META-INF/<one of manifest_dirs>`,
+/// sorted so load order is stable.
+pub fn manifests(dirs: &[PathBuf], manifest_dirs: &[String]) -> Vec<PathBuf> {
     let mut found = BTreeSet::new();
+    let keep = |path: &Path| layout::is_manifest(path, manifest_dirs);
     for dir in dirs {
-        walk(dir, 0, MAX_DEPTH, &layout::is_manifest, &mut found);
+        walk(dir, 0, MAX_DEPTH, &keep, &mut found);
     }
     found.into_iter().collect()
 }
@@ -116,9 +118,14 @@ pub fn has_portable_source(roots: &[PathBuf], ns: &str) -> bool {
 
 /// Assemble the load plan: manifests found under `search_dirs`, and the
 /// existing source roots their repositories and `:local/root` deps provide,
-/// plus `extra_roots` from configuration.
-pub fn plan(search_dirs: &[PathBuf], extra_roots: &[PathBuf]) -> AddonPlan {
-    let manifests = manifests(search_dirs);
+/// plus `extra_roots` from configuration. `manifest_dirs` names the
+/// directories under `META-INF` that hold manifests.
+pub fn plan(
+    search_dirs: &[PathBuf],
+    extra_roots: &[PathBuf],
+    manifest_dirs: &[String],
+) -> AddonPlan {
+    let manifests = manifests(search_dirs, manifest_dirs);
     let mut roots: Vec<PathBuf> = extra_roots.to_vec();
     let mut seen = BTreeSet::new();
     for manifest in &manifests {
@@ -144,6 +151,10 @@ mod tests {
     fn write(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    fn dirge_dirs() -> Vec<String> {
+        layout::default_manifest_dirs()
     }
 
     struct TempDir(PathBuf);
@@ -240,7 +251,7 @@ mod tests {
     fn plans_manifests_and_transitive_local_roots() {
         let tmp = fleet();
         let root = tmp.path().canonicalize().unwrap();
-        let plan = plan(&[root.join("addons")], &[]);
+        let plan = plan(&[root.join("addons")], &[], &dirge_dirs());
         assert_eq!(
             plan.manifests,
             vec![root.join("addons/hd/resources/META-INF/addons/hd.edn")]
@@ -262,6 +273,7 @@ mod tests {
         let plan = plan(
             &[tmp.path().join("nowhere")],
             &[tmp.path().join("also-nowhere")],
+            &dirge_dirs(),
         );
         assert!(plan.is_empty());
         assert!(plan.source_roots.is_empty());
@@ -285,7 +297,7 @@ mod tests {
         );
         std::fs::create_dir_all(root.join("a/src")).unwrap();
         std::fs::create_dir_all(root.join("b/src")).unwrap();
-        let plan = plan(&[root.to_path_buf()], &[]);
+        let plan = plan(&[root.to_path_buf()], &[], &dirge_dirs());
         assert_eq!(plan.manifests.len(), 1);
         assert_eq!(plan.source_roots.len(), 3);
     }
