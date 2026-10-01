@@ -332,6 +332,62 @@ pub fn effective_ctx_max(model_window: u64) -> u64 {
     model_window.min(context_target())
 }
 
+/// The usable context window for a run on `model_name`: the configured
+/// `context_window` override, else the model table (128k for a model it does
+/// not know), capped by [`effective_ctx_max`].
+pub fn ctx_max_for(model_name: Option<&str>) -> u64 {
+    let model_window = context_window_override().unwrap_or_else(|| {
+        model_name
+            .and_then(crate::config::context_window_for_model)
+            .unwrap_or(128_000)
+    });
+    effective_ctx_max(model_window)
+}
+
+/// How full the context is: prompt tokens against the usable window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContextUsage {
+    /// Prompt tokens, measured or estimated.
+    pub tokens: u64,
+    /// The usable window, as [`ctx_max_for`] answers it.
+    pub ctx_max: u64,
+}
+
+impl ContextUsage {
+    /// The estimated usage of a request carrying `system_prompt` and
+    /// `messages`, on a run of `model_name`. Tool schemas are not counted.
+    pub fn estimate(
+        system_prompt: &str,
+        messages: &[serde_json::Value],
+        model_name: Option<&str>,
+    ) -> Self {
+        Self {
+            tokens: crate::agent::compression::estimate_messages_tokens(messages),
+            ctx_max: ctx_max_for(model_name),
+        }
+        .plus_text(system_prompt)
+    }
+
+    /// This usage with `text` added to the request.
+    pub fn plus_text(self, text: &str) -> Self {
+        let added = (text.len() as u64).div_ceil(crate::agent::compression::CHARS_PER_TOKEN);
+        Self {
+            tokens: self.tokens.saturating_add(added),
+            ..self
+        }
+    }
+
+    /// `tokens / ctx_max`; 0 when the window is unknown.
+    #[cfg_attr(not(feature = "addons"), allow(dead_code))]
+    pub fn pressure(self) -> f64 {
+        if self.ctx_max == 0 {
+            0.0
+        } else {
+            self.tokens as f64 / self.ctx_max as f64
+        }
+    }
+}
+
 /// Process-wide explicit context-window override from
 /// `Config::context_window`, installed at startup. When set it replaces the
 /// built-in model-table lookup for the loop's window (before the

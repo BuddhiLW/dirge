@@ -53,8 +53,13 @@
             :handler heard}]
           (map extra-tool @!extra)))
   (hooks [_]
-    {:dirge/event (fn [ctx] (swap! !heard conj ctx) nil)
-     :acme/ping   (fn [{:keys [n]}] (str "pong " n))})
+    {:dirge/event          (fn [ctx] (swap! !heard conj ctx) nil)
+     :acme/ping            (fn [{:keys [n]}] (str "pong " n))
+     :dirge/before-compact (fn [_] (swap! !heard conj {:event :before-compact}) nil)
+     :dirge/compact        (fn [{:keys [span reason]}]
+                             {:summary (str "## Active Task\nFold " (count span)
+                                            " entries (" reason ").\n"
+                                            "## Completed Actions\nRead the span.")})})
   (health [_]
     {:status :ok}))
 

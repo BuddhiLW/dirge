@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use super::context_manager::ContextUsage;
 use super::message::{AssistantMessage, LoopMessage, ToolResultMessage};
 use super::result::{AfterToolCallResult, BeforeToolCallResult, LoopToolResult};
 use super::types::{Context, TurnUpdate};
@@ -85,6 +86,9 @@ pub struct AfterToolCallContext {
     pub result: LoopToolResult,
     #[allow(dead_code)]
     pub is_error: bool,
+    /// How full the context is as the call finishes, estimated.
+    #[cfg_attr(not(feature = "addons"), allow(dead_code))]
+    pub usage: Option<ContextUsage>,
 }
 
 /// `afterToolCall` hook signature. Pi (types.ts:276):
@@ -178,8 +182,8 @@ pub type GetFollowupMessagesFn =
 /// re-woken when the batch becomes deliverable.
 pub type ShouldDeferFinalizationFn = Arc<dyn Fn() -> bool + Send + Sync>;
 
-/// What a run opens with: its system prompt, the prompt that starts it, and
-/// the reminders its first user turn leads with.
+/// What a run opens with: its system prompt, the prompt that starts it, the
+/// reminders its first user turn leads with, and how full the context is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunOpening {
     pub system_prompt: String,
@@ -188,6 +192,10 @@ pub struct RunOpening {
     /// Why the run must not start, such as a prompt a hook blocked. The run
     /// then ends with it as its error, without calling the model.
     pub refusal: Option<String>,
+    /// The estimated usage of the run's first request, when the loop knows
+    /// the window it runs in.
+    #[cfg_attr(not(feature = "addons"), allow(dead_code))]
+    pub usage: Option<ContextUsage>,
 }
 
 impl RunOpening {

@@ -789,6 +789,7 @@ fn opening() -> crate::agent::agent_loop::hooks::RunOpening {
         prompt: "hi".into(),
         reminders: Vec::new(),
         refusal: None,
+        usage: None,
     }
 }
 
