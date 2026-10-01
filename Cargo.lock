@@ -1367,7 +1367,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "smallvec 1.15.2",
- "stop-words 0.10.0",
+ "stop-words 0.10.1",
  "streaming-iterator",
  "sysinfo",
  "thiserror 2.0.19",
@@ -2327,7 +2327,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -3773,9 +3773,9 @@ dependencies = [
 
 [[package]]
 name = "process-wrap"
-version = "9.1.0"
+version = "10.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e842efad9119158434d193c6682e2ebee4b44d6ad801d7b349623b3f57cdf55"
+checksum = "1f21b97672d2dc848e7b25701ab4535618b92f4861c13cc3f7f7bed52ad3c8da"
 dependencies = [
  "futures",
  "indexmap 2.14.0",
@@ -4232,15 +4232,16 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.1.1"
+version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "094c075f6698deef5a657cf4df6b684dff65157d255978b92b552ec22503f17a"
+checksum = "fae7019994ae0fe4ada40b732f798f3ff26f0f04facb1477f1bf37eb4f18a2d3"
 dependencies = [
  "base64 0.23.1",
  "bytes",
  "chrono",
  "futures",
  "http",
+ "indexmap 2.14.0",
  "pastey",
  "pin-project-lite",
  "process-wrap",
@@ -4260,9 +4261,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "3.1.1"
+version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "737d947bcfd946fae6a179a4ef6487be6dcf25c930c2393856b820f1386e52a6"
+checksum = "c7e66877136e969d5a2d561ee5841b17717a0619aebd64abb47a2a2f46e34683"
 dependencies = [
  "darling 0.24.0",
  "proc-macro2",
@@ -5075,9 +5076,9 @@ dependencies = [
 
 [[package]]
 name = "stop-words"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d68df56303396bcfb639455b3c166804aeb7994005010aab5e9e8a1277b8871d"
+checksum = "c1ed527ae13a020ac2404e32746ecee62d632aafe64f8e0df2bb3545ae96f6d1"
 dependencies = [
  "serde_json",
 ]
