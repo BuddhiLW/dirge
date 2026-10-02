@@ -6,9 +6,10 @@ name = "dirge-agent"
 version = "0.25.7"
 edition = "2024"
 # MSRV: edition 2024 needs 1.85, but the dependency tree (time, serde_with,
-# darling, instability) requires 1.88 — pin there so older toolchains fail
-# with a clear version error instead of a cryptic edition/build failure.
-rust-version = "1.88"
+# darling, instability) requires 1.88, and the patched russh 0.63 / pageant
+# 0.2.3 require 1.89. Pin there so older toolchains fail with a clear
+# version error instead of a cryptic edition/build failure.
+rust-version = "1.89"
 authors = ["Yogthos <yogthos@gmail.com>"]
 description = "Minimalistic coding agent written in Rust, optimized for memory footprint and performance"
 license = "GPL-3.0-only"
@@ -382,7 +383,7 @@ libkrun-sys = { version = "0.9.5", optional = true }
 # russh: pure-Rust SSH client (no libssh2/OpenSSL — uses the `ring` crypto
 # backend so the build needs no system OpenSSL or cmake). Used by the
 # microVM sandbox to execute commands inside the guest VM.
-russh = { version = "0.62.5", default-features = false, features = ["ring"], optional = true }
+russh = { version = "0.63.2", default-features = false, features = ["ring"], optional = true }
 # sha2 + hex: OCI layer digest verification for the microVM sandbox.
 # Every blob downloaded from the registry is SHA-256 hashed and compared
 # against the manifest's declared digest before extraction.
