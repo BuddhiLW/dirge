@@ -3401,14 +3401,21 @@ fn validate_all_plugins_compile() {
     let mut mgr = PluginManager::try_new().unwrap();
     let mut count = 0usize;
 
-    for entry in std::fs::read_dir(&plugin_dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().is_some_and(|e| e == "janet") {
-            let source = std::fs::read_to_string(&path).unwrap();
-            mgr.eval(&source)
-                .unwrap_or_else(|e| panic!("{} failed to compile: {e}", path.display()));
-            count += 1;
-        }
+    // Sort by path so cross-file dependencies resolve: `lev_vigilmode.janet`
+    // calls `lev/classify-many` from `lev_classify.janet`, which must load
+    // first. `read_dir` order is filesystem-dependent, so sort to match the
+    // directory plugin loader's alphabetical load (loader.rs).
+    let mut files: Vec<_> = std::fs::read_dir(&plugin_dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|x| x.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "janet"))
+        .collect();
+    files.sort();
+    for path in files {
+        let source = std::fs::read_to_string(&path).unwrap();
+        mgr.eval(&source)
+            .unwrap_or_else(|e| panic!("{} failed to compile: {e}", path.display()));
+        count += 1;
     }
 
     assert!(count >= 20, "expected at least 20 plugins, found {count}");

@@ -1159,8 +1159,15 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            for entry in entries.flatten() {
-                let path = entry.path();
+            // Deterministic load order: read_dir yields filesystem-dependent
+            // order, but a single-file plugin can depend on a sibling loading
+            // first (lev_vigilmode.janet needs lev_classify.janet's
+            // lev/classify-many). Sort by path to match the directory plugin
+            // loader's alphabetical sort (loader.rs) and the
+            // validate_all_plugins_compile test.
+            let mut plugin_paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+            plugin_paths.sort();
+            for path in plugin_paths {
                 // A plugin is either:
                 //   - a single `.janet` file (legacy)
                 //   - a directory whose name is the plugin id and whose
