@@ -1976,6 +1976,21 @@ mod tests {
         assert_eq!(model_ovr.as_deref(), Some("llama-3.1"));
     }
 
+    /// A value id padded with whitespace switches to the trimmed model: the
+    /// session stores the id without the padding.
+    #[tokio::test]
+    async fn set_model_option_stores_the_trimmed_model() {
+        let (cli, cfg, id) = (default_cli(), Config::default(), "s");
+        let sessions = session_map_with(id);
+        let req = set_model_request(id, "model", "  llama-3.1\n");
+        let options = apply_model_config(&sessions, &cli, &cfg, &req)
+            .await
+            .expect("the switch applies");
+        assert_eq!(selected_model(&options), "llama-3.1");
+        let (model_ovr, _, _) = session_overrides(&sessions, id).await;
+        assert_eq!(model_ovr.as_deref(), Some("llama-3.1"));
+    }
+
     /// An unknown session or option is an error and leaves every session as
     /// it was.
     #[tokio::test]
