@@ -728,7 +728,11 @@ async fn run_prompt(
     } else {
         StopReason::EndTurn
     };
-    let _ = responder.respond(PromptResponse::new(reason).meta(usage.meta(&provider_str)));
+    // `provider_str` is an alias; the usage convention follows the provider
+    // type its entry declares.
+    let provider_type =
+        crate::provider::provider_type_for_alias(&provider_str, &state.cfg.providers_map());
+    let _ = responder.respond(PromptResponse::new(reason).meta(usage.meta(&provider_type)));
     Ok(())
 }
 
@@ -764,11 +768,13 @@ impl TurnUsage {
     /// the provider reported no usage (a slash command, or a provider that
     /// sends none). `inputTokens` is the whole prompt whatever the provider's
     /// convention, so cached tokens are a part of it, never added to it.
-    fn meta(&self, provider: &str) -> Option<Meta> {
+    /// `provider_type` is the resolved provider type, not the session's
+    /// provider alias: the convention belongs to the backend.
+    fn meta(&self, provider_type: &str) -> Option<Meta> {
         if !self.reported {
             return None;
         }
-        let input = self.tokens.prompt_total(Some(provider));
+        let input = self.tokens.prompt_total(Some(provider_type));
         let output = self.tokens.output_tokens;
         let usage = serde_json::json!({
             "inputTokens": input,
@@ -1281,6 +1287,25 @@ mod tests {
         assert_eq!(meta["usage"]["totalTokens"], 9_530);
         assert_eq!(meta["usage"]["cachedReadTokens"], 9_000);
         assert_eq!(meta["usage"]["cachedWriteTokens"], 400);
+    }
+
+    #[test]
+    fn prompt_usage_counts_cached_tokens_for_an_aliased_anthropic_provider() {
+        // The session's provider is an alias; the usage convention follows
+        // the provider type its entry declares.
+        let providers = std::collections::HashMap::from([(
+            "work-claude".to_string(),
+            crate::config::ProviderEntry {
+                provider_type: Some("anthropic".to_string()),
+                ..Default::default()
+            },
+        )]);
+        let provider_type = crate::provider::provider_type_for_alias("work-claude", &providers);
+        let mut usage = TurnUsage::default();
+        usage.add(100, 9_000, 400, 30);
+        let meta = usage.meta(&provider_type).unwrap();
+        assert_eq!(meta["usage"]["inputTokens"], 9_500);
+        assert_eq!(meta["usage"]["totalTokens"], 9_530);
     }
 
     struct TestDir(PathBuf);
