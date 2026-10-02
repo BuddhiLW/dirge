@@ -135,29 +135,75 @@ fn test_post_done_action() {
     // Plugin followup must take precedence over the loop iteration
     // so we never silently drop a queued prompt.
     let followup = Some("retry".to_string());
+    #[cfg(feature = "vigil")]
+    let vigil_off = false;
     assert_eq!(
-        decide_post_done_action(followup.clone(), true, false),
+        decide_post_done_action(
+            followup.clone(),
+            true,
+            false,
+            #[cfg(feature = "vigil")]
+            vigil_off
+        ),
         PostDoneAction::Followup("retry".into())
     );
     assert_eq!(
-        decide_post_done_action(followup.clone(), false, false),
+        decide_post_done_action(
+            followup.clone(),
+            false,
+            false,
+            #[cfg(feature = "vigil")]
+            vigil_off
+        ),
         PostDoneAction::Followup("retry".into())
     );
     // Loop iteration only when no followup.
     assert_eq!(
-        decide_post_done_action(None, true, false),
+        decide_post_done_action(
+            None,
+            true,
+            false,
+            #[cfg(feature = "vigil")]
+            vigil_off
+        ),
         PostDoneAction::LoopIter
     );
     // Loop stop only when no followup and should_stop.
     assert_eq!(
-        decide_post_done_action(None, true, true),
+        decide_post_done_action(
+            None,
+            true,
+            true,
+            #[cfg(feature = "vigil")]
+            vigil_off
+        ),
         PostDoneAction::LoopStop
     );
     // Idle: nothing to do.
     assert_eq!(
-        decide_post_done_action(None, false, false),
+        decide_post_done_action(
+            None,
+            false,
+            false,
+            #[cfg(feature = "vigil")]
+            vigil_off
+        ),
         PostDoneAction::Idle
     );
+
+    #[cfg(feature = "vigil")]
+    {
+        // VigilSleep: vigil active outranks loop.
+        assert_eq!(
+            decide_post_done_action(None, true, false, true),
+            PostDoneAction::VigilSleep
+        );
+        // Followup still beats vigil.
+        assert_eq!(
+            decide_post_done_action(followup.clone(), false, false, true),
+            PostDoneAction::Followup("retry".into())
+        );
+    }
 }
 
 #[test]
@@ -543,6 +589,51 @@ fn test_take_pending_replace_result_roundtrips() {
     assert_eq!(mgr.take_pending_replace_result(), None);
 }
 
+/// `harness/toil` accepts a JSON array of commands, or a bare command
+/// string, and the host parses both into a command list.
+#[cfg(feature = "plugin")]
+#[test]
+fn test_take_pending_toil_roundtrips() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    assert_eq!(mgr.take_pending_toil(), None);
+
+    mgr.eval(r#"(harness/toil "[\"curl -fsS http://x/health\",\"systemctl restart x\"]")"#)
+        .unwrap();
+    assert_eq!(
+        mgr.take_pending_toil(),
+        Some(vec![
+            "curl -fsS http://x/health".to_string(),
+            "systemctl restart x".to_string()
+        ])
+    );
+    assert_eq!(mgr.take_pending_toil(), None);
+
+    // Bare (non-JSON) string is treated as a single command.
+    mgr.eval(r#"(harness/toil "echo single")"#).unwrap();
+    assert_eq!(
+        mgr.take_pending_toil(),
+        Some(vec!["echo single".to_string()])
+    );
+    assert_eq!(mgr.take_pending_toil(), None);
+}
+
+/// `harness/enrich` round-trips a JSON object string through the slot so
+/// the reaper can shallow-merge it into the event context.
+#[cfg(feature = "plugin")]
+#[test]
+fn test_take_pending_enrich_roundtrips() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    assert_eq!(mgr.take_pending_enrich(), None);
+
+    mgr.eval(r#"(harness/enrich "{\"author\":\"jane\",\"pr\":\"42\"}")"#)
+        .unwrap();
+    assert_eq!(
+        mgr.take_pending_enrich(),
+        Some(r#"{"author":"jane","pr":"42"}"#.to_string())
+    );
+    assert_eq!(mgr.take_pending_enrich(), None);
+}
+
 /// `dispatch_tool_hook` resets slots before running so previous-call
 /// state doesn't leak into the current tool's decision.
 #[cfg(feature = "plugin")]
@@ -613,6 +704,128 @@ fn test_dispatch_tool_hook_captures_replace_result() {
         .dispatch_tool_hook("on-tool-end", "@{:tool \"read\"}")
         .unwrap();
     assert_eq!(result.replace_result, Some("[truncated]".to_string()));
+}
+
+/// `on-vigil-observance` runs post-turn and its `(harness/toil ...)` output
+/// is the "act" half of act/chaining: the host drains the slot so it can run
+/// the commands. Chaining is the plugin's half, via `(vigil/emit next ...)`
+/// inside the same hook (exercised in the worker bridge test).
+#[cfg(feature = "plugin")]
+#[test]
+fn on_vigil_observance_hook_drains_toil_for_act() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    mgr.eval(
+        r#"(defn after-observe [ctx]
+             (harness/toil "[\"true\",\"echo chained\"]"))"#,
+    )
+    .unwrap();
+    mgr.register("on-vigil-observance", "after-observe");
+
+    let result = mgr
+        .dispatch_tool_hook(
+            "on-vigil-observance",
+            "@{:vigil \"sig-a\" :count 2 :response \"done\" :exit :ok}",
+        )
+        .unwrap();
+    assert_eq!(
+        result.toil,
+        Some(vec!["true".to_string(), "echo chained".to_string()])
+    );
+}
+
+/// `on-vigil-outcome` classifies a finished observance via `harness/outcome`;
+/// the host drains the JSON `{"label":...,"useful":...}` slot to persist the
+/// (signal, outcome) pair feeding the empirical prior.
+#[cfg(feature = "vigil")]
+#[test]
+fn on_vigil_outcome_hook_captures_outcome_slot() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    mgr.eval(r#"(defn classify [ctx] (harness/outcome "resolved" false))"#)
+        .unwrap();
+    mgr.register("on-vigil-outcome", "classify");
+
+    let result = mgr
+        .dispatch_tool_hook(
+            "on-vigil-outcome",
+            "@{:vigil \"sig-a\" :count 2 :response \"done\" :exit :ok}",
+        )
+        .unwrap();
+    // `json-encode` does not guarantee key order, so assert the parsed
+    // semantics rather than a fixed string.
+    let raw = result.outcome.expect("outcome slot set");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(parsed["label"], "resolved");
+    assert_eq!(parsed["useful"], false);
+}
+
+/// `on-vigil-rite` reports an oracle confidence via `harness/verdict`; the
+/// host drains the JSON `{"p":0.0..1.0}` slot and compares it to the vigil's
+/// wake threshold, so the plugin never bakes in its own magic number.
+#[cfg(feature = "vigil")]
+#[test]
+fn on_vigil_rite_hook_captures_verdict_slot() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    mgr.eval(r#"(defn gate [ctx] (harness/verdict 0.87))"#)
+        .unwrap();
+    mgr.register("on-vigil-rite", "gate");
+
+    let result = mgr
+        .dispatch_tool_hook("on-vigil-rite", "@{:vigil \"sig-a\" :count 2}")
+        .unwrap();
+    let raw = result.verdict.expect("verdict slot set");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(parsed["p"], 0.87);
+}
+
+/// The bundled `debounce-adapter` fixture loads as pure Janet functions and
+/// collapses event bursts: `reduce` folds values, `aggregate` groups by key
+/// and reduces each group, `coalesce` keeps the latest event per key.
+#[cfg(feature = "plugin")]
+#[test]
+fn janet_debounce_adapter_reduces_aggregates_and_coalesces() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/vigil/plugins/debounce-adapter.janet");
+    mgr.load_file(&path).unwrap();
+
+    assert_eq!(mgr.eval("(debounce/reduce @[1 2 3 4] :sum)").unwrap(), "10");
+    assert_eq!(
+        mgr.eval("(debounce/reduce @[1 2 3 4] :count)").unwrap(),
+        "4"
+    );
+    assert_eq!(
+        mgr.eval("(debounce/reduce @[1 2 3 4] :latest)").unwrap(),
+        "4"
+    );
+    assert_eq!(
+        mgr.eval("(debounce/reduce @[1 2 3 4] :first)").unwrap(),
+        "1"
+    );
+
+    let burst = r#"@[@{:k "a" :v 1} @{:k "b" :v 2} @{:k "a" :v 3}]"#;
+    assert_eq!(
+        mgr.eval(&format!(
+            r#"(get (debounce/aggregate {burst} :k :sum :v) "a")"#
+        ))
+        .unwrap(),
+        "4"
+    );
+    assert_eq!(
+        mgr.eval(&format!(
+            r#"(get (debounce/aggregate {burst} :k :sum :v) "b")"#
+        ))
+        .unwrap(),
+        "2"
+    );
+
+    assert_eq!(
+        mgr.eval(r#"(length (debounce/coalesce @[@{:id 1} @{:id 2} @{:id 1}] :id))"#,)
+            .unwrap(),
+        "2"
+    );
+
+    let err = mgr.eval("(debounce/reduce @[1] :bogus)").unwrap_err();
+    assert!(err.contains("unknown reducer"), "unexpected error: {err}");
 }
 
 /// First-blocker-wins precedence (Phase 1, matches pi's
@@ -1405,6 +1618,68 @@ fn emit_tool_progress_tags_entries_with_current_tool_call() {
 
     // Drain clears the queue.
     assert!(mgr.drain_tool_progress().is_empty());
+}
+
+/// `harness/emit-issue` files a durable, session-unscoped issue on the board
+/// and returns its id (e.g. `drg-a1b2`). The bridge reads the process-global
+/// store installed by `install_issue_store`; when absent it degrades to nil.
+#[cfg(feature = "plugin")]
+#[test]
+fn emit_issue_creates_board_issue_and_returns_id() {
+    use crate::extras::issue_db::IssueStore;
+    use crate::plugin::worker::issue_bridge;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "dirge-emit-issue-test-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed),
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("state.db");
+    let store = IssueStore::open_at(&db_path).unwrap();
+    issue_bridge::install_issue_store(std::sync::Arc::new(store));
+
+    let mut mgr = PluginManager::try_new().unwrap();
+    let id = mgr
+        .eval(r#"(harness/emit-issue "watch upstream" "upgrade to v2" "high")"#)
+        .unwrap();
+    let id = id.trim_matches('"');
+    assert!(id.starts_with("drg-"), "unexpected id: {id:?}");
+
+    // Re-open the same file to verify the row actually landed (the bridge
+    // owns the Arc'd store, so we can't read it back directly).
+    let reopened = IssueStore::open_at(&db_path).unwrap();
+    let issue = reopened.get(id).unwrap().expect("issue was persisted");
+    assert_eq!(issue.title, "watch upstream");
+    assert_eq!(issue.body, "upgrade to v2");
+    assert_eq!(issue.priority, "high");
+    assert_eq!(issue.status, "open");
+
+    // A non-empty dedup-key upserts into the single live issue carrying that
+    // key instead of creating a fresh row on every emit.
+    let first = mgr
+        .eval(r#"(harness/emit-issue "flaky suite" "first failure" "normal" "sig-flaky")"#)
+        .unwrap();
+    let first = first.trim_matches('"');
+    let second = mgr
+        .eval(r#"(harness/emit-issue "flaky suite (updated)" "second failure" "high" "sig-flaky")"#)
+        .unwrap();
+    let second = second.trim_matches('"');
+    assert_eq!(first, second, "same live dedup key must reuse the row");
+
+    let reopened = IssueStore::open_at(&db_path).unwrap();
+    let deduped = reopened.get(second).unwrap().expect("deduped issue exists");
+    assert_eq!(deduped.title, "flaky suite (updated)");
+    assert_eq!(deduped.body, "second failure");
+    assert_eq!(deduped.priority, "high");
+    assert_eq!(deduped.dedup_key.as_deref(), Some("sig-flaky"));
+    assert_eq!(
+        reopened.board(None).unwrap().len(),
+        2,
+        "original issue + one deduped live row"
+    );
 }
 
 // --- H3: register-tool prepare-arguments field ---------------------
@@ -3113,21 +3388,34 @@ fn nrepl_plugin_paren_repair_balances_delimiters() {
 /// startup warnings about "failed to load plugin" never regress.
 /// Standalone `janet -k` catches syntax errors, but only a full Rust
 /// eval with the dirge host can catch missing symbol references.
-#[cfg(all(feature = "plugin", feature = "dap", feature = "mcp", feature = "lsp"))]
+#[cfg(all(
+    feature = "plugin",
+    feature = "dap",
+    feature = "mcp",
+    feature = "lsp",
+    feature = "vigil"
+))]
 #[test]
 fn validate_all_plugins_compile() {
     let plugin_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins");
     let mut mgr = PluginManager::try_new().unwrap();
     let mut count = 0usize;
 
-    for entry in std::fs::read_dir(&plugin_dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().is_some_and(|e| e == "janet") {
-            let source = std::fs::read_to_string(&path).unwrap();
-            mgr.eval(&source)
-                .unwrap_or_else(|e| panic!("{} failed to compile: {e}", path.display()));
-            count += 1;
-        }
+    // Sort by path so cross-file dependencies resolve: `lev_vigilmode.janet`
+    // calls `lev/classify-many` from `lev_classify.janet`, which must load
+    // first. `read_dir` order is filesystem-dependent, so sort to match the
+    // directory plugin loader's alphabetical load (loader.rs).
+    let mut files: Vec<_> = std::fs::read_dir(&plugin_dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|x| x.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "janet"))
+        .collect();
+    files.sort();
+    for path in files {
+        let source = std::fs::read_to_string(&path).unwrap();
+        mgr.eval(&source)
+            .unwrap_or_else(|e| panic!("{} failed to compile: {e}", path.display()));
+        count += 1;
     }
 
     assert!(count >= 20, "expected at least 20 plugins, found {count}");
@@ -3185,6 +3473,24 @@ fn two_loaded_plugins_both_register_on_the_same_hook() {
     // what matters here is that BOTH registrations fire a handler rather
     // than one silently dropping out.
     assert_eq!(msgs.len(), 2, "both registrations must run: {msgs:?}");
+}
+
+/// `on-vigil-enrich` must be in `HOOK_NAMES` or the loader never promotes it,
+/// `has_hook` stays false, and the reaper's filter/enrich stage is unreachable
+/// no matter what a plugin defines. Loads a plugin through the real loader and
+/// asserts the hook is discoverable — the seam the reaper relies on.
+#[cfg(feature = "plugin")]
+#[test]
+fn on_vigil_enrich_is_registered_by_the_loader() {
+    let plugin = tmpfile("vigil-enrich", r#"(defn on-vigil-enrich [ctx] nil)"#);
+    let mut mgr = PluginManager::try_new().unwrap();
+    super::load_plugin(&mut mgr, &plugin).unwrap();
+    let _ = std::fs::remove_file(&plugin);
+
+    assert!(
+        mgr.has_hook("on-vigil-enrich"),
+        "loader must register on-vigil-enrich so the reaper enrich stage can run",
+    );
 }
 
 /// A throwing hook is caught, surfaced, and the next plugin still runs.

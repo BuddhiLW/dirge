@@ -1,0 +1,8 @@
+[
+  {
+    "name": "lev-rite-smoke",
+    "trigger": { "type": "toll", "interval_secs": 5 },
+    "reap_interval_secs": 5,
+    "prompt": "The vigil {name} observance passed the lev rite gate. Reply with one line."
+  }
+]
