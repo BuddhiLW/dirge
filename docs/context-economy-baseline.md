@@ -1,4 +1,4 @@
-# Context-economy baseline: measuring the built-in fold
+# Context-economy protocol and partial baseline: measuring the built-in fold
 
 This document is the measurement protocol for any change to how dirge keeps a
 long session inside its context budget: the fold ladder
@@ -8,9 +8,13 @@ long session inside its context budget: the fold ladder
 them (a different summarizer, eviction with recall handles, compression of tool
 output on arrival).
 
-It also records the **baseline**: what the built-in fold scores today. A
-candidate is judged against these numbers, in the regime it claims to help,
-and never on token counts alone.
+It also records a **partial baseline**: what the built-in fold scored on the
+runs collected so far. The collection is short of the sample size the protocol
+requires (15 runs against 20 per arm, and no live recall probe), so these
+numbers are provisional. They show the instrument works and what the built-in
+fold looks like under it; they are not yet the baseline the decision rule
+judges a candidate against. A candidate is judged against the completed
+baseline, in the regime it claims to help, and never on token counts alone.
 
 Every result below says which rung of evidence it stands on:
 
@@ -158,10 +162,10 @@ cat > /tmp/base.json <<'EOF'
 }
 EOF
 
-# I2: two concurrent batches, A/A of the baseline, 20 runs in total
+# I2: two concurrent batches, A/A of the baseline, 20 runs per arm
 for b in 1 2; do
   LOOP_AB_KEEP=1 LOOP_AB_BASE_CONFIG=/tmp/base.json \
-    scripts/loop-ab.sh -n 5 -s fold-chain -t 60 > batch-$b.txt 2>&1 &
+    scripts/loop-ab.sh -n 10 -s fold-chain -t 60 > batch-$b.txt 2>&1 &
 done; wait
 
 scripts/fold-report.py /tmp/loop-ab.<b1> /tmp/loop-ab.<b2> \
@@ -181,13 +185,18 @@ For measured spend, poll the provider balance every 20 s during each batch and
 sum the drops between consecutive samples. Do not subtract the last sample from
 the first: a top-up during the batch would then read as negative spend.
 
-## Baseline results
+## Partial baseline results
 
-**Status: partial, n = 15 of 20.** I2 has 15 valid runs (an A/A split of 10
-control and 5 treatment, both arms the unmodified builtin). The last 5
-treatment runs and the I1 live recall probe are still open; see "What is still
-open" below. Treat the A/A comparison as a rough noise floor only: one half has
-five runs.
+**Status: partial and provisional, 15 runs of the 40 the protocol requires.**
+I2 has 15 valid runs (an A/A split of 10 control and 5 treatment, both arms the
+unmodified builtin) against n = 20 per arm. The remaining runs and the I1 live
+recall probe are still open; see "What is still open" below. The collection
+used `-n 5` per batch, half of what "Running it" now specifies.
+
+Until the collection is complete, the decision rule does not apply to these
+numbers: no candidate ties or beats the baseline on the strength of them. Five
+pairs cannot reach p < 0.05 on the exact sign test whatever the outcome. Treat
+the A/A comparison as a rough noise floor only: one half has five runs.
 
 ### I2, fold-chain, builtin arm
 
@@ -284,7 +293,7 @@ recall over three), about 70 summarizer calls.
 
 ### What is still open
 
-- the last 5 treatment runs, to bring I2 to n = 20 (10 vs 10);
+- 10 more control and 15 more treatment runs, to bring I2 to n = 20 per arm;
 - the I1 live bakeoff (`DIRGE_BAKEOFF=1 ... DIRGE_BAKEOFF_REPEATS=10`, the
   command under "Running it").
 
