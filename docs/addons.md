@@ -226,7 +226,7 @@ The `dirge.harness` namespace is available to addon code:
 | `(version)` | the dirge version |
 | `(tools)` | names of the dirge tools `call-tool` can run |
 | `(call-tool name)` / `(call-tool name args)` | run a dirge tool (built-in or MCP) with the `args` map; answers `{:ok text}` or `{:error msg}` |
-| `(panel op)` | a box in the side panel, see below; returns true when delivered |
+| `(panel op)` | a side-panel request, see below; returns true when delivered |
 | `(mcp-servers)` | names of the MCP servers dirge is connected to |
 | `(mcp-call server tool)` / `(mcp-call server tool args)` | call an MCP tool over dirge's own connection |
 | `(json-parse text)` | JSON text as data (keyword keys), or `nil` |
@@ -242,6 +242,10 @@ The `dirge.harness` namespace is available to addon code:
 ```
 
 Faces are `normal`, `dim`, `accent`, `success`, `warn` and `error`.
+
+`panel` is a port: the host hands the request to whatever panel sink the
+build wires in. This build wires none, so `panel` returns false and draws
+nothing. Addon code should treat false as "no panel here" and carry on.
 
 `mcp-call` answers the tool result (`{:content [...] :isError bool}`) or
 `{:error "why"}`. It blocks until the server answers. It is refused (an
