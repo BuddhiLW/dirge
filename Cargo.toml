@@ -464,12 +464,18 @@ debug = false
 [profile.dev]
 debug = 0
 
-# Vendor evil-janet to root `janet_vm.top_dyns` during the GC mark phase.
-# Upstream Janet never marks that table, so dirge — which populates it via
-# janet_setdyn() with no fiber active (the :out/:err capture mirror) — gets it
-# swept and then use-after-freed in janet_dyn("err-color") inside
-# janet_stacktrace_ext. The one-line fix lives in vendor/evil-janet/csrc/janet.c
-# (janet_collect). See drg-76a1.
+# Vendor evil-janet for two GC fixes (see drg-76a1), both in
+# vendor/evil-janet/csrc/janet.c:
+#  1. Root `janet_vm.top_dyns` during the GC mark phase (janet_collect).
+#     Upstream Janet never marks that table, so dirge — which populates it via
+#     janet_setdyn() with no fiber active (the :out/:err capture mirror) — gets
+#     it swept and then use-after-freed in janet_dyn("err-color") inside
+#     janet_stacktrace_ext.
+#  2. Root the fiber and error value at the top of janet_stacktrace_ext, before
+#     janet_to_string(err) can allocate and trigger GC. The errored fiber has
+#     already been unwound off the run stack and removed from active_tasks, so
+#     without a root the GC collects it (and its env table) before
+#     janet_dyn("err-color") reads janet_vm.fiber->env.
 [patch.crates-io]
 evil-janet = { path = "vendor/evil-janet" }
 

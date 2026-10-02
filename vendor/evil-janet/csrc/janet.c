@@ -7846,6 +7846,15 @@ void janet_stacktrace(JanetFiber *fiber, Janet err) {
 void janet_stacktrace_ext(JanetFiber *fiber, Janet err, const char *prefix) {
 
     int32_t fi;
+    /* dirge (drg-76a1): root the fiber and error before the to_string below.
+     * janet_to_string can allocate and trigger GC; this fiber has already been
+     * unwound by the error signal (it is off the run stack and no longer held
+     * by janet_vm.fiber / janet_vm.root_fiber), so without a root the GC can
+     * collect it — and its env table — before janet_dyn("err-color") reads
+     * janet_vm.fiber->env. */
+    JanetFiber *root_fiber = fiber;
+    if (root_fiber) janet_gcroot(janet_wrap_fiber(root_fiber));
+    janet_gcroot(err);
     const char *errstr = (const char *)janet_to_string(err);
     JanetFiber **fibers = NULL;
     int wrote_error = !prefix;
@@ -7931,6 +7940,8 @@ void janet_stacktrace_ext(JanetFiber *fiber, Janet err, const char *prefix) {
     if (print_color) janet_eprintf("\x1b[0m");
 
     janet_v_free(fibers);
+    janet_gcunroot(err);
+    if (root_fiber) janet_gcunroot(janet_wrap_fiber(root_fiber));
 }
 
 /*

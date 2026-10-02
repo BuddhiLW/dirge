@@ -11,8 +11,9 @@ fn main() {
     #[cfg(feature = "link-system")]
     println!("cargo:rustc-link-lib=janet");
 
-    // Make cargo rerun if header changes
+    // Make cargo rerun if header or the amalgamated source changes
     println!("cargo:rerun-if-changed=csrc/janet.h");
+    println!("cargo:rerun-if-changed=csrc/janet.c");
 
     let allowlist_regex = "^[jJ]anet.*|[jJ]ANET.*|.*jmp";
 
