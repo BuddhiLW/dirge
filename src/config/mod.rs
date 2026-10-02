@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+#[cfg(feature = "vigil")]
+use serde::Serialize;
 
 use crate::session::storage;
 
@@ -1381,6 +1383,167 @@ pub struct Config {
     /// future expansion but are not honored today.
     #[cfg(feature = "acp")]
     pub acp_servers: Option<HashMap<String, AcpServerConfig>>,
+
+    /// Vigil definitions loaded from `config.json` as a top-level `vigils`
+    /// array. Only consulted when `--vigil` is active.
+    #[cfg(feature = "vigil")]
+    #[serde(default)]
+    pub vigils: Option<Vec<VigilEntry>>,
+}
+
+/// A single vigil definition from config.
+#[cfg(feature = "vigil")]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct VigilEntry {
+    pub name: String,
+    pub trigger: VigilTrigger,
+    #[serde(default = "default_reap_interval")]
+    pub reap_interval_secs: u64,
+    /// Minimum seconds between observances for this vigil. A flapping alarm
+    /// keeps reaping on its cadence, but events arriving during the cooldown
+    /// are re-queued and coalesced into the next window instead of waking the
+    /// agent again. 0 (default) disables the throttle.
+    #[serde(default)]
+    pub cooldown_secs: u64,
+    #[serde(default)]
+    pub prompt: String,
+    /// Optional Janet script for per-observance procession.
+    #[serde(default)]
+    pub procession: Option<String>,
+    #[serde(default)]
+    pub rite: Option<VigilRite>,
+    /// Cost-matrix policy for the rite gate. `None` = default policy
+    /// (false-positive cost 4, false-negative cost 1, fail open).
+    #[serde(default)]
+    pub gate: Option<VigilGate>,
+}
+
+#[cfg(feature = "vigil")]
+fn default_reap_interval() -> u64 {
+    30
+}
+
+/// Cost-matrix policy for a vigil rite gate. The two costs are the price
+/// of a false wake (C_fp: the gate wakes the agent for something it would
+/// have dismissed) and a miss (C_fn: the gate lets a real event through).
+/// The gate wakes when the oracle's `p > τ`, with `τ = C_fp / (C_fn + C_fp)`.
+#[cfg(feature = "vigil")]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct VigilGate {
+    #[serde(default = "default_false_positive_cost")]
+    pub false_positive_cost: f64,
+    #[serde(default = "default_false_negative_cost")]
+    pub false_negative_cost: f64,
+    #[serde(default)]
+    pub fail: GateFail,
+}
+
+#[cfg(feature = "vigil")]
+fn default_false_positive_cost() -> f64 {
+    4.0
+}
+
+#[cfg(feature = "vigil")]
+fn default_false_negative_cost() -> f64 {
+    1.0
+}
+
+#[cfg(feature = "vigil")]
+impl Default for VigilGate {
+    fn default() -> Self {
+        VigilGate {
+            false_positive_cost: default_false_positive_cost(),
+            false_negative_cost: default_false_negative_cost(),
+            fail: GateFail::default(),
+        }
+    }
+}
+
+#[cfg(feature = "vigil")]
+impl VigilGate {
+    /// Derive the wake threshold from the cost ratio. Defaults (4 : 1)
+    /// yield τ = 0.8. A degenerate all-zero matrix yields 0 (wake on any
+    /// signal) rather than NaN.
+    pub fn threshold(&self) -> f64 {
+        let denom = self.false_negative_cost + self.false_positive_cost;
+        if denom <= 0.0 {
+            return 0.0;
+        }
+        self.false_positive_cost / denom
+    }
+}
+
+/// What the gate should do when it cannot reach an oracle at all
+/// (drainer gone, plugin error, timeout).
+#[cfg(feature = "vigil")]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GateFail {
+    /// Wake and run the observance (today's fail-open behavior).
+    #[default]
+    Open,
+    /// Skip the observance.
+    Closed,
+    /// Assume the empirical base rate. Uncalibrated until outcome data
+    /// exists, so it currently falls back to open (slice 08 feeds this).
+    Prior,
+}
+
+/// What triggers a vigil to fire.
+#[cfg(feature = "vigil")]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum VigilTrigger {
+    /// Timer-based: fires every N seconds.
+    Toll { interval_secs: u64 },
+    /// Filesystem watcher: fires on changes under `path`.
+    Watcher { path: String },
+    /// Network socket: external process sends events to a TCP port.
+    Harbinger {
+        address: String,
+        #[serde(default)]
+        protocol: String,
+        /// `template` or `commands` — see `SocketMode`.
+        #[serde(default)]
+        socket_mode: SocketMode,
+        #[serde(default)]
+        commands: HashMap<String, VigilCommand>,
+    },
+}
+
+#[cfg(feature = "vigil")]
+impl Default for VigilTrigger {
+    fn default() -> Self {
+        VigilTrigger::Toll { interval_secs: 30 }
+    }
+}
+
+/// Harbinger socket mode.
+#[cfg(feature = "vigil")]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SocketMode {
+    #[default]
+    Template,
+    Commands,
+}
+
+/// A pre-registered command for `commands` socket mode.
+#[cfg(feature = "vigil")]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VigilCommand {
+    pub tool: String,
+    #[serde(default)]
+    pub args: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Optional gate condition checked before an observance runs.
+#[cfg(feature = "vigil")]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct VigilRite {
+    pub cmd: Option<String>,
+    #[serde(default)]
+    pub git_dirty: bool,
 }
 
 impl Config {
