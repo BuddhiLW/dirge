@@ -3388,7 +3388,13 @@ fn nrepl_plugin_paren_repair_balances_delimiters() {
 /// startup warnings about "failed to load plugin" never regress.
 /// Standalone `janet -k` catches syntax errors, but only a full Rust
 /// eval with the dirge host can catch missing symbol references.
-#[cfg(all(feature = "plugin", feature = "dap", feature = "mcp", feature = "lsp"))]
+#[cfg(all(
+    feature = "plugin",
+    feature = "dap",
+    feature = "mcp",
+    feature = "lsp",
+    feature = "vigil"
+))]
 #[test]
 fn validate_all_plugins_compile() {
     let plugin_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins");
