@@ -11,17 +11,18 @@
 # issue source swappable (GitHub API, a local file, anything http-get can
 # reach) without touching this plugin.
 #
-# The FIRST question in `questions` is the rank key: its `score` answer orders
-# `:ranked` descending. Items that answer without that score sink to the
-# bottom (sentinel -1000000000). The full unordered verdict list is stashed
-# under the session key "verdicts" via `harness/store` AND returned as
-# `:verdicts`, so the agent can either re-rank or summarize directly.
+# The rank key is the FIRST question in `questions`, unless `cfg` carries an
+# explicit `:rank` override. Its `score` answer orders `:ranked` descending.
+# Items that answer without that score sink to the bottom (sentinel
+# -1000000000). The full unordered verdict list is stashed under the session
+# key "verdicts" via `harness/store` AND returned as `:verdicts`, so the agent
+# can either re-rank or summarize directly.
 #
 # Depends on plugins/lev_classify.janet, which the directory loader reads
 # first (alphabetical order: lev_classify < lev_vigilmode). Never throws.
 
-(defn- rank-key [questions]
-  (first (keys questions)))
+(defn- rank-key [questions cfg]
+  (or (get cfg :rank) (first (keys questions))))
 
 (defn- score-of [result qid]
   (or (get-in result [:answers qid "score"]) -1000000000))
@@ -37,12 +38,12 @@
   "Classify `items` (an array of state objects) against a shared typed
    `questions` set with bounded fan-out, stash the full verdicts under the
    session key \"verdicts\", and return {:verdicts [...] :ranked [...]} where
-   :ranked is the top `:top-n` (default 5) items by the first score question,
-   descending. `cfg` optionally overrides :endpoint / :api-key / :limit /
-   :top-n. Never throws."
+   :ranked is the top `:top-n` (default 5) items by the rank score question
+   (`:rank` in cfg, else the first question), descending. `cfg` optionally
+   overrides :endpoint / :api-key / :limit / :top-n / :rank. Never throws."
   [items questions &opt cfg]
   (let [qs (if (string? questions) (harness/json-decode questions) questions)
-        qid (rank-key qs)
+        qid (rank-key qs cfg)
         results (lev/classify-many items qs cfg)
         top-n (or (get cfg :top-n) 5)]
     (harness/store "verdicts" (json-encode results))

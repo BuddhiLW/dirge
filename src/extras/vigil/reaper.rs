@@ -338,6 +338,9 @@ pub async fn run_reaper(
                             let verdict = if hook_tx.send(gate_req).await.is_err() {
                                 fail_verdict(&gate, "on-vigil-rite drainer gone", &vigil_name, &verdict_store)
                             } else {
+                                // Must stay above the hook budget (HOOK_TIMEOUT
+                                // 5 s + INTERRUPT_GRACE 2 s) so a completed
+                                // verdict is never lost to this outer timeout.
                                 match tokio::time::timeout(
                                     std::time::Duration::from_secs(10),
                                     gate_rx,

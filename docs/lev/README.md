@@ -35,7 +35,7 @@ decision step.
 
 | Hook | When fired | Janet context | Return value |
 |---|---|---|---|
-| `on-vigil-rite` | Reaper drains a vigil, after shell rite, pre-observance | `{:vigil "<name>" :trigger :toll\|:watcher\|:harbinger :event_count N :payload "<coalesced JSON>"}` | `nil` to pass; `harness/block "reason"` to block |
+| `on-vigil-rite` | Reaper drains a vigil, after shell rite, pre-observance | `{:vigil "<name>" :trigger :toll\|:watcher\|:harbinger :event_count N :payload "<coalesced JSON>"}` | `nil` to pass; `harness/verdict p` to gate on confidence; `harness/block "reason"` to force-block; `harness/toil "cmd"` to act directly |
 
 The `:payload` is the same coalesced event state the observance would carry —
 a single event's context, or `{"events": [...], "files": [...], "event_count": N}`
@@ -43,12 +43,20 @@ for a multi-event batch — serialized as a JSON string.
 
 ### Gate semantics (fail-open)
 
-The gate only blocks on an explicit `harness/block` verdict. Everything else
-proceeds:
+A hook result resolves to a verdict in this precedence (see
+`verdict_from_hook_result` in `src/extras/vigil/mod.rs`):
 
-- `nil` from the hook → pass
-- hook responder dropped → warn + pass
-- hook exceeds the 10-second timeout → warn + pass
+1. `harness/block "reason"` — shroud: skip the observance outright.
+2. `harness/toil "cmd"` — act: skip the observance, run the shell command(s)
+   directly instead.
+3. `harness/verdict p` — compare `p` to the vigil's wake threshold (default
+   0.8, derived from the `gate.policy` cost matrix). `p > threshold` wakes the
+   agent; otherwise shroud.
+4. anything else (`nil`, no verdict) — pass.
+
+Fail-open covers every error path: a dropped responder, a plugin error, or a
+timeout all resolve to the vigil's `gate.fail` posture (default `open`, matching
+the pre-gate behavior).
 
 The gate is also **off by default**: dirge enables it only when a loaded plugin
 has registered `on-vigil-rite`. With no lev plugin, vigil behavior is unchanged.
@@ -61,8 +69,8 @@ Plugins register `on-vigil-rite` the same way as any vigil hook:
 (def hooks ["on-vigil-rite"])
 
 (defn on-vigil-rite [ctx]
-  (when-let [reason (lev-verdict ctx)]
-    (harness/block reason)))
+  (when-let [prob (lev-verdict ctx)]
+    (harness/verdict prob)))
 ```
 
 The plugin loader promotes the bare `defn` to `{plugin-stem}-on-vigil-rite`, so

@@ -3462,6 +3462,24 @@ fn two_loaded_plugins_both_register_on_the_same_hook() {
     assert_eq!(msgs.len(), 2, "both registrations must run: {msgs:?}");
 }
 
+/// `on-vigil-enrich` must be in `HOOK_NAMES` or the loader never promotes it,
+/// `has_hook` stays false, and the reaper's filter/enrich stage is unreachable
+/// no matter what a plugin defines. Loads a plugin through the real loader and
+/// asserts the hook is discoverable — the seam the reaper relies on.
+#[cfg(feature = "plugin")]
+#[test]
+fn on_vigil_enrich_is_registered_by_the_loader() {
+    let plugin = tmpfile("vigil-enrich", r#"(defn on-vigil-enrich [ctx] nil)"#);
+    let mut mgr = PluginManager::try_new().unwrap();
+    super::load_plugin(&mut mgr, &plugin).unwrap();
+    let _ = std::fs::remove_file(&plugin);
+
+    assert!(
+        mgr.has_hook("on-vigil-enrich"),
+        "loader must register on-vigil-enrich so the reaper enrich stage can run",
+    );
+}
+
 /// A throwing hook is caught, surfaced, and the next plugin still runs.
 #[cfg(feature = "plugin")]
 #[test]

@@ -3146,7 +3146,14 @@ unsafe extern "C-unwind" fn janet_http_post_many_cfn(
 /// sidecar must not pin the Janet worker thread — and thus every plugin
 /// hook — forever.
 #[cfg(feature = "plugin")]
-const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+// The rite gate and enrich stage dispatch through `dispatch_tool_hook`, whose
+// budget is `HOOK_TIMEOUT` (5 s) plus the post-interrupt `INTERRUPT_GRACE`
+// (2 s) — 7 s before a blocking hook result is abandoned. `eval_with_timeout`
+// interrupts the Janet VM, not a blocking C call like this bridge, so the
+// HTTP timeout must stay strictly under that 7 s budget or a slow-but-successful
+// lev verdict is dropped and the gate fails open. The reaper's outer oneshot
+// timeout (10 s) sits above the hook budget.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Blocking HTTP request shared by the POST/GET/many bridge C-fns. Returns the
 /// raw body on a 2xx status, `None` otherwise. Pure Rust (no Janet values) so
