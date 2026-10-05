@@ -40,14 +40,26 @@ pub(crate) const SYNTAX_CHECK_PREFIX: &str = "Syntax check failed for ";
 /// fall back to the default stream.
 pub(crate) fn try_arm_escalation(config: &LoopConfig, reason: EscalationReason) {
     use std::sync::atomic::Ordering;
-    // Try to decrement the budget. `fetch_update` lets us peek-and-
-    // decrement atomically; if it returns Err, the budget is zero
-    // and we no-op.
-    let res = config
-        .escalation_remaining
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-            if v == 0 { None } else { Some(v - 1) }
-        });
+    // Try to decrement the budget with a compare-exchange loop; a zero
+    // budget means we no-op. Written out by hand because newer
+    // toolchains deprecate `fetch_update` (renamed `try_update`),
+    // which older supported toolchains do not have yet.
+    let remaining = &config.escalation_remaining;
+    let mut current = remaining.load(Ordering::SeqCst);
+    let res = loop {
+        if current == 0 {
+            break Err(current);
+        }
+        match remaining.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(prev) => break Ok(prev),
+            Err(actual) => current = actual,
+        }
+    };
     if res.is_err() {
         tracing::debug!(
             target: "dirge::agent_loop::escalation",
