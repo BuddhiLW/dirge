@@ -789,24 +789,68 @@ pub type TransformContextFn = std::sync::Arc<
         + Sync,
 >;
 
+/// `first`, then `second` on the messages `first` answered.
+#[cfg_attr(not(feature = "addons"), allow(dead_code))]
+pub fn compose_transform_context(
+    first: Option<TransformContextFn>,
+    second: Option<TransformContextFn>,
+) -> Option<TransformContextFn> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(std::sync::Arc::new(move |messages| {
+            let (first, second) = (first.clone(), second.clone());
+            Box::pin(async move { second(first(messages).await).await })
+        })),
+        (first, second) => first.or(second),
+    }
+}
+
+/// Why a compaction pass runs, and how full the context is as it does.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CompactionFacts {
+    /// Why the fold fires: `"pressure"` for a fold the context budget
+    /// triggered, `"checkpoint"` when the folded span is the prefix a
+    /// background checkpoint already covers.
+    pub reason: &'static str,
+    /// The focus the fold was asked to keep, if any.
+    pub focus: Option<String>,
+    /// Prompt tokens and the usable window when the fold fires.
+    pub usage: super::context_manager::ContextUsage,
+}
+
+impl CompactionFacts {
+    /// A fold the context budget triggered at `usage`.
+    pub fn pressure(usage: super::context_manager::ContextUsage) -> Self {
+        Self {
+            reason: "pressure",
+            focus: None,
+            usage,
+        }
+    }
+}
+
 /// dirge-jia8: observe-only "compaction is about to run" callback.
-/// Receives `(message_count, estimated_tokens)`. Cannot cancel — the
+/// Receives `(message_count, estimated_tokens, facts)`. Cannot cancel — the
 /// fold proceeds regardless (cancelling an emergency fold would
 /// overflow the context window on the next call).
 pub type OnBeforeCompactFn = std::sync::Arc<
-    dyn Fn(usize, u64) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    dyn Fn(
+            usize,
+            u64,
+            CompactionFacts,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         + Send
         + Sync,
 >;
 
 /// dirge-jia8: custom-summary callback. Receives the to-be-summarized
-/// middle message slice; returns `Some(summary)` to use instead of
-/// the LLM summarizer, or `None` to fall through to the LLM. The
-/// returned summary is still validated by `validate_summary`; an
+/// middle message slice and why it is folded; returns `Some(summary)` to
+/// use instead of the LLM summarizer, or `None` to fall through to the LLM.
+/// The returned summary is still validated by `validate_summary`; an
 /// invalid one falls through.
 pub type OnCompactFn = std::sync::Arc<
     dyn Fn(
             Vec<serde_json::Value>,
+            CompactionFacts,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>
         + Send
         + Sync,
@@ -818,6 +862,42 @@ pub type OnCompactFn = std::sync::Arc<
 pub struct CompactionHooks {
     pub on_before: OnBeforeCompactFn,
     pub on_compact: OnCompactFn,
+}
+
+/// `first`, then `second`: both observe a fold about to run, and the first
+/// summary that passes `validate_summary` is the one used.
+pub fn compose_compaction_hooks(
+    first: Option<CompactionHooks>,
+    second: Option<CompactionHooks>,
+) -> Option<CompactionHooks> {
+    let (first, second) = match (first, second) {
+        (Some(first), Some(second)) => (first, second),
+        (first, second) => return first.or(second),
+    };
+    let (before_a, before_b) = (first.on_before, second.on_before);
+    let on_before: OnBeforeCompactFn = std::sync::Arc::new(move |count, tokens, facts| {
+        let (a, b) = (before_a.clone(), before_b.clone());
+        Box::pin(async move {
+            a(count, tokens, facts.clone()).await;
+            b(count, tokens, facts).await;
+        })
+    });
+    let (compact_a, compact_b) = (first.on_compact, second.on_compact);
+    let on_compact: OnCompactFn = std::sync::Arc::new(move |span, facts| {
+        let (a, b) = (compact_a.clone(), compact_b.clone());
+        Box::pin(async move {
+            match a(span.clone(), facts.clone()).await {
+                Some(summary) if crate::agent::compression::validate_summary(&summary) => {
+                    Some(summary)
+                }
+                _ => b(span, facts).await,
+            }
+        })
+    });
+    Some(CompactionHooks {
+        on_before,
+        on_compact,
+    })
 }
 
 /// `getApiKey` signature. Pi: `(provider: string) =>

@@ -4,6 +4,8 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+use crate::command_class::CommandClass;
+
 use super::domain::{
     AddonSummary, BeforeOutcome, CommandOutput, CommandSpec, HookPoint, HookReply, LoadFailure,
     PanelRequest, ToolSpec,
@@ -34,6 +36,14 @@ pub fn exposed_tool_name(name: &str) -> String {
 
 fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
+}
+
+/// The class a command row declares under `class`. A missing or unknown
+/// class is [`CommandClass::Mutating`], so a typo gates the command.
+fn declared_class(row: &Value) -> CommandClass {
+    str_field(row, "class")
+        .and_then(CommandClass::parse)
+        .unwrap_or_default()
 }
 
 /// The host's load report for one manifest, as a summary or the reason it
@@ -108,6 +118,7 @@ pub fn parse_summary(manifest: &Path, report: &Value) -> Result<AddonSummary, Lo
                         addon_id: id.clone(),
                         name: name.to_string(),
                         description: str_field(c, "description").unwrap_or("").to_string(),
+                        class: declared_class(c),
                     })
                 })
                 .collect()
@@ -342,6 +353,57 @@ pub fn texts(replies: &[HookReply]) -> Vec<String> {
         .collect()
 }
 
+/// The first `{:summary text}` answer that `valid` accepts. Failed hooks,
+/// nil, and summaries `valid` rejects are passed over, so the next addon,
+/// and at last dirge's own summarizer, get their turn.
+pub fn summary(replies: &[HookReply], valid: impl Fn(&str) -> bool) -> Option<String> {
+    replies
+        .iter()
+        .filter_map(|r| r.result.as_ref().ok())
+        .filter_map(|v| v.get("summary").and_then(Value::as_str))
+        .find(|s| valid(s))
+        .map(str::to_string)
+}
+
+/// The first `{:messages [...]}` answer holding at least one message and
+/// nothing but messages (maps with a string `role`). Other answers are
+/// passed over, so a malformed one never reaches the model.
+pub fn messages(replies: &[HookReply]) -> Option<Vec<Value>> {
+    replies
+        .iter()
+        .filter_map(|r| r.result.as_ref().ok())
+        .filter_map(|v| v.get("messages").and_then(Value::as_array))
+        .find(|ms| !ms.is_empty() && ms.iter().all(|m| str_field(m, "role").is_some()))
+        .cloned()
+}
+
+/// The first `{:thinking level}` an answer names that `known` accepts.
+pub fn thinking(replies: &[HookReply], known: impl Fn(&str) -> bool) -> Option<String> {
+    replies
+        .iter()
+        .filter_map(|r| r.result.as_ref().ok())
+        .filter_map(|v| str_field(v, "thinking"))
+        .find(|s| known(s))
+        .map(str::to_string)
+}
+
+/// The first addon that asked to stop, answering `true`, `{:stop true}` or
+/// `{:stop "reason"}`, with its reason when it gave one.
+pub fn stop(replies: &[HookReply]) -> Option<(String, Option<String>)> {
+    replies.iter().find_map(|r| {
+        let v = r.result.as_ref().ok()?;
+        let reason = match v {
+            Value::Bool(true) => None,
+            _ => match v.get("stop")? {
+                Value::Bool(true) => None,
+                Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+                _ => return None,
+            },
+        };
+        Some((r.addon_id.clone(), reason))
+    })
+}
+
 /// Fold `BeforeToolCall` replies: the first block wins and stops the fold,
 /// contexts accumulate, the last `args` replacement wins.
 pub fn fold_before(replies: &[HookReply]) -> BeforeOutcome {
@@ -410,10 +472,12 @@ pub fn content_text(content: &[Value]) -> String {
 /// `<system-reminder>` wrapping for addon-supplied context, labelled with
 /// the hook it came from so the model can tell sources apart.
 pub fn reminder(point: HookPoint, text: &str) -> String {
-    format!(
-        "<system-reminder>\n{} addon context:\n{text}\n</system-reminder>",
-        point.key()
-    )
+    key_reminder(point.key(), text)
+}
+
+/// [`reminder`] for a hook no [`HookPoint`] names, labelled with its key.
+pub fn key_reminder(key: &str, text: &str) -> String {
+    format!("<system-reminder>\n{key} addon context:\n{text}\n</system-reminder>")
 }
 
 #[cfg(test)]
@@ -647,6 +711,30 @@ mod tests {
         assert_eq!(names, vec!["swarm", "kanban:list"]);
         assert_eq!(s.commands[0].description, "grid");
         assert_eq!(s.commands[0].addon_id, "a");
+    }
+
+    #[test]
+    fn a_command_carries_its_declared_class_and_is_mutating_without_one() {
+        let report = json!({
+            "id": "a",
+            "commands": [
+                {"name": "peek", "class": "read-only"},
+                {"name": "look", "class": ":view"},
+                {"name": "plain"},
+                {"name": "typo", "class": "safe"}
+            ]
+        });
+        let s = parse_summary(&PathBuf::from("a.edn"), &report).unwrap();
+        let classes: Vec<_> = s.commands.iter().map(|c| c.class).collect();
+        assert_eq!(
+            classes,
+            vec![
+                CommandClass::ReadOnly,
+                CommandClass::View,
+                CommandClass::Mutating,
+                CommandClass::Mutating,
+            ]
+        );
     }
 
     #[test]

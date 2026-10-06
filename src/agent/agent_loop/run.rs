@@ -44,7 +44,7 @@
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use super::context_manager::{self, PostUsageDecisionKind};
+use super::context_manager::{self, ContextUsage, PostUsageDecisionKind};
 use super::gate_state::{GateInputs, GateStates};
 use super::gate_tally::{BoundaryNudge, GateSource, GateTally};
 use super::inflight::InflightSet;
@@ -55,7 +55,7 @@ use super::message::{
 use super::storm::StormBreaker;
 use super::stream::{StreamFn, stream_assistant_response};
 use super::tool::AbortSignal;
-use super::types::{CodeReviewMode, Context, GateMode, LoopConfig};
+use super::types::{CodeReviewMode, CompactionFacts, Context, GateMode, LoopConfig};
 use super::verifier::VERIFY_TAG;
 use crate::sync_util::LockExt;
 
@@ -1565,6 +1565,23 @@ fn spawn_incremental_checkpoint(
     });
 }
 
+/// What the compaction hooks are offered for a fold of `messages[start..end]`:
+/// the earlier summary markers in the head that the fold supersedes (as
+/// `compression::apply_summary` drops them), then the span itself.
+fn hook_span(messages: &[Value], start: usize, end: usize) -> Vec<Value> {
+    use crate::agent::compression::{COMPACTION_MARKER, content_text};
+    let mut span: Vec<Value> = messages[..start]
+        .iter()
+        .filter(|m| content_text(m.get("content")).contains(COMPACTION_MARKER))
+        .cloned()
+        .collect();
+    span.extend_from_slice(&messages[start..end]);
+    span
+}
+
+/// A pressure fold with no focus and an unknown window, for tests that only
+/// exercise the fold mechanics.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn run_compaction_pass(
     current_context: &mut Context,
@@ -1583,7 +1600,7 @@ async fn run_compaction_pass(
         summarize_fn,
         protect_tail,
         compaction_failures,
-        None,
+        CompactionFacts::pressure(ContextUsage::default()),
         memory_provider,
         compaction_hooks,
         emit,
@@ -1594,11 +1611,9 @@ async fn run_compaction_pass(
     .await
 }
 
-/// Same as `run_compaction_pass` but accepts an optional focus
-/// topic to splice into the Hermes-style summary prompt. Wired by
-/// the `/compress <focus>` slash command path. The auto-triggered
-/// compaction (`PostUsageDecisionKind::Fold` / `ExitWithSummary`)
-/// continues to use the no-focus wrapper above.
+/// One compaction pass: prune, then summarize the middle. `facts` says why
+/// the fold fires and how full the context is; its `focus` is spliced into
+/// the Hermes-style summary prompt, and the compaction hooks hear all of it.
 ///
 /// dirge-h5tv: `memory_provider` carries the optional plugin
 /// provider so `on_pre_compress` can fire here, mirroring what
@@ -1611,7 +1626,7 @@ async fn run_compaction_pass_with_focus(
     summarize_fn: &Option<crate::agent::compression::SummarizeFn>,
     protect_tail: usize,
     compaction_failures: u32,
-    focus_topic: Option<String>,
+    facts: CompactionFacts,
     memory_provider: &Option<std::sync::Arc<dyn crate::extras::memory_provider::MemoryProvider>>,
     compaction_hooks: Option<&crate::agent::agent_loop::types::CompactionHooks>,
     emit: &mpsc::Sender<LoopEvent>,
@@ -1626,13 +1641,17 @@ async fn run_compaction_pass_with_focus(
     use crate::agent::compression;
 
     let before = compression::estimate_messages_tokens(&current_context.messages);
+    let focus_topic = facts.focus.clone();
 
     // dirge-jia8: observe-only `on-before-compact` plugin hook. It
     // CANNOT cancel — the fold proceeds regardless (cancelling an
     // emergency fold would overflow the next request).
     if let Some(hooks) = compaction_hooks {
-        (hooks.on_before)(current_context.messages.len(), before).await;
+        (hooks.on_before)(current_context.messages.len(), before, facts.clone()).await;
     }
+    // The compaction hooks are offered their span as it stood before this
+    // pass pruned it: tool results as the tool-call hooks saw them.
+    let unpruned = compaction_hooks.map(|_| current_context.messages.clone());
 
     // First pass: cheap tool-output pruning. No LLM call.
     let pruned = compression::prune_tool_outputs(&current_context.messages, protect_tail);
@@ -1717,7 +1736,14 @@ async fn run_compaction_pass_with_focus(
                     // checkpoint's — the checkpoint summary was generated without
                     // consulting the plugin.
                     if let Some(hooks) = compaction_hooks
-                        && let Some(s) = (hooks.on_compact)(discarded).await
+                        && let Some(s) = (hooks.on_compact)(
+                            unpruned.as_ref().map_or(discarded, |u| u[..cut].to_vec()),
+                            CompactionFacts {
+                                reason: "checkpoint",
+                                ..facts.clone()
+                            },
+                        )
+                        .await
                         && compression::validate_summary(&s)
                         && let Some((m, _)) = compression::apply_checkpoint_summary(
                             &current_context.messages,
@@ -1785,10 +1811,17 @@ async fn run_compaction_pass_with_focus(
             // instead of calling the LLM summarizer. An absent hook,
             // no summary, or an invalid one falls through to the LLM.
             let plugin_summary: Option<String> = match compaction_hooks {
-                Some(hooks) => match (hooks.on_compact)(middle.clone()).await {
-                    Some(s) if compression::validate_summary(&s) => Some(s),
-                    _ => None,
-                },
+                Some(hooks) => {
+                    let span = hook_span(
+                        unpruned.as_deref().unwrap_or(&current_context.messages),
+                        start,
+                        end,
+                    );
+                    match (hooks.on_compact)(span, facts.clone()).await {
+                        Some(s) if compression::validate_summary(&s) => Some(s),
+                        _ => None,
+                    }
+                }
                 None => None,
             };
             let summary_result: Result<String, _> = match plugin_summary {
@@ -2886,14 +2919,7 @@ pub async fn run_loop(
             // so the model's advertised window is used as-is. Every
             // downstream tier (fold / snip / turn-start / incremental
             // checkpoint) reads this value.
-            let model_window = context_manager::context_window_override().unwrap_or_else(|| {
-                config
-                    .model_name
-                    .as_deref()
-                    .and_then(crate::config::context_window_for_model)
-                    .unwrap_or(128_000)
-            });
-            let ctx_max = context_manager::effective_ctx_max(model_window);
+            let ctx_max = context_manager::ctx_max_for(config.model_name.as_deref());
 
             // Pi lines 175-179: turn_start (skipped on very first
             // iteration — the outer wrapper already emitted it).
@@ -2939,11 +2965,15 @@ pub async fn run_loop(
                         "context-manager: turn-start fold firing ({}% of context)",
                         (estimate.ratio * 100.0) as u32,
                     );
-                    let outcome = run_compaction_pass(
+                    let outcome = run_compaction_pass_with_focus(
                         &mut current_context,
                         &summarize_fn,
                         5, // protect last 5 messages
                         compaction_failures,
+                        CompactionFacts::pressure(ContextUsage {
+                            tokens: estimate.estimate_tokens,
+                            ctx_max,
+                        }),
                         &memory_provider,
                         config.compaction_hooks.as_ref(),
                         emit,
@@ -3999,11 +4029,15 @@ pub async fn run_loop(
                                     ctx_max,
                                 )
                             {
-                                let outcome = run_compaction_pass(
+                                let outcome = run_compaction_pass_with_focus(
                                     &mut current_context,
                                     &summarize_fn,
                                     5, // protect last 5 messages
                                     compaction_failures,
+                                    CompactionFacts::pressure(ContextUsage {
+                                        tokens: prompt_tokens,
+                                        ctx_max,
+                                    }),
                                     &memory_provider,
                                     config.compaction_hooks.as_ref(),
                                     emit,
@@ -4117,11 +4151,15 @@ pub async fn run_loop(
                             // When context is critically over the threshold,
                             // prune aggressively then run the structured-summary
                             // pass if a summarizer is wired.
-                            let outcome = run_compaction_pass(
+                            let outcome = run_compaction_pass_with_focus(
                                 &mut current_context,
                                 &summarize_fn,
                                 3, // protect only last 3
                                 compaction_failures,
+                                CompactionFacts::pressure(ContextUsage {
+                                    tokens: decision.prompt_tokens,
+                                    ctx_max,
+                                }),
                                 &memory_provider,
                                 config.compaction_hooks.as_ref(),
                                 emit,

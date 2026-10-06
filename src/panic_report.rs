@@ -125,7 +125,7 @@ pub fn take() -> Option<PanicRecord> {
 /// The payload as a string when it is one. `panic!("…")`, `unwrap`,
 /// `expect` and the built-in panics all produce `&str` or `String`;
 /// anything else is a `Box<dyn Any>` we cannot read.
-fn payload_text(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn payload_text(payload: &(dyn std::any::Any + Send)) -> String {
     payload
         .downcast_ref::<&str>()
         .map(|s| s.to_string())

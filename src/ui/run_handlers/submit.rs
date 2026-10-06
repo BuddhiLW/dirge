@@ -92,6 +92,7 @@ pub(crate) fn submit_resolved_prompt(
         match crate::ui::slash::prepare_compaction(
             None,
             true,
+            crate::agent::command_hooks::CompactTrigger::Auto,
             agent,
             deps.client,
             ctx.renderer,

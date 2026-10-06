@@ -1,3 +1,4 @@
+mod addon_seam;
 pub mod config;
 pub mod model_option;
 
@@ -248,14 +249,26 @@ pub async fn serve(cli: Cli, cfg: Config, context: ContextFiles) -> anyhow::Resu
             on_receive_notification!(),
         )
         .on_receive_dispatch(
-            |dispatch: Dispatch<AgentRequest, AgentNotification>, _cx: ConnectionTo<Client>| {
+            |dispatch: Dispatch<AgentRequest, AgentNotification>, cx: ConnectionTo<Client>| {
                 async move {
                     // acp 2.0 moved `respond_with_error` off `Dispatch` and onto
                     // the `Responder` that only the request variant carries. A
                     // notification or a stray response has no reply channel, so
                     // there is nothing to answer — dropping it matches what the
                     // old blanket call did for those arms.
+                    //
+                    // ACP's `_`-prefixed extension methods and notifications go
+                    // to the addons (see `addon_seam`); a request no addon
+                    // answers gets method-not-found. Spawned so an addon's
+                    // answer never holds up the connection.
                     match dispatch {
+                        Dispatch::Request(AgentRequest::ExtMethodRequest(ext), responder) => {
+                            cx.spawn(addon_seam::answer_ext_method(ext, responder))
+                        }
+                        Dispatch::Notification(AgentNotification::ExtNotification(notif)) => {
+                            addon_seam::ext_notification(&notif);
+                            Ok(())
+                        }
                         Dispatch::Request(_, responder) => responder.respond_with_error(
                             agent_client_protocol::util::internal_error("Unhandled ACP message"),
                         ),
@@ -281,9 +294,12 @@ async fn handle_initialize(
 
     let caps = AgentCapabilities::new();
 
+    // Addons advertise what they add to ACP (extension methods, say) here.
+    let meta = addon_seam::meta("initialize", None, req.meta.as_ref(), None).await;
     let resp = InitializeResponse::new(req.protocol_version)
         .agent_capabilities(caps)
-        .agent_info(Implementation::new("dirge", "1.0.4"));
+        .agent_info(Implementation::new("dirge", "1.0.4"))
+        .meta(meta);
 
     responder.respond(resp)
 }
@@ -320,7 +336,16 @@ async fn handle_new_session(
 
     let options =
         session_config_options(&state.sessions, &state.cli, &state.cfg, &session_id.0).await;
-    let resp = NewSessionResponse::new(session_id.clone()).config_options(options);
+    let meta = addon_seam::meta(
+        "session/new",
+        Some(&session_id.to_string()),
+        req.meta.as_ref(),
+        None,
+    )
+    .await;
+    let resp = NewSessionResponse::new(session_id.clone())
+        .config_options(options)
+        .meta(meta);
     responder.respond(resp)?;
 
     // dirge-32k9 (gh#714): announce the slash commands so ACP clients (Zed, etc.) can
@@ -369,16 +394,28 @@ async fn handle_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let request_meta = req.meta;
 
     cx.spawn({
         let cx = cx.clone();
-        async move { run_prompt(&state, &prompt_text, session_id, responder, cx).await }
+        async move {
+            run_prompt(
+                &state,
+                &prompt_text,
+                request_meta,
+                session_id,
+                responder,
+                cx,
+            )
+            .await
+        }
     })
 }
 
 async fn run_prompt(
     state: &AcpState,
     prompt_text: &str,
+    request_meta: Option<Meta>,
     session_id: SessionId,
     responder: Responder<PromptResponse>,
     cx: ConnectionTo<Client>,
@@ -426,7 +463,9 @@ async fn run_prompt(
             let update = SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(options));
             let _ = cx.send_notification(SessionNotification::new(session_id.clone(), update));
         }
-        let _ = responder.respond(PromptResponse::new(StopReason::EndTurn));
+        let meta =
+            addon_seam::meta("session/prompt", Some(&id_key), request_meta.as_ref(), None).await;
+        let _ = responder.respond(PromptResponse::new(StopReason::EndTurn).meta(meta));
         return Ok(());
     }
 
@@ -525,6 +564,9 @@ async fn run_prompt(
     // headless loop in `provider/run.rs`.
     let mut full_response = String::new();
     let mut turn_tool_calls: Vec<ToolCallEntry> = Vec::new();
+    // Summed over every model call this prompt made, and reported to the
+    // client in the prompt response's `_meta.usage`.
+    let mut usage = TurnUsage::default();
 
     // F5: correlate rig tool-call ids with ACP ids so parallel
     // calls pair with their results correctly. See
@@ -628,11 +670,23 @@ async fn run_prompt(
                 );
                 let _ = cx.send_notification(notif);
             }
-            AgentEvent::Done { response, .. } => {
+            AgentEvent::Done { response, cost, .. } => {
                 // `Done.response` is the authoritative full text.
                 full_response = response.to_string();
+                usage.cost_usd = cost;
                 break;
             }
+            AgentEvent::Usage {
+                input_tokens,
+                cached_input_tokens,
+                cache_creation_input_tokens,
+                output_tokens,
+            } => usage.add(
+                input_tokens,
+                cached_input_tokens,
+                cache_creation_input_tokens,
+                output_tokens,
+            ),
             AgentEvent::Error(error) => {
                 // dirge-6po9: don't swallow the error and report a clean
                 // EndTurn — the editor client would see a truncated/empty
@@ -670,7 +724,6 @@ async fn run_prompt(
             }
             AgentEvent::TurnStart { .. }
             | AgentEvent::TurnEnd { .. }
-            | AgentEvent::Usage { .. }
             | AgentEvent::CompactionStarted { .. }
             | AgentEvent::ContextCompacted { .. }
             | AgentEvent::CheckpointRefresh { .. }
@@ -721,8 +774,68 @@ async fn run_prompt(
     } else {
         StopReason::EndTurn
     };
-    let _ = responder.respond(PromptResponse::new(reason));
+    // Addon `_meta` keys join `usage` and never replace it.
+    let meta = addon_seam::meta(
+        "session/prompt",
+        Some(&id_key),
+        request_meta.as_ref(),
+        usage.meta(&provider_str),
+    )
+    .await;
+    let _ = responder.respond(PromptResponse::new(reason).meta(meta));
     Ok(())
+}
+
+/// Token usage and cost of one ACP prompt, summed over every model call the
+/// prompt made (a prompt with tool calls makes several).
+///
+/// ACP has no stable field for this: `PromptResponse.usage` exists only
+/// behind the schema crate's `unstable_end_turn_token_usage` feature. dirge
+/// reports it in the response's `_meta.usage` instead, with the field names
+/// of that unstable `Usage` type so a client can read either.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct TurnUsage {
+    tokens: crate::agent::agent_loop::message::TokenUsage,
+    /// Priced by the bridge and carried on `Done`; 0.0 for a model with no
+    /// known price.
+    cost_usd: f64,
+    /// Whether the provider reported usage at all.
+    reported: bool,
+}
+
+impl TurnUsage {
+    fn add(&mut self, input: u64, cached: u64, cache_creation: u64, output: u64) {
+        let t = &mut self.tokens;
+        t.input_tokens = t.input_tokens.saturating_add(input);
+        t.cached_input_tokens = t.cached_input_tokens.saturating_add(cached);
+        t.cache_creation_input_tokens =
+            t.cache_creation_input_tokens.saturating_add(cache_creation);
+        t.output_tokens = t.output_tokens.saturating_add(output);
+        self.reported = true;
+    }
+
+    /// `{"usage": {...}}` for the prompt response's `_meta`, or `None` when
+    /// the provider reported no usage (a slash command, or a provider that
+    /// sends none). `inputTokens` is the whole prompt whatever the provider's
+    /// convention, so cached tokens are a part of it, never added to it.
+    fn meta(&self, provider: &str) -> Option<Meta> {
+        if !self.reported {
+            return None;
+        }
+        let input = self.tokens.prompt_total(Some(provider));
+        let output = self.tokens.output_tokens;
+        let usage = serde_json::json!({
+            "inputTokens": input,
+            "outputTokens": output,
+            "totalTokens": input.saturating_add(output),
+            "cachedReadTokens": self.tokens.cached_input_tokens,
+            "cachedWriteTokens": self.tokens.cache_creation_input_tokens,
+            "costUsd": self.cost_usd,
+        });
+        let mut meta = Meta::new();
+        meta.insert("usage".to_string(), usage);
+        Some(meta)
+    }
 }
 
 /// Wrap plain text as an `AgentMessageChunk` session notification. The base
@@ -1282,6 +1395,53 @@ mod tests {
     use std::sync::Mutex;
 
     static ACP_AUTH_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn prompt_usage_is_absent_when_the_provider_reported_none() {
+        let usage = TurnUsage {
+            cost_usd: 0.5,
+            ..TurnUsage::default()
+        };
+        assert_eq!(usage.meta("openai"), None);
+        let json = serde_json::to_value(
+            PromptResponse::new(StopReason::EndTurn).meta(usage.meta("openai")),
+        )
+        .unwrap();
+        assert!(json.get("_meta").is_none(), "{json}");
+    }
+
+    #[test]
+    fn prompt_usage_sums_every_call_into_meta_usage() {
+        let mut usage = TurnUsage::default();
+        usage.add(1_000, 800, 0, 50);
+        usage.add(1_200, 1_000, 0, 70);
+        usage.cost_usd = 0.0125;
+        let response = PromptResponse::new(StopReason::EndTurn).meta(usage.meta("openai"));
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(
+            json["_meta"]["usage"],
+            serde_json::json!({
+                "inputTokens": 2_200,
+                "outputTokens": 120,
+                "totalTokens": 2_320,
+                "cachedReadTokens": 1_800,
+                "cachedWriteTokens": 0,
+                "costUsd": 0.0125,
+            })
+        );
+    }
+
+    #[test]
+    fn prompt_usage_counts_anthropic_cached_tokens_into_the_input() {
+        // Anthropic reports input_tokens as the uncached remainder only.
+        let mut usage = TurnUsage::default();
+        usage.add(100, 9_000, 400, 30);
+        let meta = usage.meta("anthropic").unwrap();
+        assert_eq!(meta["usage"]["inputTokens"], 9_500);
+        assert_eq!(meta["usage"]["totalTokens"], 9_530);
+        assert_eq!(meta["usage"]["cachedReadTokens"], 9_000);
+        assert_eq!(meta["usage"]["cachedWriteTokens"], 400);
+    }
 
     struct TestDir(PathBuf);
 

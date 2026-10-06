@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::command_class::CommandClass;
+
 /// A dirge hook point an addon may contribute to through its IAddon `hooks`
 /// map. The set is closed: an addon keyed on anything else is ignored by
 /// dirge, which is what lets one addon carry hooks for several hosts.
@@ -13,13 +15,15 @@ pub enum HookPoint {
     /// system prompt. `ctx` = `{:cwd :session-id}`.
     SystemPrompt,
     /// `(fn [ctx] -> string|nil)`, text prepended to each submitted prompt as
-    /// a system reminder. `ctx` = `{:prompt :session-id :first-prompt?}`.
+    /// a system reminder. `ctx` = `{:prompt :session-id :first-prompt?
+    /// :tokens :ctx-max :pressure}`.
     OnPrompt,
     /// `(fn [ctx] -> nil|{:block reason}|{:context text}|{:args map})` before
     /// every tool call. `ctx` = `{:tool :args :tool-call-id}`.
     BeforeToolCall,
     /// `(fn [ctx] -> nil|{:context text})` after every tool call.
-    /// `ctx` = `{:tool :args :result :error?}`.
+    /// `ctx` = `{:tool :args :result :error? :tool-use-id :tokens :ctx-max
+    /// :pressure}`.
     AfterToolCall,
     /// `(fn [ctx] -> string|{:context text}|nil)` once per session, before its
     /// first turn in this process, once the MCP servers have connected. The
@@ -30,16 +34,26 @@ pub enum HookPoint {
     /// bounded by a timeout, answer ignored.
     /// `ctx` = `{:session-id :cwd :reason}`, `:reason` is `exit` or `swap`.
     SessionEnd,
+    /// `(fn [ctx] -> nil|{:summary text})` when a fold is about to summarize
+    /// a span of the conversation; a summary that validates replaces the
+    /// built-in one. `ctx` = `{:span :tokens :reason :focus :ctx-max
+    /// :pressure :session-id}`.
+    Compact,
+    /// `(fn [ctx] -> any)` when a fold is about to run; answer ignored.
+    /// `ctx` = `{:count :tokens :reason :ctx-max :pressure :session-id}`.
+    BeforeCompact,
 }
 
 impl HookPoint {
-    pub const ALL: [HookPoint; 6] = [
+    pub const ALL: [HookPoint; 8] = [
         HookPoint::SystemPrompt,
         HookPoint::OnPrompt,
         HookPoint::BeforeToolCall,
         HookPoint::AfterToolCall,
         HookPoint::SessionStart,
         HookPoint::SessionEnd,
+        HookPoint::Compact,
+        HookPoint::BeforeCompact,
     ];
 
     /// The keyword (without the colon) an addon uses as its `hooks` key.
@@ -51,6 +65,8 @@ impl HookPoint {
             HookPoint::AfterToolCall => "dirge/after-tool-call",
             HookPoint::SessionStart => "dirge/session-start",
             HookPoint::SessionEnd => "dirge/session-end",
+            HookPoint::Compact => "dirge/compact",
+            HookPoint::BeforeCompact => "dirge/before-compact",
         }
     }
 
@@ -95,7 +111,7 @@ impl ToolSpec {
 
 /// One slash command an addon contributes, listed under the `:dirge/commands`
 /// key of its `hooks` map:
-/// `{:dirge/commands {"name" {:description "..." :handler (fn [ctx] ...)}}}`.
+/// `{:dirge/commands {"name" {:description "..." :class :read-only :handler (fn [ctx] ...)}}}`.
 /// The handler gets `{:args "rest of the line" :argv [...] :cwd ...}` and
 /// answers nil, a string, or a map read as a [`CommandOutput`].
 #[derive(Debug, Clone, PartialEq)]
@@ -104,6 +120,9 @@ pub struct CommandSpec {
     /// The name typed after `/`.
     pub name: String,
     pub description: String,
+    /// Whether it may run while a turn is in flight; mutating when the
+    /// addon declares none.
+    pub class: CommandClass,
 }
 
 /// What an addon command asked dirge to do with its answer.
@@ -183,6 +202,20 @@ pub struct LoadFailure {
 pub struct HookReply {
     pub addon_id: String,
     pub result: Result<Value, String>,
+}
+
+/// The ctx key under which an emit site names the fields its hook reads as
+/// keywords. The host converts them and drops the key before any hook runs;
+/// the fields the host already converts for a hook key apply as well.
+pub const KEYWORD_FIELDS: &str = "dirge/keyword-fields";
+
+/// `ctx` with `fields` declared as keywords for the hook it is emitted to.
+/// A ctx that is not a map is returned as is.
+pub fn with_keyword_fields(mut ctx: Value, fields: &[&str]) -> Value {
+    if let Value::Object(map) = &mut ctx {
+        map.insert(KEYWORD_FIELDS.into(), fields.into());
+    }
+    ctx
 }
 
 /// The folded answer of every addon to `BeforeToolCall`.

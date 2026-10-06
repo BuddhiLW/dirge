@@ -46,7 +46,7 @@ enum Outcome {
 /// Apply `update` to `renderer`; the lines and hand-offs left for the
 /// UI loop.
 pub fn apply(renderer: &mut Renderer, update: &ViewUpdate) -> Applied {
-    renderer.set_swarm(update.model.swarm.as_ref());
+    renderer.set_swarm(&update.model);
     super::publish(&update.model);
     let mut applied = Applied::default();
     for effect in &update.effects {

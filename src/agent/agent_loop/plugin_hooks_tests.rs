@@ -832,7 +832,7 @@ async fn on_compact_hook_supplies_custom_summary() {
     }
     let hooks = compaction_hooks_from_plugin_manager(pm.clone());
     let middle = vec![serde_json::json!({"role": "user", "content": "old turn"})];
-    let summary = (hooks.on_compact)(middle).await;
+    let summary = (hooks.on_compact)(middle, Default::default()).await;
     assert_eq!(
         summary.as_deref(),
         Some("Active Task: plugin summary"),
@@ -851,9 +851,12 @@ async fn compaction_hooks_passthrough_without_hooks() {
     };
     let hooks = compaction_hooks_from_plugin_manager(pm.clone());
     // observe-only before hook: must not panic.
-    (hooks.on_before)(5, 1234).await;
+    (hooks.on_before)(5, 1234, Default::default()).await;
     // no on-compact hook registered → None.
-    let summary =
-        (hooks.on_compact)(vec![serde_json::json!({"role": "user", "content": "x"})]).await;
+    let summary = (hooks.on_compact)(
+        vec![serde_json::json!({"role": "user", "content": "x"})],
+        Default::default(),
+    )
+    .await;
     assert_eq!(summary, None, "no on-compact hook → fall through to LLM");
 }

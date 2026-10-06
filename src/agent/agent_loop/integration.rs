@@ -823,9 +823,21 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
             cfg.session_id.clone(),
         );
     }
+    crate::agent::command_hooks::loop_hooks::install_pre_compact(
+        &mut loop_config,
+        cfg.session_id.clone(),
+    );
 
     if let Some(addons) = &cfg.addon_hooks {
         addons.install_tool_hooks(&mut loop_config);
+        // After the plugin's: the addons transform what the plugin's
+        // transform answered, and either may stop the run.
+        addons.install_turn_hooks(&mut loop_config);
+        // After the plugin's: a plugin summary that validates wins.
+        loop_config.compaction_hooks = super::types::compose_compaction_hooks(
+            loop_config.compaction_hooks.take(),
+            addons.compaction_hooks(loop_config.session_id.clone()),
+        );
     }
     // The addons also hear the run's events, from the pump below.
     let addon_observer = cfg.addon_hooks.clone();
@@ -895,11 +907,18 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         // must not.
         let initial_text = match open_run {
             Some(open) => {
+                let usage = super::context_manager::ContextUsage::estimate(
+                    &context.system_prompt,
+                    &context.messages,
+                    loop_config.model_name.as_deref(),
+                )
+                .plus_text(&initial_prompt);
                 let mut opening = open(super::hooks::RunOpening {
                     system_prompt: std::mem::take(&mut context.system_prompt),
                     prompt: initial_prompt,
                     reminders: Vec::new(),
                     refusal: None,
+                    usage: Some(usage),
                 })
                 .await;
                 if let Some(refusal) = opening.refusal.take() {
@@ -1941,6 +1960,12 @@ mod tests {
                 _: Option<String>,
                 _: bool,
             ) -> Option<crate::agent::agent_loop::hooks::OpenRunFn> {
+                None
+            }
+            fn compaction_hooks(
+                &self,
+                _: Option<String>,
+            ) -> Option<crate::agent::agent_loop::types::CompactionHooks> {
                 None
             }
         }

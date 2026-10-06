@@ -16,6 +16,7 @@
 //! seam (`ui::view`); the painter lives in `ui::tui::swarm`.
 
 use crate::ui::panels_ext::ExternalPanels;
+use crate::ui::view::domain::ProducerKey;
 
 /// A grid cell, as the view seam's domain names it.
 pub use crate::ui::view::domain::GridCell as SwarmCell;
@@ -25,8 +26,40 @@ pub const MIN_CELL_W: u16 = 24;
 /// Shortest grid cell (rows: two borders plus three body rows).
 pub const MIN_CELL_H: u16 = 5;
 
-/// Key hint painted in the grid's header row.
-pub const GRID_HINT: &str = "arrows/1-9 select · Enter focus/open · m msg agent · Tab/S-Tab view · r refresh · u unfocus · Esc close";
+/// dirge's own grid keys, painted before the producer's.
+const OWN_KEYS_HINT: &str = "arrows/1-9 select · Enter open agent · m msg agent";
+/// The key that closes the grid, painted last.
+const CLOSE_HINT: &str = "Esc close";
+
+/// The grid header's key hint (pure): dirge's own keys, then each verb
+/// the panel producer binds with the keys bound to it, in the order it
+/// advertised them, then the close key.
+pub fn grid_hint(bound: &[ProducerKey]) -> String {
+    let mut verbs: Vec<(&str, Vec<&str>)> = Vec::new();
+    for k in bound {
+        let label = key_label(&k.key);
+        match verbs.iter_mut().find(|(verb, _)| *verb == k.verb) {
+            Some((_, keys)) => keys.push(label),
+            None => verbs.push((&k.verb, vec![label])),
+        }
+    }
+    let producer = verbs
+        .into_iter()
+        .map(|(verb, keys)| format!("{} {verb}", keys.join("/")));
+    std::iter::once(OWN_KEYS_HINT.to_string())
+        .chain(producer)
+        .chain(std::iter::once(CLOSE_HINT.to_string()))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// How the hint names a grid key.
+fn key_label(key: &str) -> &str {
+    match key {
+        "BackTab" => "S-Tab",
+        other => other,
+    }
+}
 
 /// The grid's cells in paint order: external panels (as the producer
 /// orders them), then subagents (spawn order).
@@ -66,6 +99,8 @@ pub struct SwarmAgent {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SwarmView {
     selected: Option<SwarmCell>,
+    /// Grid keys the panel producer binds.
+    bound: Vec<ProducerKey>,
 }
 
 impl SwarmView {
@@ -76,7 +111,21 @@ impl SwarmView {
 
     /// The grid with `selected` highlighted (`None`: the first cell).
     pub fn selecting(selected: Option<SwarmCell>) -> Self {
-        Self { selected }
+        Self {
+            selected,
+            bound: Vec::new(),
+        }
+    }
+
+    /// The same grid, with the keys the panel producer binds.
+    pub fn binding(mut self, bound: &[ProducerKey]) -> Self {
+        self.bound = bound.to_vec();
+        self
+    }
+
+    /// The header's key hint for this grid.
+    pub fn hint(&self) -> String {
+        grid_hint(&self.bound)
     }
 
     /// Index of the selected cell in paint order, falling back to the
@@ -250,5 +299,49 @@ mod tests {
         // Nothing to show still yields a 1 x 1 grid.
         let g = grid_geometry(0, 10, 3, 0);
         assert_eq!((g.cols, g.rows, g.first), (1, 1, 0));
+    }
+
+    fn bound(key: &str, verb: &str, invoke: bool) -> ProducerKey {
+        ProducerKey {
+            key: key.into(),
+            verb: verb.into(),
+            invoke,
+        }
+    }
+
+    #[test]
+    fn hint_lists_the_default_producer_keys() {
+        let keys = match crate::extras::panel_feed::producer_event(None) {
+            crate::ui::view::domain::ViewEvent::Producer { keys, .. } => keys,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            grid_hint(&keys),
+            "arrows/1-9 select · Enter open agent · m msg agent · Tab next-tab · \
+             S-Tab prev-tab · r refresh · u unfocus · Enter focus · Esc close"
+        );
+    }
+
+    #[test]
+    fn hint_lists_only_what_the_producer_binds() {
+        let hint = grid_hint(&[bound("Enter", "open", true), bound("o", "open", true)]);
+        assert_eq!(
+            hint,
+            "arrows/1-9 select · Enter open agent · m msg agent · Enter/o open · Esc close"
+        );
+        for gone in ["Tab", "refresh", "unfocus"] {
+            assert!(!hint.contains(gone), "{hint}");
+        }
+    }
+
+    #[test]
+    fn hint_without_a_producer_keeps_dirge_keys() {
+        assert_eq!(
+            grid_hint(&[]),
+            "arrows/1-9 select · Enter open agent · m msg agent · Esc close"
+        );
+        assert_eq!(SwarmView::new().hint(), grid_hint(&[]));
+        let v = SwarmView::selecting(None).binding(&[bound("r", "refresh", false)]);
+        assert!(v.hint().contains("r refresh"), "{}", v.hint());
     }
 }

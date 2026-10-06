@@ -5,10 +5,14 @@
 //! event reaches the hook as a flat map whose `:event` names it
 //! (`:turn-start`, `:tool-call`, `:tool-result`, `:done`, …). Answers are
 //! ignored and nothing waits for them.
+//!
+//! An event is heard as it serializes: its variant name as `:event`, its
+//! fields as the other keys, both kebab-case, every string cut to
+//! [`MAX_TEXT_BYTES`]. [`shape`] names the events heard differently.
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
-use crate::event::{AgentEvent, CompactionKind};
+use crate::event::AgentEvent;
 
 /// The hook key events are posted to.
 pub const EVENT_KEY: &str = "dirge/event";
@@ -18,13 +22,33 @@ pub const EVENT_KEY: &str = "dirge/event";
 pub const MAX_TEXT_BYTES: usize = 16 * 1024;
 
 /// `event` as the `:dirge/event` hook's ctx, or `None` for the events it
-/// does not hear: streamed token and reasoning deltas (the whole response
-/// arrives with `:done`), and the tool-started tick that always follows
-/// `:tool-call`.
+/// does not hear.
 pub fn project(event: &AgentEvent) -> Option<Value> {
+    match shape(event) {
+        Shape::Unheard => None,
+        Shape::Map(ctx) => Some(ctx),
+        Shape::Serialized => serialized(event),
+    }
+}
+
+/// How the hook hears one event.
+enum Shape {
+    /// Not at all.
+    Unheard,
+    /// As this map.
+    Map(Value),
+    /// As [`serialized`] makes it.
+    Serialized,
+}
+
+/// The events not heard as they serialize: streamed token and reasoning
+/// deltas and the tool-started tick are not heard (the whole response
+/// arrives with `:done`, and `:tool-call` precedes every start); the rest
+/// keep the names and fields they were first heard with.
+fn shape(event: &AgentEvent) -> Shape {
     let ctx = match event {
         AgentEvent::Token(_) | AgentEvent::Reasoning(_) | AgentEvent::ToolStarted { .. } => {
-            return None;
+            return Shape::Unheard;
         }
         AgentEvent::ToolCall { id, name, args } => {
             json!({ "event": "tool-call", "id": id.as_str(), "tool": name.as_str(), "args": args })
@@ -35,9 +59,6 @@ pub fn project(event: &AgentEvent) -> Option<Value> {
         AgentEvent::Error(message) => json!({ "event": "error", "message": clip(message) }),
         AgentEvent::ContextOverflow { error, .. } => {
             json!({ "event": "context-overflow", "message": clip(error) })
-        }
-        AgentEvent::CompactionStarted { tokens_before } => {
-            json!({ "event": "compaction-started", "tokens-before": tokens_before })
         }
         AgentEvent::ContextCompacted {
             new_session_id,
@@ -52,35 +73,11 @@ pub fn project(event: &AgentEvent) -> Option<Value> {
             "tokens-before": tokens_before,
             "tokens-after": tokens_after,
             "summary": clip(summary),
-            "kind": compaction_kind_name(*compaction_kind),
+            "kind": compaction_kind,
         }),
         AgentEvent::CheckpointRefresh { summary } => {
             json!({ "event": "checkpoint", "summary": clip(summary) })
         }
-        AgentEvent::Done {
-            response,
-            tokens,
-            cost,
-        } => json!({
-            "event": "done",
-            "response": clip(response),
-            "tokens": tokens,
-            "cost": cost,
-        }),
-        AgentEvent::Usage {
-            input_tokens,
-            cached_input_tokens,
-            cache_creation_input_tokens,
-            output_tokens,
-        } => json!({
-            "event": "usage",
-            "input-tokens": input_tokens,
-            "cached-input-tokens": cached_input_tokens,
-            "cache-creation-input-tokens": cache_creation_input_tokens,
-            "output-tokens": output_tokens,
-        }),
-        AgentEvent::TurnStart { index } => json!({ "event": "turn-start", "index": index }),
-        AgentEvent::TurnEnd { index } => json!({ "event": "turn-end", "index": index }),
         AgentEvent::CustomMessage { payload } => {
             json!({ "event": "custom-message", "payload": payload })
         }
@@ -92,9 +89,6 @@ pub fn project(event: &AgentEvent) -> Option<Value> {
             "response": clip(partial_response),
             "tokens": tokens,
         }),
-        AgentEvent::UserMessage { content } => {
-            json!({ "event": "user-message", "content": clip(content) })
-        }
         AgentEvent::RetryNotice {
             attempt,
             delay_ms,
@@ -114,16 +108,40 @@ pub fn project(event: &AgentEvent) -> Option<Value> {
             "provider": provider.as_str(),
             "reason": format!("{reason:?}"),
         }),
+        _ => return Shape::Serialized,
     };
-    Some(ctx)
+    Shape::Map(ctx)
 }
 
-fn compaction_kind_name(kind: CompactionKind) -> &'static str {
-    match kind {
-        CompactionKind::PruneOnly => "prune-only",
-        CompactionKind::PruneAndSummary => "prune-and-summary",
-        CompactionKind::PruneAndFailedSummary => "prune-and-failed-summary",
-        CompactionKind::PruneSummarizerDisabled => "prune-summarizer-disabled",
+/// `event` serialized as one flat map: `:event` its variant name, then its
+/// fields (a lone unnamed field as `:value`), every string [`clip`]ped.
+fn serialized(event: &AgentEvent) -> Option<Value> {
+    let (name, body) = match serde_json::to_value(event).ok()? {
+        Value::String(name) => (name, Value::Null),
+        Value::Object(tagged) => tagged.into_iter().next()?,
+        _ => return None,
+    };
+    let mut ctx = Map::new();
+    match body {
+        Value::Object(fields) => ctx.extend(fields),
+        Value::Null => {}
+        value => {
+            ctx.insert("value".into(), value);
+        }
+    }
+    ctx.insert("event".into(), Value::String(name));
+    Some(clip_all(Value::Object(ctx)))
+}
+
+/// `value` with every string in it [`clip`]ped.
+fn clip_all(value: Value) -> Value {
+    match value {
+        Value::String(text) if text.len() > MAX_TEXT_BYTES => Value::String(clip(&text)),
+        Value::Array(items) => Value::Array(items.into_iter().map(clip_all).collect()),
+        Value::Object(fields) => {
+            Value::Object(fields.into_iter().map(|(k, v)| (k, clip_all(v))).collect())
+        }
+        other => other,
     }
 }
 
@@ -142,6 +160,7 @@ fn clip(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::CompactionKind;
 
     #[test]
     fn deltas_and_the_started_tick_are_not_heard() {
@@ -178,6 +197,118 @@ mod tests {
         .unwrap();
         assert_eq!(done["event"], "done");
         assert_eq!(done["response"], "ok");
+    }
+
+    #[test]
+    fn events_heard_as_they_serialize_keep_the_maps_they_were_heard_as() {
+        let cases = [
+            (
+                AgentEvent::TurnStart { index: 3 },
+                json!({"event": "turn-start", "index": 3}),
+            ),
+            (
+                AgentEvent::CompactionStarted { tokens_before: 900 },
+                json!({"event": "compaction-started", "tokens-before": 900}),
+            ),
+            (
+                AgentEvent::Usage {
+                    input_tokens: 1,
+                    cached_input_tokens: 2,
+                    cache_creation_input_tokens: 3,
+                    output_tokens: 4,
+                },
+                json!({
+                    "event": "usage",
+                    "input-tokens": 1,
+                    "cached-input-tokens": 2,
+                    "cache-creation-input-tokens": 3,
+                    "output-tokens": 4,
+                }),
+            ),
+            (
+                AgentEvent::Done {
+                    response: "ok".into(),
+                    tokens: 10,
+                    cost: 0.5,
+                },
+                json!({"event": "done", "response": "ok", "tokens": 10, "cost": 0.5}),
+            ),
+            (
+                AgentEvent::UserMessage {
+                    content: "hi".into(),
+                },
+                json!({"event": "user-message", "content": "hi"}),
+            ),
+            (
+                AgentEvent::ContextCompacted {
+                    new_session_id: "s2".into(),
+                    tokens_before: 9,
+                    tokens_after: 4,
+                    summary: "sum".into(),
+                    first_kept_index: 1,
+                    compaction_kind: CompactionKind::PruneAndFailedSummary,
+                    summary_model: None,
+                },
+                json!({
+                    "event": "context-compacted",
+                    "session-id": "s2",
+                    "tokens-before": 9,
+                    "tokens-after": 4,
+                    "summary": "sum",
+                    "kind": "prune-and-failed-summary",
+                }),
+            ),
+        ];
+        for (event, want) in cases {
+            assert_eq!(project(&event).unwrap(), want, "{event:?}");
+        }
+    }
+
+    #[test]
+    fn an_event_without_a_shape_of_its_own_is_heard_by_variant_name_and_fields() {
+        assert_eq!(
+            serialized(&AgentEvent::SystemNotice {
+                content: "cap".into()
+            })
+            .unwrap(),
+            json!({"event": "system-notice", "content": "cap"})
+        );
+        assert_eq!(
+            serialized(&AgentEvent::ContextOverflow {
+                prompt: "p".into(),
+                error: "too long".into(),
+            })
+            .unwrap(),
+            json!({"event": "context-overflow", "prompt": "p", "error": "too long"})
+        );
+        assert_eq!(
+            serialized(&AgentEvent::Error("boom".into())).unwrap(),
+            json!({"event": "error", "value": "boom"})
+        );
+        assert_eq!(
+            serialized(&AgentEvent::EscalationActivated {
+                provider: "big".into(),
+                reason: crate::agent::agent_loop::message::EscalationReason::RepairExhausted {
+                    tool: "edit".into()
+                },
+            })
+            .unwrap(),
+            json!({"event": "escalation-activated", "provider": "big"})
+        );
+    }
+
+    #[test]
+    fn a_serialized_event_cuts_every_long_string_in_it() {
+        let long = "x".repeat(MAX_TEXT_BYTES + 10);
+        let ctx = serialized(&AgentEvent::ToolCall {
+            id: "c1".into(),
+            name: "write".into(),
+            args: json!({"files": [{"text": long}]}),
+        })
+        .unwrap();
+        let text = ctx["args"]["files"][0]["text"].as_str().unwrap();
+        assert!(text.ends_with("…[10 more bytes]"));
+        assert_eq!(ctx["name"], "write");
     }
 
     #[test]

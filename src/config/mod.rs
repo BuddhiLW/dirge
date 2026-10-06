@@ -742,6 +742,13 @@ pub struct AddonsConfig {
     /// addon's tools, hooks and commands again and hand the changes to the
     /// running agent. Default true.
     pub live_refresh: Option<bool>,
+    /// Seconds a fold waits for `:dirge/compact` or `:dirge/before-compact`
+    /// before it goes on without the answer. Default 60.
+    pub compact_timeout_secs: Option<u64>,
+    /// Seconds each `:dirge/transform-context`, `:dirge/prepare-next-turn`
+    /// and `:dirge/should-stop-after-turn` call waits for its answer before
+    /// the loop goes on without it. Default 10.
+    pub turn_timeout_secs: Option<u64>,
 }
 
 /// The `addons.nrepl` key.
@@ -1160,6 +1167,12 @@ pub struct Config {
     /// `/display` command overrides it at runtime. Absent → both side
     /// panels follow the automatic width-based behavior.
     pub display: Option<String>,
+    /// Preferred view engine for the view commands and the swarm grid:
+    /// `cljrs` (builds with the `addons` feature) or `native`. The
+    /// `DIRGE_VIEW_ENGINE` environment variable overrides it. Absent →
+    /// `cljrs` when built in, else `native`; an engine that fails to
+    /// start falls through to the next.
+    pub view_engine: Option<String>,
     pub tool_result_max_chars: Option<usize>,
     /// Cap on tool-result body lines shown by default inside a tool
     /// chamber. Anything past this collapses to a
@@ -1339,8 +1352,8 @@ pub struct Config {
     /// which replies ALLOW/DENY instead of asking the human. Unset
     /// (default) = human prompts as usual. See docs/permissions.md.
     pub approval_provider: Option<String>,
-    /// UI color theme. Known built-in values: `phosphor` (default,
-    /// 80s CRT green) and `plain` (white/cyan).
+    /// UI color theme. Built-ins: `phosphor` (default, 80s CRT green),
+    /// `plain` (white/cyan), and `ansi` (terminal palette, including pywal).
     ///
     /// Any other value looks for a custom theme file at
     /// `~/.config/dirge/<theme>.theme.json` — see the

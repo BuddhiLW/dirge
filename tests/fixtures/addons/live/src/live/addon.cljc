@@ -23,7 +23,10 @@
 
 (defn- heard
   [_]
-  (text (apply str (interpose "," (map (fn [e] (clojure.core/name (:event e))) @!heard)))))
+  (text (apply str (interpose "," (map (fn [{:keys [event index]}]
+                                         (cond-> (clojure.core/name event)
+                                           index (str ":" index)))
+                                       @!heard)))))
 
 (defn- extra-tool
   [n]
@@ -50,8 +53,23 @@
             :handler heard}]
           (map extra-tool @!extra)))
   (hooks [_]
-    {:dirge/event (fn [ctx] (swap! !heard conj ctx) nil)
-     :acme/ping   (fn [{:keys [n]}] (str "pong " n))})
+    {:dirge/event          (fn [ctx] (swap! !heard conj ctx) nil)
+     :acme/ping            (fn [{:keys [n]}] (str "pong " n))
+     :dirge/before-compact (fn [_] (swap! !heard conj {:event :before-compact}) nil)
+     :dirge/compact        (fn [{:keys [span reason]}]
+                             {:summary (str "## Active Task\nFold " (count span)
+                                            " entries (" reason ").\n"
+                                            "## Completed Actions\nRead the span.")})
+     :dirge/transform-context      (fn [{:keys [messages]}]
+                                     {:messages [(last messages)]})
+     :dirge/prepare-next-turn      (fn [{:keys [tool-results]}]
+                                     {:thinking "high"
+                                      :context  (str (count tool-results) " tool results")})
+     :dirge/should-stop-after-turn (fn [{:keys [text]}]
+                                     {:stop (when (= text "done") "said done")})
+     :dirge.hook/Notification
+     (fn [{:keys [message]}]
+       {:hookSpecificOutput {:additionalContext (str "live heard " message)}})})
   (health [_]
     {:status :ok}))
 

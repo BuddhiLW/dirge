@@ -49,9 +49,12 @@
   (select-keys tool [:name :description :inputSchema]))
 
 (defn hook-names
-  "The hook keys an addon registered, as strings without the colon."
+  "The hook keys an addon registered, as strings without the colon.
+   :dirge/commands is the slash-command table, reported as :commands, so
+   it is not one of them."
   [hooks]
-  (vec (sort (map (fn [k] (subs (str k) 1)) (keys hooks)))))
+  (vec (sort (keep (fn [k] (when-not (= k :dirge/commands) (subs (str k) 1)))
+                   (keys hooks)))))
 
 (defn index-tools
   "tool-defs keyed by :name."
@@ -66,20 +69,22 @@
 
 (defn command-index
   "The slash commands in a hooks map's :dirge/commands entry, keyed by
-   command-name: {\"name\" {:description d :handler f}}. Entries without a
-   handler are dropped."
+   command-name: {\"name\" {:description d :class c :handler f}}. Entries
+   without a handler are dropped."
   [hooks]
   (into {}
         (for [[k spec] (get hooks :dirge/commands)
               :when (some? (:handler spec))]
           [(command-name k) {:description (or (:description spec) "")
+                             :class       (:class spec)
                              :handler     (:handler spec)}])))
 
 (defn command-views
-  "What dirge needs of indexed commands: names and descriptions, sorted."
+  "What dirge needs of indexed commands: names, descriptions and declared
+   classes (a string, or nil when undeclared), sorted."
   [commands]
-  (vec (for [[n {:keys [description]}] (sort-by key commands)]
-         {:name n :description description})))
+  (vec (for [[n {:keys [description class]}] (sort-by key commands)]
+         {:name n :description description :class (some-> class name)})))
 
 (defn- resolve-fns
   [protocol-ns names]
@@ -236,18 +241,25 @@
       (failure t))))
 
 (def hook-keyword-fields
-  "Context fields a hook reads as keywords, by hook key. They reach the host
-   as strings."
+  "Context fields a hook reads as keywords, by hook key, whatever the emit
+   site declares. They reach the host as strings."
   {:dirge/session-end [:reason]
    :dirge/event       [:event]})
 
+(def keyword-fields-key
+  "The ctx key under which an emit site names, as a vector of strings, more
+   fields its hook reads as keywords. No hook sees it."
+  :dirge/keyword-fields)
+
 (defn hook-ctx
-  "`ctx` as the hook keyed `k` reads it."
+  "`ctx` as the hook keyed `k` reads it: the fields `hook-keyword-fields`
+   names for `k`, and those the emit site declared, are keywords."
   [k ctx]
   (reduce (fn [c field]
             (cond-> c (string? (get c field)) (update field keyword)))
-          ctx
-          (get hook-keyword-fields k)))
+          (dissoc ctx keyword-fields-key)
+          (concat (get hook-keyword-fields k)
+                  (map keyword (get ctx keyword-fields-key)))))
 
 (defn run-hook
   "Call every loaded addon's `hook-key` hook with `ctx`, in load order:
