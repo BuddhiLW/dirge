@@ -4,6 +4,8 @@ pub mod capability_cards;
 pub mod command_hooks;
 #[cfg(test)]
 mod compaction_bakeoff;
+#[cfg(test)]
+mod compaction_bakeoff_config;
 pub mod compaction_material;
 #[cfg(test)]
 mod compaction_recall;

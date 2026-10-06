@@ -181,11 +181,45 @@ DIRGE_BAKEOFF=1 DIRGE_BAKEOFF_PROVIDER=venice \
   cargo test compaction_bakeoff -- --nocapture --test-threads=1
 ```
 
+On a subscription OAuth route (the gpt-6-sol collection), the base config
+names a provider with `auth: chatgpt` and no key. Credentials come from
+dirge's own `dirge auth openai` store, or failing that from `~/.codex/auth.json`
+(`codex login`). `DIRGE_BAKEOFF_CONFIG` hands the same file to I1:
+
+```bash
+cat > runs/base-gpt6-sol.json <<'EOF'
+{ "provider": "chatgpt",
+  "providers": { "chatgpt": { "provider_type": "openai", "auth": "chatgpt",
+                              "model": "gpt-6-sol" } } }
+EOF
+cargo build --release   # loop-ab.sh pins a copy of target/release/dirge
+LOOP_AB_KEEP=1 LOOP_AB_BASE_CONFIG=$PWD/runs/base-gpt6-sol.json \
+  scripts/loop-ab.sh -b target/release/dirge -n 10 -s fold-chain -t 60
+# or, with quota snapshots around the batch (scripts/codex-quota.sh):
+scripts/economy-batch.sh gpt6-b1 10 $PWD/runs/base-gpt6-sol.json target/release/dirge
+DIRGE_BAKEOFF=1 DIRGE_BAKEOFF_CONFIG=$PWD/runs/base-gpt6-sol.json \
+  DIRGE_BAKEOFF_PROVIDER=chatgpt DIRGE_BAKEOFF_REPEATS=10 \
+  cargo test compaction_bakeoff -- --nocapture --test-threads=1
+```
+
 For measured spend, poll the provider balance every 20 s during each batch and
 sum the drops between consecutive samples. Do not subtract the last sample from
 the first: a top-up during the batch would then read as negative spend.
 
-## Partial baseline results
+## Baseline on gpt-6-sol (ChatGPT/Codex OAuth): collection in progress
+
+The baseline the decision rule judges against is being collected fresh on
+gpt-6-sol over the Codex OAuth subscription: I2 A/A at n = 20 per arm (two
+concurrent `-n 10` batches, `-s fold-chain -t 60`), the I1 offline layer, and
+the I1 live bakeoff at 10 repeats per schema arm. Results land here when the
+batches finish. These runs cannot be paired with the deepseek record below
+(different model, provider and transport), and the two are never pooled.
+
+## Earlier partial record: deepseek-v4-flash via Venice (superseded, not pooled)
+
+This is the first, partial collection, kept as a record. It used a different
+model and a key-billed provider, so it is not the baseline and is not paired
+with or pooled into the gpt-6-sol collection above.
 
 **Status: partial and provisional, 15 runs of the 40 the protocol requires.**
 I2 has 15 valid runs (an A/A split of 10 control and 5 treatment, both arms the

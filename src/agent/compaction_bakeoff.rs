@@ -28,6 +28,10 @@
 //!                            (default custom); match the loop's own
 //!                            provider_type (e.g. openai) so the one-shot sends
 //!                            the same reasoning-disable params as a real fold
+//!   DIRGE_BAKEOFF_CONFIG     a dirge config.json whose `providers` (and
+//!                            top-level `auth`) are used as-is, so the
+//!                            PROVIDER may be a subscription OAuth route
+//!                            (`auth: chatgpt`); its `model` is the default
 //!   DIRGE_BAKEOFF_REPEATS    calls per arm (default 5)
 //!
 //!   cargo nextest run compaction_bakeoff --no-capture
@@ -55,11 +59,18 @@ pub(crate) fn bakeoff_summarizer() -> Option<(SummarizeFn, String)> {
         return None;
     }
     let provider = std::env::var("DIRGE_BAKEOFF_PROVIDER").unwrap_or_else(|_| "deepseek".into());
-    let model_name = std::env::var("DIRGE_BAKEOFF_MODEL").ok()?;
+    // DIRGE_BAKEOFF_CONFIG: providers from a dirge config file, so an OAuth
+    // (subscription) provider is reachable by name (compaction_bakeoff_config).
+    let (config_providers, default_auth) = super::compaction_bakeoff_config::from_env()?;
+    let model_name = super::compaction_bakeoff_config::model_name(
+        std::env::var("DIRGE_BAKEOFF_MODEL").ok(),
+        &provider,
+        &config_providers,
+    )?;
 
     // A `custom` provider needs an explicit base_url; http:// is refused
     // without allow_insecure, which a local server needs.
-    let mut providers: HashMap<String, crate::config::ProviderEntry> = HashMap::new();
+    let mut providers: HashMap<String, crate::config::ProviderEntry> = config_providers;
     if let Ok(base_url) = std::env::var("DIRGE_BAKEOFF_BASE_URL") {
         // A hosted OpenAI-compatible endpoint needs a real key; a local
         // server ignores it. DIRGE_BAKEOFF_API_KEY_ENV names the variable
@@ -86,13 +97,14 @@ pub(crate) fn bakeoff_summarizer() -> Option<(SummarizeFn, String)> {
         );
     }
 
-    let client = match crate::provider::create_client(&provider, None, &providers) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[bakeoff] could not build {provider} client: {e}");
-            return None;
-        }
-    };
+    let client =
+        match crate::provider::create_client_with_auth(&provider, None, &providers, default_auth) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[bakeoff] could not build {provider} client: {e}");
+                return None;
+            }
+        };
     let model = client.completion_model(model_name.clone());
     let sfn: SummarizeFn = std::sync::Arc::new(move |prompt: String| {
         let m = model.clone();
