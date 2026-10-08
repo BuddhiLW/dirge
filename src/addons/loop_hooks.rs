@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::domain::{BeforeOutcome, HookPoint};
+use super::domain::{AfterOutcome, BeforeOutcome, HookPoint};
 use super::host::AddonHost;
 use super::policy;
 use crate::agent::addon_hooks::AddonHooks;
@@ -76,11 +76,10 @@ pub fn after_hook(host: Arc<AddonHost>) -> AfterToolCallFn {
                 "tool-use-id": ctx.tool_call_id,
             });
             add_usage(&mut payload, ctx.usage);
-            let texts =
-                tokio::task::spawn_blocking(move || host.texts(HookPoint::AfterToolCall, &payload))
-                    .await
-                    .unwrap_or_default();
-            after_override(&ctx.result, &texts)
+            let outcome = tokio::task::spawn_blocking(move || host.after_tool_call(&payload))
+                .await
+                .unwrap_or_default();
+            after_override(&ctx.result, &outcome)
         })
     })
 }
@@ -95,16 +94,25 @@ fn add_usage(ctx: &mut Value, usage: Option<ContextUsage>) {
     }
 }
 
-fn after_override(result: &LoopToolResult, texts: &[String]) -> Option<AfterToolCallResult> {
-    if texts.is_empty() {
+/// The loop's override for a folded addon outcome: a `{:result}` text
+/// replaces the tool's content blocks with one text block, then any context
+/// is appended as reminders. Nothing answered: no override.
+fn after_override(result: &LoopToolResult, outcome: &AfterOutcome) -> Option<AfterToolCallResult> {
+    if outcome.result.is_none() && outcome.context.is_empty() {
         return None;
     }
-    let notes: Vec<String> = texts
-        .iter()
-        .map(|t| policy::reminder(HookPoint::AfterToolCall, t))
-        .collect();
-    let mut content = result.content.clone();
-    content.push(json!({ "type": "text", "text": notes.join("\n") }));
+    let mut content = match &outcome.result {
+        Some(text) => vec![json!({ "type": "text", "text": text })],
+        None => result.content.clone(),
+    };
+    if !outcome.context.is_empty() {
+        let notes: Vec<String> = outcome
+            .context
+            .iter()
+            .map(|t| policy::reminder(HookPoint::AfterToolCall, t))
+            .collect();
+        content.push(json!({ "type": "text", "text": notes.join("\n") }));
+    }
     Some(AfterToolCallResult {
         content: Some(content),
         ..AfterToolCallResult::default()
@@ -371,12 +379,72 @@ mod tests {
             details: Value::Null,
             terminate: None,
         };
-        assert!(after_override(&result, &[]).is_none());
-        let over = after_override(&result, &["noted".into()]).unwrap();
+        assert!(after_override(&result, &AfterOutcome::default()).is_none());
+        let noted = AfterOutcome {
+            context: vec!["noted".into()],
+            ..AfterOutcome::default()
+        };
+        let over = after_override(&result, &noted).unwrap();
         let content = over.content.unwrap();
         assert_eq!(content.len(), 2);
         assert_eq!(content[0], json!({"type": "text", "text": "out"}));
         assert!(content[1]["text"].as_str().unwrap().contains("noted"));
+    }
+
+    #[test]
+    fn an_after_result_replaces_the_content_then_context_follows() {
+        let result = LoopToolResult {
+            content: vec![
+                json!({"type": "text", "text": "a very long output"}),
+                json!({"type": "text", "text": "more"}),
+            ],
+            details: Value::Null,
+            terminate: None,
+        };
+        let only = AfterOutcome {
+            result: Some("[stub: 2 blocks, see h1]".into()),
+            ..AfterOutcome::default()
+        };
+        let content = after_override(&result, &only).unwrap().content.unwrap();
+        assert_eq!(
+            content,
+            vec![json!({"type": "text", "text": "[stub: 2 blocks, see h1]"})]
+        );
+        let both = AfterOutcome {
+            context: vec!["noted".into()],
+            ..only
+        };
+        let content = after_override(&result, &both).unwrap().content.unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["text"], "[stub: 2 blocks, see h1]");
+        assert!(content[1]["text"].as_str().unwrap().contains("noted"));
+    }
+
+    #[tokio::test]
+    async fn an_addon_result_answer_reaches_the_loop_as_a_replacement() {
+        let host = host_with(
+            &[HookPoint::AfterToolCall],
+            vec![reply(json!({"result": "elided"}))],
+        );
+        let out = after_hook(host)(AfterToolCallContext {
+            assistant_message: AssistantMessage::new(Vec::new(), StopReason::ToolUse),
+            tool_call_id: "t1".into(),
+            tool_call_name: "read".into(),
+            args: json!({"path": "a.rs"}),
+            result: LoopToolResult {
+                content: vec![json!({"type": "text", "text": "fn a() {}"})],
+                details: Value::Null,
+                terminate: None,
+            },
+            is_error: false,
+            usage: None,
+        })
+        .await
+        .expect("an override");
+        assert_eq!(
+            out.content.unwrap(),
+            vec![json!({"type": "text", "text": "elided"})]
+        );
     }
 
     #[test]

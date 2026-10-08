@@ -227,3 +227,13 @@ pub struct BeforeOutcome {
     /// The last replacement args any addon returned.
     pub args: Option<Value>,
 }
+
+/// The folded answer of every addon to `AfterToolCall`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AfterOutcome {
+    /// The last `{:result "text"}` replacement any addon returned: the text
+    /// the model sees instead of the tool's own output.
+    pub result: Option<String>,
+    /// Texts appended to the (possibly replaced) result, in load order.
+    pub context: Vec<String>,
+}

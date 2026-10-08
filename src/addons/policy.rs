@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use crate::command_class::CommandClass;
 
 use super::domain::{
-    AddonSummary, BeforeOutcome, CommandOutput, CommandSpec, HookPoint, HookReply, LoadFailure,
-    PanelRequest, ToolSpec,
+    AddonSummary, AfterOutcome, BeforeOutcome, CommandOutput, CommandSpec, HookPoint, HookReply,
+    LoadFailure, PanelRequest, ToolSpec,
 };
 
 /// Longest tool name the providers accept.
@@ -419,6 +419,24 @@ pub fn fold_before(replies: &[HookReply]) -> BeforeOutcome {
         if let Some(reason) = v.get("block").and_then(block_reason) {
             out.block = Some((reply.addon_id.clone(), reason));
             break;
+        }
+    }
+    out
+}
+
+/// Fold `AfterToolCall` replies: texts (a bare string or `{:context}`)
+/// accumulate, the last `{:result "text"}` replacement wins. A `:result`
+/// that is not a string is passed over, so a malformed answer never
+/// replaces what the tool returned.
+pub fn fold_after(replies: &[HookReply]) -> AfterOutcome {
+    let mut out = AfterOutcome::default();
+    for reply in replies {
+        let Ok(v) = &reply.result else { continue };
+        if let Some(text) = reply_text(v) {
+            out.context.push(text);
+        }
+        if let Some(result) = v.get("result").and_then(Value::as_str) {
+            out.result = Some(result.to_string());
         }
     }
     out

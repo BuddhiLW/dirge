@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use super::domain::{
-    AddonSummary, BeforeOutcome, CommandOutput, CommandSpec, HookPoint, LoadFailure, ReloadReport,
-    ToolSpec,
+    AddonSummary, AfterOutcome, BeforeOutcome, CommandOutput, CommandSpec, HookPoint, LoadFailure,
+    ReloadReport, ToolSpec,
 };
 use super::policy;
 use super::port::AddonRuntime;
@@ -413,6 +413,12 @@ impl AddonHost {
     /// The folded `BeforeToolCall` answer.
     pub fn before_tool_call(&self, ctx: &Value) -> BeforeOutcome {
         policy::fold_before(&self.emit(HookPoint::BeforeToolCall.key(), ctx))
+    }
+
+    /// The folded `AfterToolCall` answer: appended texts and the last
+    /// `{:result "text"}` replacement.
+    pub fn after_tool_call(&self, ctx: &Value) -> AfterOutcome {
+        policy::fold_after(&self.emit(HookPoint::AfterToolCall.key(), ctx))
     }
 
     /// Texts every addon answered `:dirge/session-start` with.
