@@ -1,5 +1,7 @@
 mod addon_seam;
 pub mod config;
+#[cfg(feature = "mcp")]
+pub mod mcp_servers;
 pub mod model_option;
 
 use std::sync::Arc;
@@ -45,6 +47,11 @@ struct AcpSession {
     /// Session-scoped `/mode` override (ACP slash command). `None` falls back
     /// to the CLI/config-resolved security mode.
     mode_override: Option<SecurityMode>,
+    /// MCP servers the client declared in `session/new`, connected once for
+    /// the session and handed to every prompt's agent. `None` when the client
+    /// declared none, or the prompt arrived without a `session/new`.
+    #[cfg(feature = "mcp")]
+    mcp: Option<Arc<crate::extras::mcp::McpClientManager>>,
     /// Abort/cancel handles for the currently-running prompt, if any.
     run: Option<AcpRun>,
 }
@@ -109,6 +116,8 @@ async fn register_run(
         model_override: None,
         provider_override: None,
         mode_override: None,
+        #[cfg(feature = "mcp")]
+        mcp: None,
         run: None,
     });
     if let Some(prev) = entry.run.replace(run) {
@@ -293,6 +302,8 @@ async fn handle_initialize(
     let _ = state;
 
     let caps = AgentCapabilities::new();
+    #[cfg(feature = "mcp")]
+    let caps = caps.mcp_capabilities(mcp_servers::capabilities());
 
     // Addons advertise what they add to ACP (extension methods, say) here.
     let meta = addon_seam::meta("initialize", None, req.meta.as_ref(), None).await;
@@ -322,6 +333,9 @@ async fn handle_new_session(
     // across prompts (and store the client's cwd instead of dropping it).
     let provider = state.cli.resolve_provider(&state.cfg);
     let model = state.cli.resolve_model(&state.cfg).to_string();
+    // D4a: connect the MCP servers the client declared for this session.
+    #[cfg(feature = "mcp")]
+    let mcp = mcp_servers::connect(&req.mcp_servers).await;
     state.sessions.lock().await.insert(
         session_id.to_string(),
         AcpSession {
@@ -330,6 +344,8 @@ async fn handle_new_session(
             model_override: None,
             provider_override: None,
             mode_override: None,
+            #[cfg(feature = "mcp")]
+            mcp,
             run: None,
         },
     );
@@ -497,6 +513,9 @@ async fn run_prompt(
     // so the lifecycle events drop on the floor; the LLM-side
     // pending-notification mechanism still works.
     let bg_store = crate::agent::tools::background::BackgroundStore::new();
+    // D4a: the session's client-declared MCP servers, if it declared any.
+    #[cfg(feature = "mcp")]
+    let session_mcp = mcp_servers::for_session(&state.sessions, &id_key).await;
     let agent = crate::provider::build_agent(
         model,
         &state.cli,
@@ -511,7 +530,7 @@ async fn run_prompt(
         None,
         sandbox,
         #[cfg(feature = "mcp")]
-        None::<&crate::extras::mcp::McpClientManager>,
+        session_mcp.as_deref(),
         #[cfg(feature = "semantic")]
         None::<&crate::semantic::SemanticManager>,
         // dirge-502b: ACP sessions identify themselves via the ACP
@@ -1686,6 +1705,8 @@ mod tests {
                 model_override: None,
                 provider_override: None,
                 mode_override: None,
+                #[cfg(feature = "mcp")]
+                mcp: None,
                 run: None,
             },
         );
