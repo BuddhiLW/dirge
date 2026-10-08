@@ -1,6 +1,7 @@
 mod addon_seam;
 pub mod config;
 pub mod model_option;
+mod permission_forward;
 
 use std::sync::Arc;
 
@@ -477,7 +478,8 @@ async fn run_prompt(
     let model_str = crate::provider::resolve_model_name(&client, &model_str, model_explicit);
     let model = client.completion_model(model_str.clone());
 
-    let (permission, ask_tx) = build_acp_permission(state, current_mode);
+    let (permission, ask_tx) =
+        build_acp_permission(state, current_mode, Some((cx.clone(), session_id.clone())));
     // Adversarial-review finding #2: ACP used to build its checker
     // and never install the active prompt's `deny_tools` list. Plan
     // mode (or any frontmatter deny) was a no-op for editor-side
@@ -1260,6 +1262,7 @@ fn create_acp_client(
 fn build_acp_permission(
     state: &AcpState,
     mode: SecurityMode,
+    client: Option<(ConnectionTo<Client>, SessionId)>,
 ) -> (Option<PermCheck>, Option<AskSender>) {
     use std::sync::Mutex;
 
@@ -1279,7 +1282,15 @@ fn build_acp_permission(
     let perm: PermCheck = Arc::new(Mutex::new(checker));
 
     let (ask_tx, ask_rx) = tokio::sync::mpsc::channel(64);
-    spawn_acp_ask_drain(ask_rx);
+    // D4b: with a connected client, the client answers each ask.
+    match client {
+        Some((cx, sid)) => permission_forward::spawn_acp_ask_forwarder(
+            ask_rx,
+            sid,
+            permission_forward::client_port(cx),
+        ),
+        None => spawn_acp_ask_drain(ask_rx),
+    }
     (Some(perm), Some(ask_tx))
 }
 
