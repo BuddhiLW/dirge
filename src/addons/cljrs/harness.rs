@@ -38,7 +38,11 @@ const BLOCKED_CALL_TOOL: &str = "call-tool is unavailable while dirge waits on t
 ///   could not be made. Blocks until the server answers. Refused (an
 ///   `{:error}` answer) while dirge's event loop is waiting on the addon, as
 ///   it is for `:dirge/system-prompt`, `:dirge/on-prompt`, loading and
-///   shutdown: the call would need that loop to make progress.
+///   shutdown: the call would need that loop to make progress. Also refused,
+///   before it leaves dirge, when a `deny` permission rule or the active
+///   prompt's `deny_tools` denies `mcp_tool:<server>:<tool>`, or when a path
+///   argument lies outside the working directory and the server's config
+///   does not set `allow_external_paths` (see `addons::mcp`).
 /// - `(json-parse text)`: JSON text as data (object keys as keywords), or
 ///   nil when it is not JSON.
 /// - `(panel op)`: change a box in the side panel; `op` is

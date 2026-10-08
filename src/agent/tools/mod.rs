@@ -263,8 +263,11 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[
 /// [`reserves_builtin_name`]).
 ///
 /// Keep this mapping in sync with those registration gates.
-// Only reached via `reserves_builtin_name`, whose sole non-test caller is
-// the mcp/plugin collision gate; unused in a build with neither feature.
+// Only reached via `reserves_builtin_name`, whose non-test callers are
+// the mcp/plugin collision gate (`agent/builder/loop_tools.rs`) and
+// `ProviderManager::upsert_loop_tools` (`provider/mod.rs`), which filters the
+// tools a runtime contributor such as an addon installs; the collision gate
+// is unused in a build with neither feature.
 #[cfg_attr(not(any(feature = "mcp", feature = "plugin")), allow(dead_code))]
 fn builtin_compiled_in(name: &str) -> bool {
     match name {
