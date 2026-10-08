@@ -332,9 +332,14 @@
       [state []])))
 
 (defn feed-ended
-  "The producer went away: close every panel it opened."
+  "The producer went away: close every panel it opened. A panel an
+   addon opened (`:owner \"addon\"`, see `addons::sink`) shares the
+   panes but not the producer's lifetime, so it stays."
   [state _]
-  [empty-state (mapv unpaint (:order state))])
+  (let [state (or state empty-state)
+        gone  (vec (remove #(= "addon" (get-in state [:panels % :owner]))
+                           (:order state)))]
+    [(reduce drop-panel state gone) (mapv unpaint gone)]))
 
 (defn open-file [state op]
   (if (and (string? (:path op)) (not (str/blank? (:path op))))
@@ -354,8 +359,16 @@
    "feed/ended" feed-ended})
 
 (defn step
-  "[state' effects] for one feed `op`."
+  "[state' effects] for one feed `op`. An op that names an `:owner`
+   (an addon's, see `addons::sink`) marks the panel it touched with it,
+   so `feed-ended` can tell the producer's panels from the addon's."
   [state op]
   (if-let [f (get ops (:op op))]
-    (f (or state empty-state) op)
+    (let [[s effects] (f (or state empty-state) op)
+          id          (panel-id op)
+          owner       (:owner op)]
+      [(if (and (string? owner) id (contains? (:panels s) id))
+         (assoc-in s [:panels id :owner] owner)
+         s)
+       effects])
     [state []]))
