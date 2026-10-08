@@ -258,6 +258,9 @@ jobs:
   homebrew:
     name: Bump Homebrew formula
     needs: build
+    # Upstream-only channel: a fork's -hive.N tag has no cross-repo token and
+    # no matching Cargo.toml version, so the job can only fail there.
+    if: github.repository == 'dirge-code/dirge'
     runs-on: ubuntu-latest
     steps:
       - name: Resolve version + checksums from the release
@@ -325,6 +328,8 @@ jobs:
   crates-io:
     name: Publish to crates.io
     needs: build
+    # Upstream-only channel (see homebrew): crates.io refuses a -hive.N tag.
+    if: github.repository == 'dirge-code/dirge'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -376,6 +381,8 @@ jobs:
   site:
     name: Bump site version
     needs: build
+    # Upstream-only channel (see homebrew): needs SITE_REPO_TOKEN.
+    if: github.repository == 'dirge-code/dirge'
     runs-on: ubuntu-latest
     steps:
       - name: Check out the site
