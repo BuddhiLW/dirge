@@ -15,6 +15,7 @@ pub mod command_hooks;
 pub mod compaction;
 pub mod discovery;
 pub mod domain;
+pub mod emitter;
 pub mod events;
 pub mod host;
 pub mod layout;
@@ -208,7 +209,14 @@ fn load_set(plan: &AddonPlan, with_sources: bool) -> LoadSet {
 
 fn publish(host: Arc<AddonHost>) {
     register_commands(&host);
-    let _ = HOST.set(host);
+    if HOST.set(host).is_err() {
+        // Only the first host is published; `reload` reuses it, so a second
+        // start means two hosts run and this one is unreachable.
+        tracing::warn!(
+            target: "dirge::addon",
+            "an addon host was already published; the new host is not reachable through addons::global()"
+        );
+    }
 }
 
 /// Hand `host`'s addons the command names left to them: names a built-in

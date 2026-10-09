@@ -218,6 +218,24 @@ pub trait HarnessSink: Send + Sync + 'static {
     fn notify(&self, addon_level: Level, message: &str);
 }
 
+// --- AddonEmitter port -----------------------------------------------------
+
+/// The narrow face of the addon host a seam outside it needs: hand a ctx to
+/// the hook keyed `key` and read the replies, or post it without waiting.
+/// [`AddonHost`](super::host::AddonHost) implements it; a seam (ACP, say)
+/// takes it injected from the composition root instead of reaching for the
+/// process-wide host, so its tests run against a stub.
+pub trait AddonEmitter: Send + Sync + 'static {
+    /// True when at least one addon registered a hook keyed `key`.
+    fn listens_key(&self, key: &str) -> bool;
+
+    /// Every addon's answer to the hook keyed `key`, in load order.
+    fn emit(&self, key: &str, ctx: &Value) -> Vec<HookReply>;
+
+    /// Hand `ctx` to the hook keyed `key` without waiting; answers dropped.
+    fn post(&self, key: &str, ctx: &Value);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Level, ToolGateway, ToolsUnavailable};

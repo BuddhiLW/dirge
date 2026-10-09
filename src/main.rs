@@ -1480,7 +1480,9 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "acp")]
     if cli.acp_enabled {
-        return extras::acp::serve(cli, cfg, context).await;
+        // The ACP seam reaches the addons through the emitter injected here.
+        let addons = extras::acp::AddonSeam::current();
+        return extras::acp::serve(cli, cfg, context, addons).await;
     }
 
     let sandbox = sandbox::Sandbox::new(cli.resolve_sandbox(&cfg));

@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 
 use super::breaker::within as blocking_within;
 use super::domain::HookReply;
-use super::host::AddonHost;
+use super::port::AddonEmitter;
 
 /// An ACP extension request: ctx `{"method" "params"}`, the method as the
 /// client sent it (leading `_` kept). The first non-null answer, in load
@@ -104,7 +104,7 @@ impl MetaRequest {
 /// The addons' answer to extension method `method`: `Ok(None)` when none
 /// answered, `Err` when they did not answer within [`BUDGET`].
 pub async fn ext_method(
-    host: Arc<AddonHost>,
+    host: Arc<dyn AddonEmitter>,
     method: &str,
     params: Value,
 ) -> Result<Option<Value>, String> {
@@ -118,14 +118,14 @@ pub async fn ext_method(
 }
 
 /// Hand extension notification `method` to the addons without waiting.
-pub fn ext_notification(host: &AddonHost, method: &str, params: Value) {
+pub fn ext_notification(host: &dyn AddonEmitter, method: &str, params: Value) {
     host.post(EXT_NOTIFICATION_KEY, &ext_ctx(method, params));
 }
 
 /// `base` with the addons' `_meta` merged in. Addons that do not answer
 /// within [`BUDGET`] leave `base` as it is.
 pub async fn meta(
-    host: Arc<AddonHost>,
+    host: Arc<dyn AddonEmitter>,
     request: MetaRequest,
     base: Option<Map<String, Value>>,
 ) -> Option<Map<String, Value>> {
@@ -160,60 +160,44 @@ mod handshake_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addons::domain::HookPoint;
-    use crate::addons::host::LoadSet;
-    use crate::addons::port::AddonRuntime;
-    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
-    /// A runtime whose one addon registered `keys` and answers each with
-    /// `answers`, recording every hook call.
+    /// An [`AddonEmitter`] stub, no addon host behind it: one addon that
+    /// registered `keys` and answers each with `answers`, recording every
+    /// emit and post.
     #[derive(Default)]
-    struct KeyedRuntime {
+    struct RecordingEmitter {
         keys: Vec<&'static str>,
         answers: Vec<HookReply>,
         calls: Mutex<Vec<(String, Value)>>,
     }
 
-    impl AddonRuntime for KeyedRuntime {
-        fn load(&self, _manifest: &Path, _host_config: &Value) -> Value {
-            json!({ "id": "stub", "hooks": self.keys })
+    impl AddonEmitter for RecordingEmitter {
+        fn listens_key(&self, key: &str) -> bool {
+            self.keys.contains(&key)
         }
-        fn unload(&self, _addon_id: &str) {}
-        fn reload_sources(&self, _files: &[PathBuf]) -> Vec<(PathBuf, String)> {
-            Vec::new()
-        }
-        fn set_source_roots(&self, _roots: &[PathBuf]) {}
-        fn call_tool(&self, _addon_id: &str, _tool: &str, _args: &Value) -> Result<Value, String> {
-            Ok(Value::Null)
-        }
-        fn run_command(&self, _addon_id: &str, _name: &str, _ctx: &Value) -> Result<Value, String> {
-            Ok(Value::Null)
-        }
-        fn run_hook(&self, point: HookPoint, ctx: &Value) -> Vec<HookReply> {
-            self.run_hook_key(point.key(), ctx)
-        }
-        fn run_hook_key(&self, key: &str, ctx: &Value) -> Vec<HookReply> {
+        fn emit(&self, key: &str, ctx: &Value) -> Vec<HookReply> {
             self.calls
                 .lock()
                 .unwrap()
                 .push((key.to_string(), ctx.clone()));
             self.answers.clone()
         }
-        fn shutdown(&self) {}
+        fn post(&self, key: &str, ctx: &Value) {
+            let _ = self.emit(key, ctx);
+        }
     }
 
-    fn host(keys: &[&'static str], answers: Vec<Value>) -> (Arc<AddonHost>, Arc<KeyedRuntime>) {
-        let rt = Arc::new(KeyedRuntime {
+    fn host(
+        keys: &[&'static str],
+        answers: Vec<Value>,
+    ) -> (Arc<dyn AddonEmitter>, Arc<RecordingEmitter>) {
+        let rt = Arc::new(RecordingEmitter {
             keys: keys.to_vec(),
             answers: answers.into_iter().map(reply).collect(),
             ..Default::default()
         });
-        let set = LoadSet {
-            manifests: vec![PathBuf::from("stub.edn")],
-            ..Default::default()
-        };
-        (Arc::new(AddonHost::load(rt.clone(), set, json!({}))), rt)
+        (rt.clone(), rt)
     }
 
     fn reply(v: Value) -> HookReply {
@@ -306,7 +290,7 @@ mod tests {
     #[test]
     fn notifications_are_posted_with_the_same_ctx() {
         let (host, rt) = host(&[EXT_NOTIFICATION_KEY], Vec::new());
-        ext_notification(&host, "_zed/saved", json!({ "path": "a.rs" }));
+        ext_notification(host.as_ref(), "_zed/saved", json!({ "path": "a.rs" }));
         assert_eq!(
             *rt.calls.lock().unwrap(),
             vec![(

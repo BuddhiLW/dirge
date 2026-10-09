@@ -1,5 +1,6 @@
 mod addon_seam;
 pub mod config;
+pub use addon_seam::AddonSeam;
 #[cfg(feature = "mcp")]
 pub mod mcp_servers;
 pub mod model_option;
@@ -187,15 +188,24 @@ struct AcpState {
     cfg: Config,
     context: ContextFiles,
     sessions: SessionMap,
+    /// The addons, as the composition root injected them.
+    addons: AddonSeam,
 }
 
-pub async fn serve(cli: Cli, cfg: Config, context: ContextFiles) -> anyhow::Result<()> {
+pub async fn serve(
+    cli: Cli,
+    cfg: Config,
+    context: ContextFiles,
+    addons: AddonSeam,
+) -> anyhow::Result<()> {
     let state = Arc::new(AcpState {
         cli,
         cfg,
         context,
         sessions: tokio::sync::Mutex::new(HashMap::new()),
+        addons,
     });
+    let dispatch_addons = state.addons.clone();
 
     Agent
         .builder()
@@ -274,10 +284,10 @@ pub async fn serve(cli: Cli, cfg: Config, context: ContextFiles) -> anyhow::Resu
                     // answer never holds up the connection.
                     match dispatch {
                         Dispatch::Request(AgentRequest::ExtMethodRequest(ext), responder) => {
-                            cx.spawn(addon_seam::answer_ext_method(ext, responder))
+                            cx.spawn(addon_seam::answer_ext_method(addons, ext, responder))
                         }
                         Dispatch::Notification(AgentNotification::ExtNotification(notif)) => {
-                            addon_seam::ext_notification(&notif);
+                            addon_seam::ext_notification(&addons, &notif);
                             Ok(())
                         }
                         Dispatch::Request(_, responder) => responder.respond_with_error(
@@ -301,14 +311,12 @@ async fn handle_initialize(
     responder: Responder<InitializeResponse>,
     state: &AcpState,
 ) -> Result<(), agent_client_protocol::Error> {
-    let _ = state;
-
     let caps = AgentCapabilities::new();
     #[cfg(feature = "mcp")]
     let caps = caps.mcp_capabilities(mcp_servers::capabilities());
 
     // Addons advertise what they add to ACP (extension methods, say) here.
-    let meta = addon_seam::meta("initialize", None, req.meta.as_ref(), None).await;
+    let meta = addon_seam::meta(&state.addons, "initialize", None, req.meta.as_ref(), None).await;
     let resp = InitializeResponse::new(req.protocol_version)
         .agent_capabilities(caps)
         .agent_info(Implementation::new("dirge", "1.0.4"))
@@ -355,6 +363,7 @@ async fn handle_new_session(
     let options =
         session_config_options(&state.sessions, &state.cli, &state.cfg, &session_id.0).await;
     let meta = addon_seam::meta(
+        &state.addons,
         "session/new",
         Some(&session_id.to_string()),
         req.meta.as_ref(),
@@ -482,7 +491,7 @@ async fn run_prompt(
             let _ = cx.send_notification(SessionNotification::new(session_id.clone(), update));
         }
         let meta =
-            addon_seam::meta("session/prompt", Some(&id_key), request_meta.as_ref(), None).await;
+            addon_seam::meta(&state.addons, "session/prompt", Some(&id_key), request_meta.as_ref(), None).await;
         let _ = responder.respond(PromptResponse::new(StopReason::EndTurn).meta(meta));
         return Ok(());
     }
@@ -809,6 +818,7 @@ async fn run_prompt(
     };
     // Addon `_meta` keys join `usage` and never replace it.
     let meta = addon_seam::meta(
+        &state.addons,
         "session/prompt",
         Some(&id_key),
         request_meta.as_ref(),
