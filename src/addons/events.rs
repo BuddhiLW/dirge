@@ -121,18 +121,20 @@ pub fn reloaded(report: &super::domain::ReloadReport) -> HostEvent {
 /// The MCP host events between two publishes: a server in `after` and not
 /// in `before` connected, one in `before` and not in `after` disconnected.
 pub fn mcp_changes(before: &[String], after: &[String]) -> Vec<HostEvent> {
-    let connected = after
-        .iter()
-        .filter(|s| !before.contains(s))
-        .map(|server| HostEvent::McpConnected {
-            server: server.clone(),
-        });
-    let disconnected = before
-        .iter()
-        .filter(|s| !after.contains(s))
-        .map(|server| HostEvent::McpDisconnected {
-            server: server.clone(),
-        });
+    let connected =
+        after
+            .iter()
+            .filter(|s| !before.contains(s))
+            .map(|server| HostEvent::McpConnected {
+                server: server.clone(),
+            });
+    let disconnected =
+        before
+            .iter()
+            .filter(|s| !after.contains(s))
+            .map(|server| HostEvent::McpDisconnected {
+                server: server.clone(),
+            });
     connected.chain(disconnected).collect()
 }
 
