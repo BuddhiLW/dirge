@@ -275,6 +275,11 @@ impl AddonHooks for LiveAddonHooks {
     fn install_turn_hooks(&self, config: &mut LoopConfig) {
         if let Some(host) = super::global() {
             super::turn_hooks::install(config, &host, self.turn_budget);
+            if host.listens_key(super::tool_batch::AFTER_TOOL_BATCH) {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                let store = Arc::new(super::spill::FileSpillStore::for_cwd(&cwd));
+                super::tool_batch::install(config, &host, self.turn_budget, store);
+            }
         }
     }
 
