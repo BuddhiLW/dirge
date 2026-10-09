@@ -414,7 +414,10 @@ mod tests {
 
     #[test]
     fn no_hooks_when_no_addon_listens() {
-        let deaf = host_with(&[HookPoint::OnPrompt.key()], vec![json!({"summary": VALID})]);
+        let deaf = host_with(
+            &[HookPoint::OnPrompt.key()],
+            vec![json!({"summary": VALID})],
+        );
         assert!(hooks(deaf, None, DEFAULT_BUDGET).is_none());
     }
 
@@ -426,12 +429,13 @@ mod tests {
 
     #[test]
     fn the_host_reaches_the_compaction_keys_through_emit() {
-        let (host, rt) = host_and_runtime(
-            &[COMPACT, BEFORE_COMPACT],
-            vec![json!({"summary": VALID})],
-        );
+        let (host, rt) =
+            host_and_runtime(&[COMPACT, BEFORE_COMPACT], vec![json!({"summary": VALID})]);
         host.before_compact(&json!({"count": 1}));
-        assert_eq!(host.compact(&json!({}), validate_summary).as_deref(), Some(VALID));
+        assert_eq!(
+            host.compact(&json!({}), validate_summary).as_deref(),
+            Some(VALID)
+        );
         let calls = rt.calls.lock().unwrap().clone();
         assert_eq!(
             calls,
