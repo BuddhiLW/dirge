@@ -3,7 +3,7 @@ use crate::sync_util::LockExt;
 use crossterm::style::Color;
 use smallvec::SmallVec;
 
-use crate::agent::command_hooks::{self, CompactTrigger, PreCompact};
+use crate::agent::command_hooks::{CompactTrigger, PreCompact};
 use crate::cli::Cli;
 use crate::command_class::{ArgForm, ClassRule, CommandClass};
 use crate::config::Config;
@@ -355,7 +355,7 @@ pub(crate) fn prepare_compaction(
     // before the summarizer call: a slow hook or addon listener must not
     // freeze this single-threaded loop.
     let pre_compact = PreCompact::new(trigger, instructions);
-    let session_id = Some(session.id.as_ref().to_string());
+    let session_id = Some(session.id.to_string());
 
     let messages_to_summarize = &session.messages[..cut_idx];
     let previous_summary = session.compactions.last().map(|c| c.summary.as_str());
