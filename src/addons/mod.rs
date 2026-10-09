@@ -26,7 +26,9 @@ pub mod mcp;
 pub mod policy;
 pub mod port;
 pub mod sink;
+pub mod spill;
 pub mod tool;
+pub mod tool_batch;
 #[cfg(feature = "plugin")]
 pub mod tool_calls;
 pub mod turn_hooks;
