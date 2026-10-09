@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
-use super::domain::HookPoint;
 use super::host::AddonHost;
 use super::policy;
 use crate::agent::agent_loop::types::{
@@ -27,6 +26,16 @@ pub const DEFAULT_BUDGET: Duration = Duration::from_secs(60);
 /// Characters of a call's JSON arguments its `args` summary keeps.
 const ARGS_SUMMARY_CHARS: usize = 200;
 
+/// Open hook key. `(fn [ctx] -> nil|{:summary text})` when a fold is about to summarize
+/// a span of the conversation; a summary that validates replaces the
+/// built-in one. `ctx` = `{:span :tokens :reason :focus :ctx-max
+/// :pressure :session-id}`.
+pub const COMPACT: &str = "dirge/compact";
+
+/// Open hook key. `(fn [ctx] -> any)` when a fold is about to run; answer ignored.
+/// `ctx` = `{:count :tokens :reason :ctx-max :pressure :session-id}`.
+pub const BEFORE_COMPACT: &str = "dirge/before-compact";
+
 /// The host's compaction hooks for the runs of `session_id`, each call
 /// bounded by `budget`. `None` when no addon listens on either point.
 pub fn hooks(
@@ -34,7 +43,7 @@ pub fn hooks(
     session_id: Option<String>,
     budget: Duration,
 ) -> Option<CompactionHooks> {
-    if !host.listens(HookPoint::Compact) && !host.listens(HookPoint::BeforeCompact) {
+    if !host.listens_key(COMPACT) && !host.listens_key(BEFORE_COMPACT) {
         return None;
     }
     let (before_host, before_session) = (host.clone(), session_id.clone());
@@ -211,7 +220,7 @@ fn args_summary(args: Option<&Value>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addons::domain::HookReply;
+    use crate::addons::domain::{HookPoint, HookReply};
     use crate::addons::host::tests::{ScriptedRuntime, summary};
     use crate::agent::agent_loop::context_manager::ContextUsage;
 
@@ -373,7 +382,16 @@ mod tests {
         );
     }
 
-    fn host_with(points: &[HookPoint], answers: Vec<Value>) -> Arc<AddonHost> {
+    /// A host whose one addon `hd` registered `keys` (open hook keys, as a
+    /// load report names them) and answers every hook with `answers`.
+    fn host_with(keys: &[&str], answers: Vec<Value>) -> Arc<AddonHost> {
+        host_and_runtime(keys, answers).0
+    }
+
+    fn host_and_runtime(
+        keys: &[&str],
+        answers: Vec<Value>,
+    ) -> (Arc<AddonHost>, Arc<ScriptedRuntime>) {
         let rt = Arc::new(ScriptedRuntime {
             hook_answers: answers
                 .into_iter()
@@ -384,22 +402,53 @@ mod tests {
                 .collect(),
             ..Default::default()
         });
-        Arc::new(AddonHost::new(
-            rt,
-            vec![summary("hd", &[], points)],
-            Vec::new(),
-        ))
+        let points: Vec<HookPoint> = keys.iter().filter_map(|k| HookPoint::from_key(k)).collect();
+        let report = json!({ "hooks": keys });
+        let host = AddonHost::with_reports(
+            rt.clone(),
+            vec![summary("hd", &[], &points)],
+            &[("hd".to_string(), report)],
+        );
+        (Arc::new(host), rt)
     }
 
     #[test]
     fn no_hooks_when_no_addon_listens() {
-        let deaf = host_with(&[HookPoint::OnPrompt], vec![json!({"summary": VALID})]);
+        let deaf = host_with(
+            &[HookPoint::OnPrompt.key()],
+            vec![json!({"summary": VALID})],
+        );
         assert!(hooks(deaf, None, DEFAULT_BUDGET).is_none());
+    }
+
+    #[test]
+    fn the_compaction_keys_are_open_keys_no_hook_point_names() {
+        assert_eq!(HookPoint::from_key(COMPACT), None);
+        assert_eq!(HookPoint::from_key(BEFORE_COMPACT), None);
+    }
+
+    #[test]
+    fn the_host_reaches_the_compaction_keys_through_emit() {
+        let (host, rt) =
+            host_and_runtime(&[COMPACT, BEFORE_COMPACT], vec![json!({"summary": VALID})]);
+        host.before_compact(&json!({"count": 1}));
+        assert_eq!(
+            host.compact(&json!({}), validate_summary).as_deref(),
+            Some(VALID)
+        );
+        let calls = rt.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                format!("hook {BEFORE_COMPACT} {}", json!({"count": 1})),
+                format!("hook {COMPACT} {{}}"),
+            ]
+        );
     }
 
     #[tokio::test]
     async fn a_valid_summary_is_the_answer_and_an_invalid_one_is_none() {
-        let host = host_with(&[HookPoint::Compact], vec![json!({"summary": VALID})]);
+        let host = host_with(&[COMPACT], vec![json!({"summary": VALID})]);
         let hooks = hooks(host, Some("s1".into()), DEFAULT_BUDGET).expect("listened");
         assert_eq!(
             (hooks.on_compact)(conversation(), facts()).await.as_deref(),
@@ -411,7 +460,7 @@ mod tests {
             Value::Null,
             json!("text"),
         ] {
-            let host = host_with(&[HookPoint::Compact], vec![answer.clone()]);
+            let host = host_with(&[COMPACT], vec![answer.clone()]);
             let hooks = super::hooks(host, None, DEFAULT_BUDGET).expect("listened");
             assert_eq!(
                 (hooks.on_compact)(conversation(), facts()).await,
@@ -423,7 +472,7 @@ mod tests {
 
     #[tokio::test]
     async fn before_compact_alone_answers_no_summary() {
-        let host = host_with(&[HookPoint::BeforeCompact], vec![json!({"summary": VALID})]);
+        let host = host_with(&[BEFORE_COMPACT], vec![json!({"summary": VALID})]);
         let hooks = hooks(host, None, DEFAULT_BUDGET).expect("listened");
         (hooks.on_before)(3, 100, facts()).await;
         assert_eq!((hooks.on_compact)(conversation(), facts()).await, None);
