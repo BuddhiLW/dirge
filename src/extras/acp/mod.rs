@@ -270,7 +270,8 @@ pub async fn serve(
             on_receive_notification!(),
         )
         .on_receive_dispatch(
-            |dispatch: Dispatch<AgentRequest, AgentNotification>, cx: ConnectionTo<Client>| {
+            move |dispatch: Dispatch<AgentRequest, AgentNotification>, cx: ConnectionTo<Client>| {
+                let addons = dispatch_addons.clone();
                 async move {
                     // acp 2.0 moved `respond_with_error` off `Dispatch` and onto
                     // the `Responder` that only the request variant carries. A
