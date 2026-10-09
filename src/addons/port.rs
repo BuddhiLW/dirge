@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::domain::{HookPoint, HookReply, PanelRequest};
+use super::domain::{HookPoint, HookReply, PanelRequest, SourceOutcome};
 
 /// A running addon runtime. Calls are synchronous round trips: the only
 /// adapter serializes them onto one interpreter thread, so an async caller
@@ -22,6 +22,16 @@ pub trait AddonRuntime: Send + Sync + 'static {
     /// Evaluate `files` again so their namespaces run the code now on disk.
     /// Answers the files that failed, with why.
     fn reload_sources(&self, files: &[PathBuf]) -> Vec<(PathBuf, String)>;
+
+    /// [`AddonRuntime::reload_sources`], also answering the files left
+    /// alone because nothing loaded their namespace. A runtime that never
+    /// skips keeps the default.
+    fn reload_sources_outcome(&self, files: &[PathBuf]) -> SourceOutcome {
+        SourceOutcome {
+            errors: self.reload_sources(files),
+            skipped: Vec::new(),
+        }
+    }
 
     /// Replace the roots `require` searches.
     fn set_source_roots(&self, roots: &[PathBuf]);

@@ -228,12 +228,9 @@ impl AddonHost {
             self.runtime.unload(&addon.id);
         }
         self.runtime.set_source_roots(&set.source_roots);
-        let source_errors = self
-            .runtime
-            .reload_sources(&set.sources)
-            .into_iter()
-            .map(|(manifest, error)| LoadFailure { manifest, error })
-            .collect();
+        let outcome = self.runtime.reload_sources_outcome(&set.sources);
+        let source_errors = policy::as_failures(outcome.errors);
+        let source_skips = policy::as_failures(outcome.skipped);
         let after = load_all(self.runtime.as_ref(), &set, &self.host_config);
         // What a refresh re-read before this reload describes addons that no
         // longer run; taking it in later would undo the reload.
@@ -243,6 +240,7 @@ impl AddonHost {
             loaded: after.addons.iter().map(|a| a.id.clone()).collect(),
             failures: after.failures.clone(),
             source_errors,
+            source_skips,
             tools_added,
             tools_removed,
         };
@@ -359,6 +357,7 @@ impl AddonHost {
             loaded: after.addons.iter().map(|a| a.id.clone()).collect(),
             failures: after.failures.clone(),
             source_errors: Vec::new(),
+            source_skips: Vec::new(),
             tools_added,
             tools_removed,
         };
