@@ -34,26 +34,19 @@ pub enum HookPoint {
     /// bounded by a timeout, answer ignored.
     /// `ctx` = `{:session-id :cwd :reason}`, `:reason` is `exit` or `swap`.
     SessionEnd,
-    /// `(fn [ctx] -> nil|{:summary text})` when a fold is about to summarize
-    /// a span of the conversation; a summary that validates replaces the
-    /// built-in one. `ctx` = `{:span :tokens :reason :focus :ctx-max
-    /// :pressure :session-id}`.
-    Compact,
-    /// `(fn [ctx] -> any)` when a fold is about to run; answer ignored.
-    /// `ctx` = `{:count :tokens :reason :ctx-max :pressure :session-id}`.
-    BeforeCompact,
+    // The compaction hooks `:dirge/compact` and `:dirge/before-compact` are
+    // open hook keys, not variants: see `super::compaction::COMPACT` and
+    // `super::compaction::BEFORE_COMPACT`.
 }
 
 impl HookPoint {
-    pub const ALL: [HookPoint; 8] = [
+    pub const ALL: [HookPoint; 6] = [
         HookPoint::SystemPrompt,
         HookPoint::OnPrompt,
         HookPoint::BeforeToolCall,
         HookPoint::AfterToolCall,
         HookPoint::SessionStart,
         HookPoint::SessionEnd,
-        HookPoint::Compact,
-        HookPoint::BeforeCompact,
     ];
 
     /// The keyword (without the colon) an addon uses as its `hooks` key.
@@ -65,8 +58,6 @@ impl HookPoint {
             HookPoint::AfterToolCall => "dirge/after-tool-call",
             HookPoint::SessionStart => "dirge/session-start",
             HookPoint::SessionEnd => "dirge/session-end",
-            HookPoint::Compact => "dirge/compact",
-            HookPoint::BeforeCompact => "dirge/before-compact",
         }
     }
 

@@ -137,12 +137,12 @@ fn an_open_command_hook_event_reaches_the_addon_keyed_on_it() {
 
 #[test]
 fn compaction_hooks_reach_a_running_addon() {
-    use super::domain::HookPoint;
+    use super::compaction::{BEFORE_COMPACT, COMPACT};
     use crate::agent::compression::validate_summary;
 
     let host = live_host(IsolateOptions::default());
-    assert!(host.listens(HookPoint::Compact));
-    assert!(host.listens(HookPoint::BeforeCompact));
+    assert!(host.listens_key(COMPACT));
+    assert!(host.listens_key(BEFORE_COMPACT));
 
     host.before_compact(&json!({"count": 2, "tokens": 100, "reason": "pressure"}));
     assert_eq!(tool_text(&host, "heard", json!({})), "before-compact");
