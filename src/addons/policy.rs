@@ -332,6 +332,24 @@ pub fn source_report(answer: &Value) -> (SourceNotes, SourceNotes) {
     (errors, skipped)
 }
 
+/// Source notes as the [`super::domain::LoadFailure`] rows a reload
+/// report lists.
+pub fn as_failures(notes: SourceNotes) -> Vec<super::domain::LoadFailure> {
+    notes
+        .into_iter()
+        .map(|(manifest, error)| super::domain::LoadFailure { manifest, error })
+        .collect()
+}
+
+/// The `/addons reload` lines naming the files left alone, so an edit to a
+/// file nothing loads is not mistaken for a reload.
+pub fn skip_lines(skips: &[super::domain::LoadFailure]) -> Vec<String> {
+    skips
+        .iter()
+        .map(|s| format!("  skipped {}: {}", s.manifest.display(), s.error))
+        .collect()
+}
+
 /// A hook reply's text: a bare string, or a map's `context`.
 fn reply_text(v: &Value) -> Option<String> {
     let text = match v {

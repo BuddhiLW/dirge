@@ -354,6 +354,9 @@ fn reload_landing(report: &ReloadReport, offered: &[String], installed: &[String
             Tone::Error,
         ));
     }
+    for skip in crate::addons::policy::skip_lines(&report.source_skips) {
+        lines.push(line(skip, Tone::Dim));
+    }
     lines.push(line(
         "  tools and hooks take effect at the next prompt",
         Tone::Dim,
@@ -515,6 +518,10 @@ mod tests {
                 error: "init-fn not found".into(),
             }],
             source_errors: Vec::new(),
+            source_skips: vec![LoadFailure {
+                manifest: PathBuf::from("u.cljc"),
+                error: "not reloaded: nothing has loaded u".into(),
+            }],
             tools_added: vec!["bash".into(), "count_rows".into()],
             tools_removed: vec!["old".into()],
         };
@@ -531,6 +538,10 @@ mod tests {
                 ("  - tools: old", Tone::Result),
                 ("  skipped (name taken): bash", Tone::Error),
                 ("  c.edn: init-fn not found", Tone::Error),
+                (
+                    "  skipped u.cljc: not reloaded: nothing has loaded u",
+                    Tone::Dim
+                ),
                 (
                     "  tools and hooks take effect at the next prompt",
                     Tone::Dim

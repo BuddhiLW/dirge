@@ -145,9 +145,20 @@ pub struct ReloadReport {
     /// Source files that did not evaluate; the addons using them may run
     /// stale code.
     pub source_errors: Vec<LoadFailure>,
+    /// Source files left alone (a namespace nothing has loaded, the
+    /// protocol namespace), with why: editing them changes nothing.
+    pub source_skips: Vec<LoadFailure>,
     /// Exposed tool names that appeared or disappeared.
     pub tools_added: Vec<String>,
     pub tools_removed: Vec<String>,
+}
+
+/// What evaluating the addons' sources again did, file by file: the ones
+/// that failed and the ones left alone, each with why.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SourceOutcome {
+    pub errors: Vec<(PathBuf, String)>,
+    pub skipped: Vec<(PathBuf, String)>,
 }
 
 /// One change an addon asks of dirge's side panel.

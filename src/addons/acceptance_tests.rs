@@ -752,6 +752,18 @@ fn a_source_whose_ns_form_disagrees_with_its_path_is_reported() {
         reported[0].1.contains("layered.elsewhere") && reported[0].1.contains("layered.stray"),
         "{reported:?}"
     );
+    // The file nothing loads is not an error, but the report names it as
+    // left alone so /addons reload can say the edit changed nothing.
+    let skipped: Vec<String> = report
+        .source_skips
+        .iter()
+        .map(|s| file_name(&s.manifest))
+        .collect();
+    assert!(
+        skipped.contains(&"unused.cljc".to_string()),
+        "{:?}",
+        report.source_skips
+    );
     assert_eq!(report.loaded, vec!["layered".to_string()]);
     host.shutdown();
 }

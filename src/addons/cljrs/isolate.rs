@@ -20,7 +20,7 @@ use cljrs_value::{Arity, NativeFn, PersistentVector, Value};
 use serde_json::{Value as Json, json};
 
 use super::{bridge, harness};
-use crate::addons::domain::{HookPoint, HookReply};
+use crate::addons::domain::{HookPoint, HookReply, SourceOutcome};
 use crate::addons::port::{AddonRuntime, Harness};
 use crate::addons::{layout, policy};
 use crate::sync_util::LockExt;
@@ -110,7 +110,7 @@ enum Command {
     },
     ReloadSources {
         files: Vec<PathBuf>,
-        reply: Sender<Vec<(PathBuf, String)>>,
+        reply: Sender<SourceOutcome>,
     },
     SetRoots {
         roots: Vec<PathBuf>,
@@ -328,11 +328,18 @@ impl AddonRuntime for Isolate {
     }
 
     fn reload_sources(&self, files: &[PathBuf]) -> Vec<(PathBuf, String)> {
+        self.reload_sources_outcome(files).errors
+    }
+
+    fn reload_sources_outcome(&self, files: &[PathBuf]) -> SourceOutcome {
         self.ask(|reply| Command::ReloadSources {
             files: files.to_vec(),
             reply,
         })
-        .unwrap_or_else(|e| files.iter().map(|f| (f.clone(), e.clone())).collect())
+        .unwrap_or_else(|e| SourceOutcome {
+            errors: files.iter().map(|f| (f.clone(), e.clone())).collect(),
+            skipped: Vec::new(),
+        })
     }
 
     fn set_source_roots(&self, roots: &[PathBuf]) {
@@ -736,8 +743,10 @@ impl Interp {
     /// most specific root holding it (null when none does); the ones that
     /// failed, with why. Files left alone because nothing loaded their
     /// namespace are logged.
-    fn reload_sources(&mut self, files: &[PathBuf]) -> Vec<(PathBuf, String)> {
+    /// They are answered too, as `skipped`.
+    fn reload_sources(&mut self, files: &[PathBuf]) -> SourceOutcome {
         let mut failed = self.apply_overlays();
+        let mut left_alone = Vec::new();
         let overlays = layout::host_overlays(&self.roots);
         let files: Vec<&PathBuf> = files.iter().filter(|f| !overlays.contains(f)).collect();
         let sources: Vec<Json> = files
@@ -754,12 +763,16 @@ impl Interp {
                 let (errors, skipped) = policy::source_report(&answer);
                 for (file, why) in skipped {
                     tracing::warn!(target: "dirge::addon", file = %file.display(), %why, "addon source not reloaded");
+                    left_alone.push((file, why));
                 }
                 failed.extend(errors);
             }
             Err(e) => failed.extend(files.iter().map(|f| ((*f).clone(), e.clone()))),
         }
-        failed
+        SourceOutcome {
+            errors: failed,
+            skipped: left_alone,
+        }
     }
 
     /// Evaluate every host overlay on the roots over the builtin host, in
