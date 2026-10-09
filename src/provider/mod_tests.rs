@@ -2011,7 +2011,10 @@ fn a_late_mcp_tool_cannot_take_a_live_tool_name() {
     use std::sync::Arc;
 
     let mut agent = build_openai_any_agent();
-    agent.upsert_loop_tools("addon", vec![Arc::new(SourcedTool("shared", Some("addon")))]);
+    agent.upsert_loop_tools(
+        "addon",
+        vec![Arc::new(SourcedTool("shared", Some("addon")))],
+    );
 
     let skipped = agent.extend_loop_tools(vec![
         Arc::new(SourcedTool("shared", Some("mcp"))),
@@ -2025,7 +2028,10 @@ fn a_late_mcp_tool_cannot_take_a_live_tool_name() {
         .iter()
         .map(|t| (t.name(), t.source()))
         .collect();
-    assert_eq!(live, vec![("shared", Some("addon")), ("mcp_only", Some("mcp"))]);
+    assert_eq!(
+        live,
+        vec![("shared", Some("addon")), ("mcp_only", Some("mcp"))]
+    );
     assert!(!agent.mcp_tool_names.contains("shared"));
     assert!(agent.mcp_tool_names.contains("mcp_only"));
 }
