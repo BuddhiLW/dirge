@@ -417,9 +417,8 @@ fn an_addon_reads_its_own_settings_at_init_and_through_the_harness() {
     settings.insert("other".into(), json!({"hidden": true}));
     let mut harness = Harness::with_sink(Arc::new(RecordingSink::default()));
     harness.config = Arc::new(StubConfig(settings));
-    let host =
-        super::start(echo_plan(&fixtures().join("settings")), harness, PROTOCOL)
-            .expect("host starts");
+    let host = super::start(echo_plan(&fixtures().join("settings")), harness, PROTOCOL)
+        .expect("host starts");
     let cmd = host.command("settings").expect("settings registered");
 
     let out = host.run_command(&cmd, "").expect("settings runs");

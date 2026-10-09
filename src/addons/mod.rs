@@ -189,7 +189,11 @@ pub fn start_with(
         protocol_ns,
         options,
     )?);
-    Ok(AddonHost::load(isolate, set, host_wide_config(config.as_ref())))
+    Ok(AddonHost::load(
+        isolate,
+        set,
+        host_wide_config(config.as_ref()),
+    ))
 }
 
 /// The host config every addon's `:dirge/host` is narrowed from: harness,
