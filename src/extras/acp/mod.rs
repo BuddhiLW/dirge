@@ -4,6 +4,7 @@ pub mod config;
 pub mod mcp_servers;
 pub mod model_option;
 mod permission_forward;
+mod plan_update;
 
 use std::sync::Arc;
 
@@ -664,10 +665,21 @@ async fn run_prompt(
                         .rev()
                         .find(|e| matches!(e.state, ToolCallState::Interrupted))
                 };
+                // D2: a todo-board write also refreshes the client's plan.
+                let plan_changed = target
+                    .as_ref()
+                    .is_some_and(|e| plan_update::is_plan_tool(&e.name));
                 if let Some(entry) = target {
                     entry.state = ToolCallState::Completed {
                         result: output.to_string(),
                     };
+                }
+                if plan_changed {
+                    let notif = SessionNotification::new(
+                        session_id.clone(),
+                        SessionUpdate::Plan(plan_update::current_plan()),
+                    );
+                    let _ = cx.send_notification(notif);
                 }
                 let id = correlator
                     .resolve(id.as_str())
