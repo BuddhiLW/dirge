@@ -188,6 +188,23 @@ impl AddonHost {
         }
     }
 
+    /// [`Self::new`] plus the open hook keys `reports` name, as `(addon id,
+    /// load report)` pairs, the way a boot reads them.
+    #[cfg(test)]
+    pub fn with_reports(
+        runtime: Arc<dyn AddonRuntime>,
+        addons: Vec<AddonSummary>,
+        reports: &[(String, Value)],
+    ) -> Self {
+        let loaded = Loaded::new(addons, Vec::new()).with_reported_keys(reports);
+        Self {
+            runtime,
+            host_config: Value::Object(Default::default()),
+            loaded: Mutex::new(loaded),
+            reserved: nothing_reserved(),
+        }
+    }
+
     /// Boot: load every manifest of `set` on a freshly started `runtime`.
     pub fn load(runtime: Arc<dyn AddonRuntime>, set: LoadSet, host_config: Value) -> Self {
         let loaded = load_all(runtime.as_ref(), &set, &host_config);
@@ -426,21 +443,16 @@ impl AddonHost {
     }
 
     /// The first `:dirge/compact` summary that `valid` accepts.
+    /// An open hook key read through [`Self::emit`]; only the fold policy
+    /// (summary validation) stays here.
     pub fn compact(&self, ctx: &Value, valid: impl Fn(&str) -> bool) -> Option<String> {
-        if !self.listens(HookPoint::Compact) {
-            return None;
-        }
-        let replies = self.runtime.run_hook(HookPoint::Compact, ctx);
-        log_key_failures(HookPoint::Compact.key(), &replies);
+        let replies = self.emit(super::compaction::COMPACT, ctx);
         policy::summary(&replies, valid)
     }
 
     /// Run `:dirge/before-compact`; answers are ignored and failures logged.
     pub fn before_compact(&self, ctx: &Value) {
-        if self.listens(HookPoint::BeforeCompact) {
-            let replies = self.runtime.run_hook(HookPoint::BeforeCompact, ctx);
-            log_key_failures(HookPoint::BeforeCompact.key(), &replies);
-        }
+        self.emit(super::compaction::BEFORE_COMPACT, ctx);
     }
 
     pub fn shutdown(&self) {
@@ -526,6 +538,11 @@ pub(crate) mod tests {
 
         fn run_hook(&self, point: HookPoint, ctx: &Value) -> Vec<HookReply> {
             self.record(format!("hook {} {ctx}", point.key()));
+            self.hook_answers.clone()
+        }
+
+        fn run_hook_key(&self, key: &str, ctx: &Value) -> Vec<HookReply> {
+            self.record(format!("hook {key} {ctx}"));
             self.hook_answers.clone()
         }
 
