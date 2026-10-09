@@ -27,6 +27,7 @@ pub mod manifest;
 pub mod mcp;
 pub mod policy;
 pub mod port;
+pub mod settings;
 pub mod sink;
 pub mod tool;
 #[cfg(feature = "plugin")]
@@ -91,7 +92,7 @@ pub fn install_from_config(cfg: &crate::config::Config) {
     if plan.is_empty() {
         return;
     }
-    live::publish_settings(&settings);
+    settings::publish(&settings);
     let protocol = protocol_ns(&settings, &plan);
     match start_with(plan, harness(), &protocol, isolate_options(&settings)) {
         Ok(host) => {

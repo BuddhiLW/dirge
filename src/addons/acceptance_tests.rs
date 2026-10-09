@@ -279,6 +279,7 @@ fn addon_commands_reach_the_panel_and_mcp_through_the_harness() {
         panels: panels.clone(),
         mcp: mcp.clone(),
         tools: Arc::new(NoTools),
+        config: Arc::new(super::port::NoConfig),
     };
     let host =
         super::start(echo_plan(&fixtures().join("echo")), harness, PROTOCOL).expect("host starts");
