@@ -249,7 +249,12 @@ mod tests {
         let ctrl_c = key(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(route(&m, &ctrl_c, None, false), KeyRoute::PassThrough);
         assert_eq!(
-            route(&m, &key(KeyCode::Char('x'), KeyModifiers::NONE), None, false),
+            route(
+                &m,
+                &key(KeyCode::Char('x'), KeyModifiers::NONE),
+                None,
+                false
+            ),
             KeyRoute::Swallow
         );
     }
@@ -301,7 +306,13 @@ mod tests {
     #[test]
     fn prompt_focus_keeps_letters_enter_and_backspace() {
         let mut m = model(false);
-        m.panel_keys = vec!["Enter".into(), "Esc".into(), "g".into(), "j".into(), "p".into()];
+        m.panel_keys = vec![
+            "Enter".into(),
+            "Esc".into(),
+            "g".into(),
+            "j".into(),
+            "p".into(),
+        ];
         assert_eq!(focus_of(&m, false), Focus::Prompt);
         for code in [
             KeyCode::Char('p'),
