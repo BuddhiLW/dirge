@@ -31,6 +31,125 @@ pub fn project(event: &AgentEvent) -> Option<Value> {
     }
 }
 
+/// What happens to the host around the run rather than inside it: MCP
+/// servers coming and going, sessions opening and closing, the addons being
+/// replaced. Heard on `:dirge/event` beside the run's [`AgentEvent`]s.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostEvent {
+    /// An MCP server became reachable from dirge (and `dirge.harness/mcp-call`).
+    McpConnected { server: String },
+    /// An MCP server dirge reached is no longer reachable.
+    McpDisconnected { server: String },
+    /// A session opened.
+    SessionStart {
+        session_id: Option<String>,
+        cwd: String,
+        first_prompt: bool,
+        mcp_servers: Vec<String>,
+    },
+    /// A session closed, for `reason` (a lifecycle reason key).
+    SessionEnd {
+        session_id: Option<String>,
+        cwd: String,
+        reason: String,
+    },
+    /// `/addons reload` or a refresh replaced the addons.
+    AddonsReloaded {
+        loaded: Vec<String>,
+        failed: usize,
+        tools_added: Vec<String>,
+        tools_removed: Vec<String>,
+    },
+}
+
+/// `event` as the `:dirge/event` hook's ctx. Every host event is heard.
+pub fn project_host(event: &HostEvent) -> Value {
+    match event {
+        HostEvent::McpConnected { server } => {
+            json!({ "event": "mcp-connected", "server": server })
+        }
+        HostEvent::McpDisconnected { server } => {
+            json!({ "event": "mcp-disconnected", "server": server })
+        }
+        HostEvent::SessionStart {
+            session_id,
+            cwd,
+            first_prompt,
+            mcp_servers,
+        } => json!({
+            "event": "session-start",
+            "session-id": session_id,
+            "cwd": cwd,
+            "first-prompt?": first_prompt,
+            "mcp-servers": mcp_servers,
+        }),
+        HostEvent::SessionEnd {
+            session_id,
+            cwd,
+            reason,
+        } => json!({
+            "event": "session-end",
+            "session-id": session_id,
+            "cwd": cwd,
+            "reason": reason,
+        }),
+        HostEvent::AddonsReloaded {
+            loaded,
+            failed,
+            tools_added,
+            tools_removed,
+        } => json!({
+            "event": "addons-reloaded",
+            "loaded": loaded,
+            "failed": failed,
+            "tools-added": tools_added,
+            "tools-removed": tools_removed,
+        }),
+    }
+}
+
+/// What a reload or refresh `report` changed, as a host event.
+pub fn reloaded(report: &super::domain::ReloadReport) -> HostEvent {
+    HostEvent::AddonsReloaded {
+        loaded: report.loaded.clone(),
+        failed: report.failures.len() + report.source_errors.len(),
+        tools_added: report.tools_added.clone(),
+        tools_removed: report.tools_removed.clone(),
+    }
+}
+
+/// The MCP host events between two publishes: a server in `after` and not
+/// in `before` connected, one in `before` and not in `after` disconnected.
+pub fn mcp_changes(before: &[String], after: &[String]) -> Vec<HostEvent> {
+    let connected = after
+        .iter()
+        .filter(|s| !before.contains(s))
+        .map(|server| HostEvent::McpConnected {
+            server: server.clone(),
+        });
+    let disconnected = before
+        .iter()
+        .filter(|s| !after.contains(s))
+        .map(|server| HostEvent::McpDisconnected {
+            server: server.clone(),
+        });
+    connected.chain(disconnected).collect()
+}
+
+/// Post `events` onto `:dirge/event` of the running host, if one runs and
+/// an addon listens. Never waits. The one effect of this module.
+pub fn post_host(events: &[HostEvent]) {
+    let Some(host) = super::global() else {
+        return;
+    };
+    if events.is_empty() || !host.listens_key(EVENT_KEY) {
+        return;
+    }
+    for event in events {
+        host.post(EVENT_KEY, &project_host(event));
+    }
+}
+
 /// How the hook hears one event.
 enum Shape {
     /// Not at all.

@@ -553,6 +553,16 @@ costs one call site, not a change to the addon host's types. The
 The `:dirge/event` hook hears every event of the main session's run as the
 front end gets it, one map per event, keyed by `:event`.
 
+It also hears the host's own lifecycle:
+
+| `:event` | Keys | When |
+|---|---|---|
+| `:mcp-connected` | `:server` | an MCP server became reachable |
+| `:mcp-disconnected` | `:server` | an MCP server is no longer reachable |
+| `:session-start` | `:session-id :cwd :first-prompt? :mcp-servers` | a session opens, before `:dirge/session-start` runs |
+| `:session-end` | `:session-id :cwd :reason` | a session closes, before `:dirge/session-end` runs |
+| `:addons-reloaded` | `:loaded :failed :tools-added :tools-removed` | `/addons reload` or a refresh replaced the addons |
+
 An event is heard as it serializes: `:event` is its name and its fields
 are the other keys, both kebab-case. An event with one unnamed field
 carries it as `:value`. Every string in the map, however deeply nested, is
