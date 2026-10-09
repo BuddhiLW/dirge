@@ -488,11 +488,25 @@ impl AnyAgent {
     /// keeping it search-gated, exactly like a build-time MCP tool, rather
     /// than force-loading it into every request. No-op when
     /// dynamic_tool_search is off (registry is `None`).
+    ///
+    /// Names follow the boot/reload rule of [`Self::upsert_loop_tools`]: a
+    /// tool already live (an addon tool, a plugin, an earlier server) keeps
+    /// its name, and an arriving tool that would duplicate it is skipped.
+    /// Returns the names skipped, for the caller to report.
     #[cfg(feature = "mcp")]
     pub fn extend_loop_tools(
         &mut self,
         more: Vec<std::sync::Arc<dyn crate::agent::agent_loop::LoopTool>>,
-    ) {
+    ) -> Vec<String> {
+        let mut taken: std::collections::HashSet<String> = self
+            .loop_tools
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect();
+        let (more, skipped): (Vec<_>, Vec<_>) = more
+            .into_iter()
+            .partition(|t| taken.insert(t.name().to_string()));
+        let skipped: Vec<String> = skipped.iter().map(|t| t.name().to_string()).collect();
         if let Some(registry) = &self.tool_search_registry {
             let mut reg = registry.lock_ignore_poison();
             for t in &more {
@@ -508,6 +522,7 @@ impl AnyAgent {
             self.mcp_tool_names.insert(t.name().to_string());
         }
         self.loop_tools.extend(more);
+        skipped
     }
 
     /// Drop every live tool whose [`LoopTool::source`] is `source`, pruning
