@@ -185,7 +185,14 @@ mod tests {
         let mut base = Meta::new();
         base.insert("usage".into(), json!({"totalTokens": 3}));
         assert_eq!(
-            meta(&seam, "session/prompt", Some("s1"), None, Some(base.clone())).await,
+            meta(
+                &seam,
+                "session/prompt",
+                Some("s1"),
+                None,
+                Some(base.clone())
+            )
+            .await,
             Some(base)
         );
         assert_eq!(meta(&seam, "initialize", None, None, None).await, None);

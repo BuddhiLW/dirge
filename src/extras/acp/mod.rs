@@ -491,8 +491,14 @@ async fn run_prompt(
             let update = SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(options));
             let _ = cx.send_notification(SessionNotification::new(session_id.clone(), update));
         }
-        let meta =
-            addon_seam::meta(&state.addons, "session/prompt", Some(&id_key), request_meta.as_ref(), None).await;
+        let meta = addon_seam::meta(
+            &state.addons,
+            "session/prompt",
+            Some(&id_key),
+            request_meta.as_ref(),
+            None,
+        )
+        .await;
         let _ = responder.respond(PromptResponse::new(StopReason::EndTurn).meta(meta));
         return Ok(());
     }
