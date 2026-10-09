@@ -275,11 +275,11 @@ fn addon_commands_reach_the_panel_and_mcp_through_the_harness() {
     let panels = Arc::new(RecordingPanels::default());
     let mcp = Arc::new(ScriptedMcp::default());
     let harness = Harness {
-        sink: Arc::new(RecordingSink::default()),
         panels: panels.clone(),
         mcp: mcp.clone(),
         tools: Arc::new(NoTools),
         config: Arc::new(super::port::NoConfig),
+        ..Harness::with_sink(Arc::new(RecordingSink::default()))
     };
     let host =
         super::start(echo_plan(&fixtures().join("echo")), harness, PROTOCOL).expect("host starts");
