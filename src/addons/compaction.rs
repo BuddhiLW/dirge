@@ -11,13 +11,13 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
+use super::breaker::within as blocking_within;
 use super::host::AddonHost;
 use super::policy;
 use crate::agent::agent_loop::types::{
     CompactionFacts, CompactionHooks, OnBeforeCompactFn, OnCompactFn,
 };
 use crate::agent::compression::{estimate_messages_tokens, validate_summary};
-use crate::runtime::blocking_within;
 
 /// How long one compaction hook may take when `addons.compact_timeout_secs`
 /// is not set.

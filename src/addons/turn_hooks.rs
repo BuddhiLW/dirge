@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use super::breaker::within as blocking_within;
 use super::host::AddonHost;
 use super::policy;
 use crate::agent::agent_loop::hooks::{
@@ -31,7 +32,6 @@ use crate::agent::agent_loop::types::{
     Context, LoopConfig, ThinkingLevel, TransformContextFn, TurnUpdate, compose_transform_context,
 };
 use crate::agent::compression::estimate_messages_tokens;
-use crate::runtime::blocking_within;
 
 pub const TRANSFORM_CONTEXT: &str = "dirge/transform-context";
 pub const PREPARE_NEXT_TURN: &str = "dirge/prepare-next-turn";

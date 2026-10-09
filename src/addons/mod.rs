@@ -9,6 +9,7 @@
 
 #[cfg(feature = "acp")]
 pub mod acp;
+pub mod breaker;
 pub mod cljrs;
 pub mod command_hooks;
 pub mod compaction;

@@ -122,6 +122,10 @@ pub(crate) enum NoAnswer {
     TimedOut(std::time::Duration),
     /// The work panicked.
     Failed(String),
+    /// The work was not started: an earlier addon hook is still stuck on
+    /// the isolate (see `addons::breaker`).
+    #[cfg_attr(not(feature = "addons"), allow(dead_code))]
+    Skipped,
 }
 
 impl std::fmt::Display for NoAnswer {
@@ -129,6 +133,7 @@ impl std::fmt::Display for NoAnswer {
         match self {
             NoAnswer::TimedOut(budget) => write!(f, "no answer within {budget:?}"),
             NoAnswer::Failed(why) => write!(f, "failed: {why}"),
+            NoAnswer::Skipped => write!(f, "skipped: an earlier addon hook is still stuck"),
         }
     }
 }
