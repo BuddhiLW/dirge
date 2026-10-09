@@ -534,9 +534,15 @@ mod tests {
     fn a_folded_turn_reads_its_level_and_non_blank_notes() {
         assert_eq!(
             folded_turn(&json!({"thinking": "high", "context": [" a ", "", 3, "b"]})),
-            (Some("high".to_string()), vec!["a".to_string(), "b".to_string()])
+            (
+                Some("high".to_string()),
+                vec!["a".to_string(), "b".to_string()]
+            )
         );
-        assert_eq!(folded_turn(&json!({"context": "not a vector"})), (None, Vec::new()));
+        assert_eq!(
+            folded_turn(&json!({"context": "not a vector"})),
+            (None, Vec::new())
+        );
     }
 
     #[test]
