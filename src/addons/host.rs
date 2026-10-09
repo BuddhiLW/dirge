@@ -200,7 +200,7 @@ impl AddonHost {
         let loaded = Loaded::new(addons, Vec::new()).with_reported_keys(reports);
         Self {
             runtime,
-            host_config: Value::Object(Default::default()),
+            host_config: Mutex::new(Value::Object(Default::default())),
             loaded: Mutex::new(loaded),
             reserved: nothing_reserved(),
         }
