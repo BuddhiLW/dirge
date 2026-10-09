@@ -697,6 +697,38 @@ fn pre_compact_reaches_an_addon_listener() {
     assert_eq!(heard[0]["custom_instructions"], "focus");
 }
 
+/// A hook runner that sleeps before answering, as a slow shell hook does.
+struct SleepingRunner(std::time::Duration);
+
+impl HookRunner for SleepingRunner {
+    fn run(&self, _: &HookCommand, _: &str, _: &Path) -> Result<Exited, HookError> {
+        std::thread::sleep(self.0);
+        Ok(exit(0, "", ""))
+    }
+}
+
+/// The UI loop is a single-threaded runtime: while a slow PreCompact hook
+/// runs, the loop's other tasks (repaint, input) must keep running.
+#[tokio::test(flavor = "current_thread")]
+async fn a_slow_pre_compact_hook_does_not_hold_a_single_threaded_loop() {
+    use std::time::{Duration, Instant};
+    let hook_takes = Duration::from_millis(400);
+    let hooks = registry(pre_compact_config(), Arc::new(SleepingRunner(hook_takes)));
+    let subject = PreCompact::new(CompactTrigger::Manual, None);
+    let started = Instant::now();
+
+    let fired = tokio::spawn(super::pre_compact(hooks, subject, Some("s1".into())));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let loop_ticked_after = started.elapsed();
+    fired.await.unwrap();
+
+    assert!(
+        loop_ticked_after < hook_takes,
+        "the loop waited {loop_ticked_after:?} behind the hook"
+    );
+    assert!(started.elapsed() >= hook_takes, "the hook ran");
+}
+
 static COMPACT_RUNNER: std::sync::OnceLock<Arc<ScriptedRunner>> = std::sync::OnceLock::new();
 
 fn compact_source() -> Option<Arc<CommandHooks>> {

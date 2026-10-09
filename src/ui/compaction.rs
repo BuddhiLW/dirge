@@ -125,9 +125,13 @@ pub(crate) fn spawn(req: CompactionRequest, then: CompactionThen) -> CompactionP
         prompt,
         cut_idx,
         tokens_before,
+        pre_compact,
+        session_id,
     } = req;
     // Capacity 1: the task sends exactly one terminal event.
     let core = crate::ui::phase::PhaseHandle::spawn(1, move |tx| async move {
+        // Fail-open, off the UI loop: hooks run on the blocking pool.
+        crate::agent::command_hooks::pre_compact_open(pre_compact, session_id).await;
         let event = match crate::provider::run_compaction(model, prompt).await {
             Ok(summary) => CompactionPhaseEvent::Done { summary },
             Err(e) => CompactionPhaseEvent::Failed {
