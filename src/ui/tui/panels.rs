@@ -270,6 +270,9 @@ pub(crate) fn subagent_preview_line(row: &SubagentStatusRow) -> Option<String> {
 /// spacer) when sizing external panels, so they can't evict it.
 const ACTIVITY_MIN_ROWS: u16 = 4;
 
+/// Badge on the focused panel while it holds key focus.
+pub(crate) const PANEL_KEYS_HINT: &str = "keys: Esc returns";
+
 /// One sub-panel ready to paint: title, optional badge, styled body rows.
 type BoxLines = (String, Option<String>, Vec<Row>);
 
@@ -310,6 +313,16 @@ fn fit_external_panels(panels: &ExternalPanels, budget: u16) -> Vec<BoxLines> {
         for (i, b) in out.iter_mut().enumerate() {
             b.1 = Some(format!("{}/{total}", i + 1));
         }
+    }
+    // The focused panel holding key focus says how to give it back.
+    if panels.key_focus()
+        && panels.focused().is_some()
+        && let Some(first) = out.first_mut()
+    {
+        first.1 = Some(match first.1.take() {
+            Some(n) => format!("{n} {PANEL_KEYS_HINT}"),
+            None => PANEL_KEYS_HINT.to_string(),
+        });
     }
     out
 }

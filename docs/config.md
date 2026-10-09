@@ -1179,6 +1179,16 @@ routes to the right one by its command name.
 | `panel_prev_tab` | `alt-,` | External panel feed: ask the producer for its previous view |
 | `panel_refresh` | `alt-/` | External panel feed: ask the producer to repaint |
 | `toggle_swarm` | `alt-s` | Open or close the swarm grid (external panels and subagents at full size) |
+| `focus_panel` | `alt-p` | Hand key focus to the focused external panel, or give it back to the prompt |
+
+Typed keys belong to the prompt by default: letters, Enter and Backspace
+always reach the editor, even while an external panel is focused and
+declares bare-letter verbs. Press `focus_panel` (Alt+P) to hand key focus
+to that panel; its title then shows `keys: Esc returns`, its declared keys
+fire its verbs, and undeclared keys still type. Esc or `focus_panel` again
+returns focus to the prompt, and so does the panel releasing its keys.
+While the swarm grid is open the editor is inert and the grid's keys apply
+as before.
 
 ### Input-editor commands
 
