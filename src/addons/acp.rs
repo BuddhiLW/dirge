@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
+use super::breaker::within as blocking_within;
 use super::domain::HookReply;
 use super::host::AddonHost;
-use crate::runtime::blocking_within;
 
 /// An ACP extension request: ctx `{"method" "params"}`, the method as the
 /// client sent it (leading `_` kept). The first non-null answer, in load
@@ -30,6 +30,23 @@ pub const META_KEY: &str = "dirge/acp-meta";
 
 /// Longest the addons may take to answer one ACP request.
 pub const BUDGET: Duration = Duration::from_secs(30);
+
+/// Longest the addons may take to add `_meta` to the handshake
+/// (`initialize`, `session/new`): the editor waits on those answers before
+/// it can do anything, so a slow addon must not hold it for [`BUDGET`].
+pub const HANDSHAKE_BUDGET: Duration = Duration::from_secs(2);
+
+/// The ACP methods whose answer the editor's handshake waits on.
+const HANDSHAKE_METHODS: [&str; 2] = ["initialize", "session/new"];
+
+/// How long the addons may take to add `_meta` to the response to `method`.
+pub fn meta_budget(method: &str) -> Duration {
+    if HANDSHAKE_METHODS.contains(&method) {
+        HANDSHAKE_BUDGET
+    } else {
+        BUDGET
+    }
+}
 
 /// The ctx of an extension method or notification.
 pub fn ext_ctx(method: &str, params: Value) -> Value {
@@ -116,13 +133,27 @@ pub async fn meta(
         return base;
     }
     let ctx = request.ctx(&base);
-    let replies = blocking_within(BUDGET, move || host.emit(META_KEY, &ctx)).await;
+    let budget = meta_budget(&request.method);
+    let replies = blocking_within(budget, move || host.emit(META_KEY, &ctx)).await;
     match replies {
         Ok(replies) => merged_meta(base, &replies),
         Err(why) => {
             tracing::warn!(target: "dirge::addon", %why, method = %request.method, "addon ACP _meta skipped");
             base
         }
+    }
+}
+
+#[cfg(test)]
+mod handshake_tests {
+    use super::*;
+
+    #[test]
+    fn the_handshake_waits_less_on_addon_meta_than_a_prompt() {
+        assert_eq!(meta_budget("initialize"), HANDSHAKE_BUDGET);
+        assert_eq!(meta_budget("session/new"), HANDSHAKE_BUDGET);
+        assert_eq!(meta_budget("session/prompt"), BUDGET);
+        assert!(HANDSHAKE_BUDGET < BUDGET);
     }
 }
 

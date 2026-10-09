@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use super::breaker::within as blocking_within;
 use super::domain::{BeforeOutcome, HookPoint};
 use super::host::AddonHost;
 use super::policy;
@@ -26,7 +27,6 @@ use crate::agent::agent_loop::types::{CompactionHooks, LoopConfig};
 use crate::agent::command_hooks::loop_hooks::{compose_after, compose_before};
 use crate::permission::ask::AskSender;
 use crate::permission::checker::PermCheck;
-use crate::runtime::blocking_within;
 
 /// `:dirge/before-tool-call`, adapted onto the loop's slot.
 pub fn before_hook(host: Arc<AddonHost>) -> BeforeToolCallFn {
