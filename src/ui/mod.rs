@@ -5099,7 +5099,13 @@ pub async fn run_interactive(
                             // next prompt's `agent.clone()` forwards them to the
                             // loop + the request's tool defs — and adopt the
                             // connected manager so the panel + `/mcp` see it.
-                            agent.extend_loop_tools(tools);
+                            for name in agent.extend_loop_tools(tools) {
+                                tracing::warn!(
+                                    target: "dirge::mcp",
+                                    tool = %name,
+                                    "MCP tool skipped: a live tool already has that name"
+                                );
+                            }
                             // #701: re-publish the live agent so `current_agent()`
                             // (what a tooled `task(agent=…)` subagent forks off)
                             // and the `call-tool` registry (plugins and addons)

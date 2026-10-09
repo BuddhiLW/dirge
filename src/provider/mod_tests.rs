@@ -2001,3 +2001,31 @@ fn upsert_keeps_the_search_registry_in_step() {
     assert_eq!(listed, vec!["read", "fresh"]);
     assert!(filter.lock().unwrap().is_empty(), "nothing force-loaded");
 }
+
+/// An MCP server that connects after boot cannot take a live addon tool's
+/// name: the installed tool keeps it, the arriving one is skipped and
+/// reported, and only the tools that did install join the MCP-name set.
+#[cfg(feature = "mcp")]
+#[test]
+fn a_late_mcp_tool_cannot_take_a_live_tool_name() {
+    use std::sync::Arc;
+
+    let mut agent = build_openai_any_agent();
+    agent.upsert_loop_tools("addon", vec![Arc::new(SourcedTool("shared", Some("addon")))]);
+
+    let skipped = agent.extend_loop_tools(vec![
+        Arc::new(SourcedTool("shared", Some("mcp"))),
+        Arc::new(SourcedTool("mcp_only", Some("mcp"))),
+        Arc::new(SourcedTool("mcp_only", Some("mcp"))),
+    ]);
+
+    assert_eq!(skipped, vec!["shared".to_string(), "mcp_only".to_string()]);
+    let live: Vec<(&str, Option<&str>)> = agent
+        .loop_tools
+        .iter()
+        .map(|t| (t.name(), t.source()))
+        .collect();
+    assert_eq!(live, vec![("shared", Some("addon")), ("mcp_only", Some("mcp"))]);
+    assert!(!agent.mcp_tool_names.contains("shared"));
+    assert!(agent.mcp_tool_names.contains("mcp_only"));
+}
