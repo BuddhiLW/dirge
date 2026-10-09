@@ -118,17 +118,23 @@ pub(crate) async fn guarded_within<T: Send + 'static>(
         out
     })
     .await;
-    if let Err(NoAnswer::TimedOut(_)) = &answer
-        && state
+    if let Err(NoAnswer::TimedOut(_)) = &answer {
+        // Abandon and trip under the breaker lock: work that returns right
+        // after the abandon sees ABANDONED, then waits on this lock, so its
+        // `drained_one` always follows the `trip` it undoes.
+        let mut open = lock(breaker);
+        if state
             .compare_exchange(RUNNING, ABANDONED, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
-        && lock(breaker).trip(Instant::now())
-    {
-        tracing::warn!(
-            target: "dirge::addon",
-            cooldown = ?COOLDOWN,
-            "an addon hook timed out; addon hooks are skipped until it returns or the cooldown passes"
-        );
+            && open.trip(Instant::now())
+        {
+            drop(open);
+            tracing::warn!(
+                target: "dirge::addon",
+                cooldown = ?COOLDOWN,
+                "an addon hook timed out; addon hooks are skipped until it returns or the cooldown passes"
+            );
+        }
     }
     answer
 }
