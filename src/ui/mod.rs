@@ -1655,6 +1655,10 @@ pub async fn run_interactive(
     // the latest model decides locally which keys and commands it owns.
     let (view_tx, mut view_rx) = mpsc::unbounded_channel::<crate::ui::view::ViewUpdate>();
     let mut view_model = crate::ui::view::start(view_tx, cfg.view_engine.as_deref());
+    // Key focus: false = the prompt owns typed keys (the default); true =
+    // the user handed them to the focused panel (`focus_panel`, Alt+P).
+    // `promote::focus_of` turns it plus the model into a `Focus`.
+    let mut panel_engaged = false;
     // Optional external panel feed (off by default). Its handle lives for
     // the loop; dropping it on exit stops the subscription task.
     let _panel_feed = crate::extras::panel_feed::start(cfg.panel_feed.as_ref());
@@ -2077,9 +2081,12 @@ pub async fn run_interactive(
                                 // Ctrl+C pass through. Decided from the model
                                 // alone; the loop never waits on the engine.
                                 if !from_sequence {
-                                    use crate::ui::view::promote::{KeyRoute, grid_event, route_key};
+                                    use crate::ui::view::promote::{
+                                        EditorMode, KeyRoute, focus_of, grid_event, route_key,
+                                    };
                                     let grid_open = view_model.swarm_open();
-                                    match route_key(&view_model, &key, action) {
+                                    let focus = focus_of(&view_model, panel_engaged);
+                                    match route_key(&view_model, &key, action, focus, EditorMode::Insert) {
                                         KeyRoute::Grid(name) if grid_open => {
                                             crate::ui::view::submit(grid_event(
                                                 name,
@@ -2094,6 +2101,15 @@ pub async fn run_interactive(
                                                 continue;
                                             }
                                             if grid_open { continue; }
+                                        }
+                                        KeyRoute::EnterPanel | KeyRoute::LeavePanel => {
+                                            panel_engaged = matches!(
+                                                route_key(&view_model, &key, action, focus, EditorMode::Insert),
+                                                KeyRoute::EnterPanel
+                                            );
+                                            renderer.set_panel_key_focus(panel_engaged);
+                                            renderer.request_repaint();
+                                            continue;
                                         }
                                         KeyRoute::Swallow if grid_open => continue,
                                         _ => {}
@@ -2767,6 +2783,9 @@ pub async fn run_interactive(
                                         }
                                         continue;
                                     }
+                                    // No panel claims keys: nothing to focus,
+                                    // and the chord must not reach the editor.
+                                    Some(KeyAction::FocusPanel) => continue,
                                     Some(KeyAction::ToggleSwarm) => {
                                         // Full-screen grid of the external
                                         // panels; the view engine toggles it.
@@ -4989,6 +5008,11 @@ pub async fn run_interactive(
                             }
                         }
                         view_model = update.model;
+                        // The panel let go of its keys: focus returns to the prompt.
+                        if panel_engaged && view_model.panel_keys.is_empty() {
+                            panel_engaged = false;
+                            renderer.set_panel_key_focus(false);
+                        }
                         renderer.request_repaint();
                     }
                     _ = async {

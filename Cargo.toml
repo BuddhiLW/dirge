@@ -456,6 +456,7 @@ cc = { version = "1.2", optional = true }
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 ctor = "1"
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 # Profiles tuned with cargo-wizard, then adjusted for dirge's constraints.
 #
