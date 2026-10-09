@@ -93,6 +93,12 @@ pub fn install_from_config(cfg: &crate::config::Config) {
         return;
     }
     let protocol = protocol_ns(&settings, &plan);
+    // The view runtime boots later and apart from the addon isolate; it
+    // requires each addon's `:dirge/view-ns` from these roots.
+    cljrs::view_addons::set(cljrs::view_addons::ViewAddons::from_manifests(
+        &plan.manifests,
+        &plan.source_roots,
+    ));
     match start_with(plan, harness(), &protocol, isolate_options(&settings)) {
         Ok(host) => {
             for failure in host.failures() {

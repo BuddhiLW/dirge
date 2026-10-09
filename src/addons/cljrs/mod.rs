@@ -6,6 +6,8 @@
 //! - `host.cljc`: the Clojure half of the host, embedded in the binary.
 //! - [`view_isolate`]: the view seam's reducer, `view.cljc`, on a runtime
 //!   and thread of its own.
+//! - [`view_addons`]: the addons' `:dirge/view-ns` namespaces that
+//!   reducer requires at boot.
 
 pub mod bridge;
 pub mod harness;
