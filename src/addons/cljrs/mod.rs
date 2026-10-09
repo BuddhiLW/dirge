@@ -12,6 +12,7 @@
 pub mod bridge;
 pub mod harness;
 pub mod isolate;
+pub mod view_addons;
 pub mod view_isolate;
 
 pub use isolate::Isolate;
