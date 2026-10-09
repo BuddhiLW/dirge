@@ -174,8 +174,9 @@ mod tests {
 
     #[test]
     fn reads_an_optional_view_namespace() {
-        let m = parse("{:addon/id a :addon/init-ns a.core :addon/init-fn ctor :dirge/view-ns a.view}")
-            .unwrap();
+        let m =
+            parse("{:addon/id a :addon/init-ns a.core :addon/init-fn ctor :dirge/view-ns a.view}")
+                .unwrap();
         assert_eq!(m.view_ns.as_deref(), Some("a.view"));
         assert!(matches!(
             parse("{:addon/id a :addon/init-ns a.core :addon/init-fn ctor :dirge/view-ns 1}"),

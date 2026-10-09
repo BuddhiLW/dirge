@@ -75,8 +75,9 @@ mod tests {
 
     /// A fixture addon: manifest with `:dirge/view-ns` and that namespace,
     /// which registers `/hello`, a grid key, and tries to take `/swarm`.
-    fn fixture() -> (TempDir, PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("dirge-view-addon-{}", std::process::id()));
+    fn fixture(tag: &str) -> (TempDir, PathBuf, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("dirge-view-addon-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let manifest = dir.join("hello/resources/META-INF/addons/hello.edn");
         write(
@@ -99,7 +100,7 @@ mod tests {
 
     #[test]
     fn reads_view_namespaces_from_manifests() {
-        let (_dir, manifest, src) = fixture();
+        let (_dir, manifest, src) = fixture("read");
         let addons = ViewAddons::from_manifests(&[manifest.clone(), manifest], &[src.clone()]);
         assert_eq!(addons.namespaces, vec!["hello.view".to_string()]);
         assert_eq!(addons.roots, vec![src]);
@@ -107,7 +108,7 @@ mod tests {
 
     #[test]
     fn a_fixture_addons_view_ns_is_loaded_and_hello_is_a_view_command() {
-        let (_dir, manifest, src) = fixture();
+        let (_dir, manifest, src) = fixture("boot");
         let addons = ViewAddons::from_manifests(&[manifest], &[src]);
         std::thread::Builder::new()
             .stack_size(ISOLATE_STACK_BYTES)
@@ -123,7 +124,10 @@ mod tests {
                     ViewEffect::Notify { level: NoticeLevel::Warn, text } if text.contains("swarm")
                 )));
                 let u = r.step(&ViewEvent::command("hello", &["a", "b"])).unwrap();
-                assert_eq!(u.effects, vec![ViewEffect::notify(NoticeLevel::Info, "hello 2")]);
+                assert_eq!(
+                    u.effects,
+                    vec![ViewEffect::notify(NoticeLevel::Info, "hello 2")]
+                );
                 // Built-in wins: /swarm still opens the grid.
                 let u = r.step(&ViewEvent::command("swarm", &["on"])).unwrap();
                 assert!(u.model.swarm_open());
@@ -143,7 +147,12 @@ mod tests {
             .stack_size(ISOLATE_STACK_BYTES)
             .spawn(move || {
                 let mut r = CljrsReducer::boot_with(addons).unwrap();
-                assert!(r.step(&ViewEvent::Init).unwrap().model.owns_command("swarm"));
+                assert!(
+                    r.step(&ViewEvent::Init)
+                        .unwrap()
+                        .model
+                        .owns_command("swarm")
+                );
             })
             .unwrap()
             .join()
