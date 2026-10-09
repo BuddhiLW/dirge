@@ -152,14 +152,10 @@ pub async fn pre_compact_open(subject: PreCompact, session_id: Option<String>) {
     }
 }
 
-/// [`pre_compact`] on the open-event registry, from synchronous code.
-pub fn pre_compact_blocking(subject: &PreCompact, session_id: Option<&str>) {
-    if let Some(hooks) = for_open_events() {
-        ignore_block(&pre_compact_on(&hooks, subject, session_id));
-    }
-}
-
 /// `PreCompact` for `subject` on `hooks`, every answer folded. Blocking.
+/// Production fires through [`pre_compact_open`]; the tests read the
+/// folded outcome here.
+#[cfg(test)]
 pub fn pre_compact_on(
     hooks: &CommandHooks,
     subject: &PreCompact,
