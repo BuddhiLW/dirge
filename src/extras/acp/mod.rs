@@ -1,6 +1,9 @@
 mod addon_seam;
 pub mod config;
+#[cfg(feature = "mcp")]
+pub mod mcp_servers;
 pub mod model_option;
+mod permission_forward;
 mod plan_update;
 
 use std::sync::Arc;
@@ -46,6 +49,11 @@ struct AcpSession {
     /// Session-scoped `/mode` override (ACP slash command). `None` falls back
     /// to the CLI/config-resolved security mode.
     mode_override: Option<SecurityMode>,
+    /// MCP servers the client declared in `session/new`, connected once for
+    /// the session and handed to every prompt's agent. `None` when the client
+    /// declared none, or the prompt arrived without a `session/new`.
+    #[cfg(feature = "mcp")]
+    mcp: Option<Arc<crate::extras::mcp::McpClientManager>>,
     /// Abort/cancel handles for the currently-running prompt, if any.
     run: Option<AcpRun>,
 }
@@ -110,6 +118,8 @@ async fn register_run(
         model_override: None,
         provider_override: None,
         mode_override: None,
+        #[cfg(feature = "mcp")]
+        mcp: None,
         run: None,
     });
     if let Some(prev) = entry.run.replace(run) {
@@ -294,6 +304,8 @@ async fn handle_initialize(
     let _ = state;
 
     let caps = AgentCapabilities::new();
+    #[cfg(feature = "mcp")]
+    let caps = caps.mcp_capabilities(mcp_servers::capabilities());
 
     // Addons advertise what they add to ACP (extension methods, say) here.
     let meta = addon_seam::meta("initialize", None, req.meta.as_ref(), None).await;
@@ -323,6 +335,9 @@ async fn handle_new_session(
     // across prompts (and store the client's cwd instead of dropping it).
     let provider = state.cli.resolve_provider(&state.cfg);
     let model = state.cli.resolve_model(&state.cfg).to_string();
+    // D4a: connect the MCP servers the client declared for this session.
+    #[cfg(feature = "mcp")]
+    let mcp = mcp_servers::connect(&req.mcp_servers).await;
     state.sessions.lock().await.insert(
         session_id.to_string(),
         AcpSession {
@@ -331,6 +346,8 @@ async fn handle_new_session(
             model_override: None,
             provider_override: None,
             mode_override: None,
+            #[cfg(feature = "mcp")]
+            mcp,
             run: None,
         },
     );
@@ -478,7 +495,8 @@ async fn run_prompt(
     let model_str = crate::provider::resolve_model_name(&client, &model_str, model_explicit);
     let model = client.completion_model(model_str.clone());
 
-    let (permission, ask_tx) = build_acp_permission(state, current_mode);
+    let (permission, ask_tx) =
+        build_acp_permission(state, current_mode, Some((cx.clone(), session_id.clone())));
     // Adversarial-review finding #2: ACP used to build its checker
     // and never install the active prompt's `deny_tools` list. Plan
     // mode (or any frontmatter deny) was a no-op for editor-side
@@ -498,6 +516,9 @@ async fn run_prompt(
     // so the lifecycle events drop on the floor; the LLM-side
     // pending-notification mechanism still works.
     let bg_store = crate::agent::tools::background::BackgroundStore::new();
+    // D4a: the session's client-declared MCP servers, if it declared any.
+    #[cfg(feature = "mcp")]
+    let session_mcp = mcp_servers::for_session(&state.sessions, &id_key).await;
     let agent = crate::provider::build_agent(
         model,
         &state.cli,
@@ -512,7 +533,7 @@ async fn run_prompt(
         None,
         sandbox,
         #[cfg(feature = "mcp")]
-        None::<&crate::extras::mcp::McpClientManager>,
+        session_mcp.as_deref(),
         #[cfg(feature = "semantic")]
         None::<&crate::semantic::SemanticManager>,
         // dirge-502b: ACP sessions identify themselves via the ACP
@@ -1272,6 +1293,7 @@ fn create_acp_client(
 fn build_acp_permission(
     state: &AcpState,
     mode: SecurityMode,
+    client: Option<(ConnectionTo<Client>, SessionId)>,
 ) -> (Option<PermCheck>, Option<AskSender>) {
     use std::sync::Mutex;
 
@@ -1291,7 +1313,15 @@ fn build_acp_permission(
     let perm: PermCheck = Arc::new(Mutex::new(checker));
 
     let (ask_tx, ask_rx) = tokio::sync::mpsc::channel(64);
-    spawn_acp_ask_drain(ask_rx);
+    // D4b: with a connected client, the client answers each ask.
+    match client {
+        Some((cx, sid)) => permission_forward::spawn_acp_ask_forwarder(
+            ask_rx,
+            sid,
+            permission_forward::client_port(cx),
+        ),
+        None => spawn_acp_ask_drain(ask_rx),
+    }
     (Some(perm), Some(ask_tx))
 }
 
@@ -1698,6 +1728,8 @@ mod tests {
                 model_override: None,
                 provider_override: None,
                 mode_override: None,
+                #[cfg(feature = "mcp")]
+                mcp: None,
                 run: None,
             },
         );
