@@ -34,6 +34,8 @@ pub mod turn_hooks;
 #[cfg(test)]
 mod acceptance_tests;
 #[cfg(test)]
+mod dispatch_tests;
+#[cfg(test)]
 mod live_tests;
 
 use std::path::PathBuf;
