@@ -17,6 +17,7 @@ pub mod discovery;
 pub mod domain;
 pub mod events;
 pub mod host;
+pub mod host_config;
 pub mod layout;
 pub mod lifecycle;
 pub mod live;
@@ -39,8 +40,6 @@ mod live_tests;
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-
-use serde_json::json;
 
 use cljrs::isolate::IsolateOptions;
 use domain::{AddonPlan, LoadFailure, ReloadReport};
@@ -92,6 +91,7 @@ pub fn install_from_config(cfg: &crate::config::Config) {
     if plan.is_empty() {
         return;
     }
+    live::publish_settings(&settings);
     let protocol = protocol_ns(&settings, &plan);
     match start_with(plan, harness(), &protocol, isolate_options(&settings)) {
         Ok(host) => {
@@ -131,7 +131,9 @@ pub fn reload(
         &extra_roots(settings),
         &manifest_dirs(settings),
     );
+    settings::publish(settings);
     if let Some(host) = global() {
+        host.set_host_config(host_wide_config(&settings::LiveConfig));
         let report = host.reload(load_set(&plan, true));
         register_commands(&host);
         return Ok((host, report));
@@ -179,14 +181,21 @@ pub fn start_with(
     if set.manifests.is_empty() {
         return Err(describe_failures(&set.failures));
     }
+    let config = harness.config.clone();
     let isolate = Arc::new(cljrs::Isolate::spawn(
         set.source_roots.clone(),
         harness,
         protocol_ns,
         options,
     )?);
-    let host_config = json!({ "harness": "dirge", "version": env!("CARGO_PKG_VERSION") });
-    Ok(AddonHost::load(isolate, set, host_config))
+    Ok(AddonHost::load(isolate, set, host_wide_config(config.as_ref())))
+}
+
+/// The host config every addon's `:dirge/host` is narrowed from: harness,
+/// version, working directory and the settings `config` holds now.
+fn host_wide_config(config: &dyn port::ConfigSource) -> serde_json::Value {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    host_config::host_wide(env!("CARGO_PKG_VERSION"), &cwd, config.settings())
 }
 
 /// What loading `plan` works from. `with_sources` lists the addons' own
@@ -245,6 +254,7 @@ fn harness() -> Harness {
     let tui = Arc::new(sink::TuiSink);
     let mut harness = Harness::with_sink(tui.clone());
     harness.panels = tui;
+    harness.config = Arc::new(settings::LiveConfig);
     #[cfg(feature = "plugin")]
     if let Some(live) = tool_calls::LoopTools::live() {
         harness.tools = Arc::new(live);

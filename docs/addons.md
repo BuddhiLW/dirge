@@ -111,6 +111,19 @@ implements when that is not `hive-addon.protocol`.
 `init-fn` is called with `:addon/config` and must return an addon. dirge then
 calls `initialize!` with `{:addon/id … :addon/config … :dirge/host {…}}`.
 
+`:dirge/host` is `{:harness "dirge" :version … :cwd … :config {…}}`. `:config`
+is the addon's own entry under `addons.settings` in `config.json`, keyed by
+addon id (`{}` when there is none); an addon never sees another addon's
+entry. `:addon/config` ships with the addon; `addons.settings` is what the
+user sets:
+
+```json
+{ "addons": { "settings": { "my.addon": { "greeting": "hi" } } } }
+```
+
+`/addons reload` reads the settings again. At any time an addon can read them
+with `(dirge.harness/config "my.addon")`.
+
 ## Tools
 
 Every entry of `(tools addon)` becomes a tool the model can call:
@@ -340,6 +353,7 @@ The `dirge.harness` namespace is available to addon code:
 | `(mcp-servers)` | names of the MCP servers dirge is connected to |
 | `(mcp-call server tool)` / `(mcp-call server tool args)` | call an MCP tool over dirge's own connection |
 | `(json-parse text)` | JSON text as data (keyword keys), or `nil` |
+| `(config id)` / `(config)` | the `addons.settings` entry of addon `id` (keyword keys, `{}` when absent), or every addon's settings keyed by id |
 
 `panel` takes one of:
 

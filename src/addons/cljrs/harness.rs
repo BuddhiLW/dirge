@@ -11,7 +11,7 @@ use serde_json::{Value as Json, json};
 
 use super::bridge;
 use crate::addons::policy;
-use crate::addons::port::{Harness, Level};
+use crate::addons::port::{Harness, Level, addon_settings};
 
 /// Namespace addon code requires to reach dirge.
 pub const HARNESS_NS: &str = "dirge.harness";
@@ -59,6 +59,10 @@ const BLOCKED_CALL_TOOL: &str = "call-tool is unavailable while dirge waits on t
 /// - `(refresh!)`: once the current call returns, ask every addon again for
 ///   its tools, hooks and commands, without shutting it down, and hand the
 ///   changes to the running agent. For definitions changed at a REPL.
+/// - `(config addon-id)`: the settings the user wrote for `addon-id` under
+///   `addons.settings` in `config.json` (keyword keys), or `{}` when there
+///   are none. `(config)` answers every addon's settings keyed by id. Read
+///   through the harness's `ConfigSource` at call time.
 pub fn install(
     globals: &Arc<GlobalEnv>,
     harness: Harness,
@@ -70,7 +74,16 @@ pub fn install(
         panels,
         mcp,
         tools,
+        config,
     } = harness;
+    define(globals, "config", Arity::Variadic { min: 0 }, move |args| {
+        let settings = config.settings();
+        let answer = match args.first() {
+            Some(id) => addon_settings(&settings, &text(id)),
+            None => Json::Object(settings),
+        };
+        Ok(bridge::to_clj(&answer))
+    });
     define(globals, "notify", Arity::Variadic { min: 1 }, move |args| {
         let level = args.get(1).map_or(Level::Info, level_of);
         sink.notify(level, &text(&args[0]));

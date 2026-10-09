@@ -122,6 +122,32 @@ pub trait ToolGateway: Send + Sync + 'static {
     fn call(&self, tool: &str, args: &Value) -> Result<String, String>;
 }
 
+/// The per-addon settings the user wrote under `addons.settings` in
+/// `config.json`, as `dirge.harness/config` and `:dirge/host :config` read
+/// them. Answers are read at call time, so an adapter may change underneath.
+pub trait ConfigSource: Send + Sync + 'static {
+    /// Every addon's settings, keyed by addon id.
+    fn settings(&self) -> serde_json::Map<String, Value>;
+}
+
+/// The settings of `addon_id` in `settings`: its entry, or an empty map
+/// when it has none.
+pub fn addon_settings(settings: &serde_json::Map<String, Value>, addon_id: &str) -> Value {
+    settings
+        .get(addon_id)
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Default::default()))
+}
+
+/// A host without addon settings.
+pub struct NoConfig;
+
+impl ConfigSource for NoConfig {
+    fn settings(&self) -> serde_json::Map<String, Value> {
+        serde_json::Map::new()
+    }
+}
+
 /// Everything the `dirge.harness` natives reach, injected when the runtime
 /// boots.
 #[derive(Clone)]
@@ -130,16 +156,19 @@ pub struct Harness {
     pub panels: Arc<dyn PanelSink>,
     pub mcp: Arc<dyn McpGateway>,
     pub tools: Arc<dyn ToolGateway>,
+    pub config: Arc<dyn ConfigSource>,
 }
 
 impl Harness {
-    /// Notifications to `sink`; no panels, no MCP servers, no tools.
+    /// Notifications to `sink`; no panels, no MCP servers, no tools, no
+    /// addon settings.
     pub fn with_sink(sink: Arc<dyn HarnessSink>) -> Self {
         Self {
             sink,
             panels: Arc::new(NoPanels),
             mcp: Arc::new(NoMcp),
             tools: Arc::new(NoTools),
+            config: Arc::new(NoConfig),
         }
     }
 }
@@ -220,7 +249,19 @@ pub trait HarnessSink: Send + Sync + 'static {
 
 #[cfg(test)]
 mod tests {
-    use super::{Level, ToolGateway, ToolsUnavailable};
+    use super::{ConfigSource, Level, NoConfig, ToolGateway, ToolsUnavailable, addon_settings};
+
+    #[test]
+    fn an_addon_without_settings_reads_an_empty_map() {
+        let mut settings = serde_json::Map::new();
+        settings.insert("echo".into(), serde_json::json!({"greeting": "hi"}));
+        assert_eq!(
+            addon_settings(&settings, "echo"),
+            serde_json::json!({"greeting": "hi"})
+        );
+        assert_eq!(addon_settings(&settings, "other"), serde_json::json!({}));
+        assert!(NoConfig.settings().is_empty());
+    }
 
     #[test]
     fn unavailable_tools_offer_nothing_and_answer_why() {

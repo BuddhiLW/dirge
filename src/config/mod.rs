@@ -749,6 +749,10 @@ pub struct AddonsConfig {
     /// and `:dirge/should-stop-after-turn` call waits for its answer before
     /// the loop goes on without it. Default 10.
     pub turn_timeout_secs: Option<u64>,
+    /// Each addon's own settings, keyed by addon id. An addon reads its
+    /// entry as `:config` of the `:dirge/host` map `initialize!` receives,
+    /// and at any time with `(dirge.harness/config "<id>")`. Absent = `{}`.
+    pub settings: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The `addons.nrepl` key.

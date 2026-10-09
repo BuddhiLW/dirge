@@ -10,7 +10,9 @@ use serde_json::{Value, json};
 use super::cljrs::isolate::BUSY;
 use super::discovery;
 use super::domain::{HookPoint, PanelRequest};
-use super::port::{Harness, HarnessSink, Level, McpGateway, NoTools, PanelSink, ToolGateway};
+use super::port::{
+    ConfigSource, Harness, HarnessSink, Level, McpGateway, NoTools, PanelSink, ToolGateway,
+};
 
 #[derive(Default)]
 struct RecordingSink(Mutex<Vec<(Level, String)>>);
@@ -395,6 +397,35 @@ fn addon_commands_call_dirge_tools_through_the_harness() {
         "refused on the event-loop thread"
     );
     assert_eq!(tools.0.lock().unwrap().len(), 2, "gateway not reached");
+    host.shutdown();
+}
+
+/// Settings the test hands the host, as `config.json` would.
+struct StubConfig(serde_json::Map<String, Value>);
+
+impl ConfigSource for StubConfig {
+    fn settings(&self) -> serde_json::Map<String, Value> {
+        self.0.clone()
+    }
+}
+
+#[test]
+fn an_addon_reads_its_own_settings_at_init_and_through_the_harness() {
+    let mut settings = serde_json::Map::new();
+    settings.insert("settings".into(), json!({"greeting": "hi"}));
+    settings.insert("other".into(), json!({"hidden": true}));
+    let mut harness = Harness::with_sink(Arc::new(RecordingSink::default()));
+    harness.config = Arc::new(StubConfig(settings));
+    let host =
+        super::start(echo_plan(&fixtures().join("settings")), harness, PROTOCOL)
+            .expect("host starts");
+    let cmd = host.command("settings").expect("settings registered");
+
+    let out = host.run_command(&cmd, "").expect("settings runs");
+    assert_eq!(
+        out.text.as_deref(),
+        Some(r#"live={:greeting "hi"} host={:greeting "hi"}"#)
+    );
     host.shutdown();
 }
 
