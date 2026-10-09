@@ -41,7 +41,7 @@ pub(crate) const PROTOCOL_SRC: &str = include_str!("vendor/hive_addon/protocol.c
 
 /// The `dirge.addon.host` functions dirge calls. A host overlay may
 /// redefine any of them but must leave each one a function.
-const HOST_CONTRACT: [&str; 10] = [
+const HOST_CONTRACT: [&str; 11] = [
     "use-protocol!",
     "load-addon!",
     "shutdown-addon!",
@@ -51,6 +51,7 @@ const HOST_CONTRACT: [&str; 10] = [
     "run-command",
     "run-hook",
     "run-hook-handler",
+    "emit-fold",
     "shutdown-all!",
 ];
 

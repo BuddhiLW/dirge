@@ -609,7 +609,7 @@ evaluated over the ones before it, in root order.
 
 dirge calls `use-protocol!`, `load-addon!`, `shutdown-addon!`,
 `reload-sources!`, `refresh!`, `call-tool`, `run-command`, `run-hook`,
-`run-hook-handler` and `shutdown-all!`. An overlay may redefine any of them,
+`run-hook-handler`, `emit-fold` and `shutdown-all!`. An overlay may redefine any of them,
 but each must still be a function afterwards. An overlay that fails to load,
 or that leaves one of them without a function, is undone whole, and the
 reason is logged at start and listed among the reload's source errors.
