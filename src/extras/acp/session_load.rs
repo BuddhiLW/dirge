@@ -22,7 +22,7 @@ pub(super) fn stored_session(provider: &str, model: &str, acp_id: &str) -> Sessi
 
 /// Where replayed history goes: the client connection in production, a
 /// recorder in tests.
-pub(super) trait UpdateSink {
+pub(super) trait UpdateSink: Send + Sync {
     fn send(&self, notification: SessionNotification);
 }
 
@@ -168,8 +168,6 @@ mod tests {
             store,
             &SessionId::new(id.to_string()),
             PathBuf::from("/work"),
-            #[cfg(feature = "mcp")]
-            None,
             client,
         )
         .await
