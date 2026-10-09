@@ -47,7 +47,10 @@ impl SessionStore for FileSessionStore {
 
 /// Load `id` through `store`. An unknown id is `resource_not_found`; a store
 /// failure (bad id, unreadable file) is `invalid_params` carrying the reason.
-pub fn restore(store: &dyn SessionStore, id: &str) -> Result<Session, agent_client_protocol::Error> {
+pub fn restore(
+    store: &dyn SessionStore,
+    id: &str,
+) -> Result<Session, agent_client_protocol::Error> {
     match store.load(id) {
         Ok(Some(session)) => Ok(session),
         Ok(None) => Err(agent_client_protocol::Error::resource_not_found(Some(

@@ -100,8 +100,14 @@ pub(super) async fn handle_load_session(
         req.session_id,
         req.cwd.display()
     );
-    if let Err(err) =
-        load_and_replay(&state.sessions, store, &req.session_id, req.cwd.clone(), &cx).await
+    if let Err(err) = load_and_replay(
+        &state.sessions,
+        store,
+        &req.session_id,
+        req.cwd.clone(),
+        &cx,
+    )
+    .await
     {
         return responder.respond_with_error(err);
     }
@@ -109,7 +115,12 @@ pub(super) async fn handle_load_session(
     #[cfg(feature = "mcp")]
     {
         let mcp = super::mcp_servers::connect(&req.mcp_servers).await;
-        if let Some(s) = state.sessions.lock().await.get_mut(&req.session_id.to_string()) {
+        if let Some(s) = state
+            .sessions
+            .lock()
+            .await
+            .get_mut(&req.session_id.to_string())
+        {
             s.mcp = mcp;
         }
     }
