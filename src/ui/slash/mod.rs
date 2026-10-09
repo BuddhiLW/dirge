@@ -211,6 +211,10 @@ pub(crate) struct CompactionRequest {
     pub cut_idx: usize,
     /// Token cost of the dropped prefix — for the net-savings check on install.
     pub tokens_before: u64,
+    /// The `PreCompact` event the spawned task fires before the summarizer.
+    pub pre_compact: PreCompact,
+    /// The session the `PreCompact` payload names.
+    pub session_id: Option<String>,
 }
 
 pub(crate) struct PruneOnlyCompactionRequest {
@@ -347,8 +351,11 @@ pub(crate) fn prepare_compaction(
         return Ok(CompactionDecision::NoOp);
     }
 
-    let subject = PreCompact::new(trigger, instructions);
-    command_hooks::pre_compact_blocking(&subject, Some(session.id.as_ref()));
+    // PreCompact fires in the spawned half (crate::ui::compaction::spawn),
+    // before the summarizer call: a slow hook or addon listener must not
+    // freeze this single-threaded loop.
+    let pre_compact = PreCompact::new(trigger, instructions);
+    let session_id = Some(session.id.as_ref().to_string());
 
     let messages_to_summarize = &session.messages[..cut_idx];
     let previous_summary = session.compactions.last().map(|c| c.summary.as_str());
@@ -391,6 +398,8 @@ pub(crate) fn prepare_compaction(
         prompt,
         cut_idx,
         tokens_before,
+        pre_compact,
+        session_id,
     })))
 }
 

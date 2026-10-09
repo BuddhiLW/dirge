@@ -143,6 +143,15 @@ pub async fn pre_compact(
     ignore_block(&hooks.run_async(event, targets, payload).await);
 }
 
+/// [`pre_compact`] on the open-event registry, off the calling executor: a
+/// slow hook or addon listener holds a blocking-pool thread, never the
+/// single-threaded UI loop that awaits this. No-op when nothing listens.
+pub async fn pre_compact_open(subject: PreCompact, session_id: Option<String>) {
+    if let Some(hooks) = for_open_events() {
+        pre_compact(hooks, subject, session_id).await;
+    }
+}
+
 /// [`pre_compact`] on the open-event registry, from synchronous code.
 pub fn pre_compact_blocking(subject: &PreCompact, session_id: Option<&str>) {
     if let Some(hooks) = for_open_events() {
