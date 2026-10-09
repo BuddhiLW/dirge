@@ -5,8 +5,13 @@ pub mod mcp_servers;
 pub mod model_option;
 mod permission_forward;
 mod plan_update;
+mod session_load;
+mod session_store;
 
 use std::sync::Arc;
+
+use self::session_load::{handle_load_session, persist_session};
+use self::session_store::{FileSessionStore, SessionStore};
 
 use agent_client_protocol::schema::v1::*;
 use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Responder, Stdio};
@@ -113,7 +118,7 @@ async fn register_run(
     run.generation = generation;
     let mut map = sessions.lock().await;
     let entry = map.entry(id.to_string()).or_insert_with(|| AcpSession {
-        session: Session::new(provider, model, 0),
+        session: session_load::stored_session(provider, model, id),
         cwd: std::env::current_dir().unwrap_or_default(),
         model_override: None,
         provider_override: None,
@@ -187,14 +192,23 @@ struct AcpState {
     cfg: Config,
     context: ContextFiles,
     sessions: SessionMap,
+    /// D3: where sessions persist. `None` under `--no-session`, and then
+    /// `loadSession` is not advertised.
+    store: Option<Arc<dyn SessionStore>>,
 }
 
 pub async fn serve(cli: Cli, cfg: Config, context: ContextFiles) -> anyhow::Result<()> {
+    let store: Option<Arc<dyn SessionStore>> = if cli.no_session {
+        None
+    } else {
+        Some(Arc::new(FileSessionStore))
+    };
     let state = Arc::new(AcpState {
         cli,
         cfg,
         context,
         sessions: tokio::sync::Mutex::new(HashMap::new()),
+        store,
     });
 
     Agent
@@ -216,6 +230,16 @@ pub async fn serve(cli: Cli, cfg: Config, context: ContextFiles) -> anyhow::Resu
                 move |req: NewSessionRequest, responder, cx| {
                     let state = state.clone();
                     async move { handle_new_session(req, responder, cx, &state).await }
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let state = state.clone();
+                move |req: LoadSessionRequest, responder, cx| {
+                    let state = state.clone();
+                    async move { handle_load_session(req, responder, cx, &state).await }
                 }
             },
             on_receive_request!(),
@@ -301,9 +325,8 @@ async fn handle_initialize(
     responder: Responder<InitializeResponse>,
     state: &AcpState,
 ) -> Result<(), agent_client_protocol::Error> {
-    let _ = state;
-
-    let caps = AgentCapabilities::new();
+    // D3: `session/load` works only when sessions persist.
+    let caps = AgentCapabilities::new().load_session(state.store.is_some());
     #[cfg(feature = "mcp")]
     let caps = caps.mcp_capabilities(mcp_servers::capabilities());
 
@@ -341,7 +364,7 @@ async fn handle_new_session(
     state.sessions.lock().await.insert(
         session_id.to_string(),
         AcpSession {
-            session: Session::new(&provider, &model, 0),
+            session: session_load::stored_session(&provider, &model, &session_id.0),
             cwd: req.cwd.clone(),
             model_override: None,
             provider_override: None,
@@ -799,6 +822,7 @@ async fn run_prompt(
         turn_tool_calls,
     )
     .await;
+    persist_session(&state.sessions, state.store.as_deref(), &id_key).await;
 
     // The ACP spec requires `Cancelled` when the client sent `session/cancel`,
     // even though the aborted runner just closed its channel without a `Done`.
