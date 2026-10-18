@@ -299,6 +299,11 @@ pub fn cargo_directives(probe: &Probe) -> Vec<String> {
         Some(krun_dir) => {
             out.push(format!("cargo:rustc-link-search=native={krun_dir}"));
             out.push("cargo:rustc-link-lib=krun".to_string());
+            // `rustc-link-lib` is scoped to the package's lib target (a
+            // cdylib + rlib), so the standalone runner bin never receives
+            // `-lkrun` transitively and fails with undefined `krun_*`
+            // symbols. Push it onto the runner's link line explicitly.
+            out.push("cargo:rustc-link-arg-bin=dirge-microvm-runner=-lkrun".to_string());
             out.push(format!(
                 "cargo:rustc-link-arg-bin=dirge-microvm-runner=-Wl,-rpath,{krun_dir}"
             ));
@@ -440,6 +445,21 @@ mod tests {
                 &"cargo:rustc-link-arg-bin=dirge-microvm-runner=-Wl,-rpath,/opt/homebrew/lib"
                     .to_string()
             )
+        );
+    }
+
+    /// The runner bin calls the `krun_*` C ABI directly, so `-lkrun` must
+    /// reach its own link line. Plain `rustc-link-lib` only reaches the
+    /// package's lib target once one exists, and `dirge_agent` (cdylib +
+    /// rlib) has existed since the wasm work — so the runner stopped
+    /// receiving `-lkrun` and failed to link with undefined `krun_*` symbols.
+    #[test]
+    fn runner_bin_gets_the_link_flag_directly() {
+        let directives = cargo_directives(&probe(Some("/opt/homebrew/lib"), None));
+        assert!(
+            directives
+                .contains(&"cargo:rustc-link-arg-bin=dirge-microvm-runner=-lkrun".to_string()),
+            "the runner bin must receive -lkrun on its own link line: {directives:?}"
         );
     }
 
