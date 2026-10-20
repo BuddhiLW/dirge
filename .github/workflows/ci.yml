@@ -99,7 +99,7 @@ jobs:
           java-version: "21"
 
       - name: Install Clojure CLI
-        uses: DeLaGoldo/setup-clojure@13.4
+        uses: DeLaGuardo/setup-clojure@13.4
         with:
           cli: latest
 
