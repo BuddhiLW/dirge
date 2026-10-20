@@ -574,6 +574,8 @@ async fn main() -> anyhow::Result<()> {
             cli::Command::Sandbox { .. } => {}
             #[cfg(feature = "mcp-server")]
             cli::Command::Mcp { .. } => {}
+            #[cfg(feature = "vigil")]
+            cli::Command::Vigil { .. } => {}
         }
     }
 
@@ -748,6 +750,11 @@ async fn main() -> anyhow::Result<()> {
             #[cfg(feature = "mcp-server")]
             cli::Command::Mcp { model, sandbox } => {
                 return extras::mcp_server::serve(&cli, &cfg, model.clone(), sandbox.clone()).await;
+            }
+            #[cfg(feature = "vigil")]
+            cli::Command::Vigil { action } => {
+                handle_vigil_command(action, &cfg)?;
+                return Ok(());
             }
         }
     }
@@ -1038,6 +1045,27 @@ async fn main() -> anyhow::Result<()> {
     if let Some(pm_arc) = plugin_manager.as_ref() {
         plugin::hook::init_global(pm_arc.clone());
     }
+    // Install the issue store for the Janet issue bridge (harness/emit-issue).
+    // Opened once here and shared with the worker thread; IssueStore is a
+    // Mutex<Connection> with a busy timeout, so concurrent session-persistence
+    // writes yield instead of erroring. Skipped when plugin support is off
+    // (the bridge CFn is never registered then, so the store would be unused).
+    #[cfg(feature = "plugin")]
+    if plugin_manager.is_some() {
+        let paths = crate::extras::dirge_paths::ProjectPaths::new(
+            &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        );
+        match crate::extras::issue_db::IssueStore::open(&paths) {
+            Ok(store) => {
+                crate::plugin::worker::issue_bridge::install_issue_store(std::sync::Arc::new(
+                    store,
+                ));
+            }
+            Err(e) => {
+                eprintln!("warning: issue bridge disabled ({e})");
+            }
+        }
+    }
     // Pull the dialog-request receiver out of the PluginManager once,
     // here, so we can hand it to the UI loop. After this point, calling
     // take_dialog_rx again returns None — single owner by design. Always
@@ -1131,8 +1159,15 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            for entry in entries.flatten() {
-                let path = entry.path();
+            // Deterministic load order: read_dir yields filesystem-dependent
+            // order, but a single-file plugin can depend on a sibling loading
+            // first (lev_vigilmode.janet needs lev_classify.janet's
+            // lev/classify-many). Sort by path to match the directory plugin
+            // loader's alphabetical sort (loader.rs) and the
+            // validate_all_plugins_compile test.
+            let mut plugin_paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+            plugin_paths.sort();
+            for path in plugin_paths {
                 // A plugin is either:
                 //   - a single `.janet` file (legacy)
                 //   - a directory whose name is the plugin id and whose
@@ -1824,7 +1859,7 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
                 match exit {
-                    HeadlessLoopExit::MaxIterations => {
+                    HeadlessLoopExit::MaxIterations | HeadlessLoopExit::BoardDrained => {
                         // dirge-jmc9: fire on_session_end before
                         // returning from --loop mode. session.messages
                         // is typically empty here (run_print doesn't
@@ -2058,6 +2093,229 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(not(feature = "mcp"))]
         let mcp_wake_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>> = None;
 
+        // Vigil: start the vigil-keeper and wire its wake channel.
+        // The keeper owns the background reaper and trigger tasks; we hold
+        // onto it so it stays alive while the observance/hook receivers are
+        // handed to the headless --vigil-once driver below.
+        #[cfg(feature = "vigil")]
+        let (mut _vigil_keeper, vigil_wake_rx, mut vigil_observance_rx, vigil_ctl_tx) = {
+            if !cli.vigil_mode && !cli.vigil_once {
+                (None, None, None, None)
+            } else {
+                // Merge config vigils with --vigil-config file entries (if any).
+                let mut entries = if let Some(cfg_entries) = cfg.vigils.as_ref() {
+                    cfg_entries.clone()
+                } else {
+                    vec![]
+                };
+                if let Some(ref config_path) = cli.vigil_config {
+                    if config_path.exists() {
+                        match std::fs::read_to_string(config_path) {
+                            Ok(json_str) => {
+                                match serde_json::from_str::<Vec<crate::config::VigilEntry>>(
+                                    &json_str,
+                                ) {
+                                    Ok(file_entries) => {
+                                        for fe in file_entries {
+                                            if !entries.iter().any(|e| e.name == fe.name) {
+                                                entries.push(fe);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "warning: --vigil-config file has invalid JSON: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("warning: cannot read --vigil-config file: {e}");
+                            }
+                        }
+                    } else {
+                        eprintln!(
+                            "warning: --vigil-config file not found: {}",
+                            config_path.display()
+                        );
+                    }
+                }
+
+                let paused_names = {
+                    let paths = crate::extras::dirge_paths::ProjectPaths::new(
+                        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                    );
+                    let db_path = paths.session_db_path();
+                    if db_path.exists() {
+                        match crate::extras::vigil_db::VigilStore::open_at(&db_path) {
+                            Ok(store) => store
+                                .list_non_resting()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter(|r| {
+                                    matches!(r.status, crate::extras::vigil_db::VigilStatus::Paused)
+                                })
+                                .map(|r| r.name)
+                                .collect::<std::collections::HashSet<_>>(),
+                            Err(_) => std::collections::HashSet::new(),
+                        }
+                    } else {
+                        std::collections::HashSet::new()
+                    }
+                };
+                match crate::extras::vigil::VigilKeeper::from_config_and_filesystem(
+                    entries.clone(),
+                    paused_names,
+                ) {
+                    Ok(mut keeper) => {
+                        if keeper.vigils.is_empty() {
+                            eprintln!("warning: --vigil set but no vigils configured");
+                            (None, None, None, None)
+                        } else {
+                            let n = keeper.vigils.len();
+                            #[cfg(feature = "plugin")]
+                            {
+                                if let Some(ref vig_tx) = keeper.vigil_plugin_tx {
+                                    crate::plugin::worker::vigil_bridge::install_vigil_tx(
+                                        vig_tx.clone(),
+                                    );
+                                }
+                                let names: Vec<String> =
+                                    keeper.vigils.iter().map(|v| v.name.clone()).collect();
+                                crate::plugin::worker::vigil_bridge::install_vigil_names(names);
+                                // Enable the synchronous rite gate only when a
+                                // plugin registered `on-vigil-rite`.
+                                if let Some(pm_arc) = plugin_manager.as_ref()
+                                    && pm_arc.lock_ignore_poison().has_hook("on-vigil-rite")
+                                {
+                                    keeper
+                                        .rite_gate_enabled
+                                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                // Enable the filter/enrich stage only when a
+                                // plugin registered `on-vigil-enrich`.
+                                if let Some(pm_arc) = plugin_manager.as_ref()
+                                    && pm_arc.lock_ignore_poison().has_hook("on-vigil-enrich")
+                                {
+                                    keeper
+                                        .enrich_enabled
+                                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
+                            eprintln!("info: vigil-keeper started with {n} vigil(s)");
+                            let wake = keeper.wake_rx.take();
+                            let obs = keeper.observance_rx.take();
+                            let ctl = keeper.ctl_tx.clone();
+                            // Spawn the dedicated hook drainer so hook dispatch
+                            // (including the synchronous on-vigil-rite gate) is
+                            // decoupled from the UI loop and works headless.
+                            if let Some(hook_rx) = keeper.hook_rx.take() {
+                                #[cfg(feature = "plugin")]
+                                {
+                                    crate::extras::vigil::spawn_hook_drainer(
+                                        hook_rx,
+                                        plugin_manager.clone(),
+                                    );
+                                }
+                                #[cfg(not(feature = "plugin"))]
+                                {
+                                    crate::extras::vigil::spawn_hook_drainer(hook_rx);
+                                }
+                            }
+                            (Some(keeper), wake, obs, ctl)
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("warning: vigil-keeper failed to start: {e}");
+                        (None, None, None, None)
+                    }
+                }
+            }
+        };
+        // Headless vigil: wait for a single observance, run one agent turn
+        // on its prompt, dispatch on-vigil-observance, then exit. Mirrors the
+        // --loop headless driver but keyed off the vigil-keeper instead of a
+        // LOOP_PLAN iteration.
+        #[cfg(feature = "vigil")]
+        if cli.vigil_once {
+            let rx = vigil_observance_rx
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("--vigil-once requires an active vigil-keeper"))?;
+            // Run the named poll command now that the vigil bridge is live so
+            // its (vigil/emit ...) lands in the keeper's queue before we wait.
+            #[cfg(feature = "plugin")]
+            if let Some(cmd) = cli.vigil_once_command.as_deref()
+                && let Some(pm_arc) = plugin_manager.as_ref()
+            {
+                let cmd = cmd.to_string();
+                let pm = pm_arc.clone();
+                match tokio::task::spawn_blocking(move || {
+                    let mut mgr = pm.lock_ignore_poison();
+                    let handler = mgr
+                        .list_commands()
+                        .into_iter()
+                        .find(|(name, _)| name == &cmd)
+                        .map(|(_, handler)| handler)
+                        .unwrap_or_else(|| cmd.clone());
+                    mgr.invoke_command(&handler, "")
+                })
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => eprintln!("warning: vigil poll command failed: {e}"),
+                    Err(e) => eprintln!("warning: vigil poll command panicked: {e}"),
+                }
+            }
+            // Reap fires at the vigil's reap_interval boundary (up to 60s in
+            // the fixtures); allow several windows before declaring a timeout.
+            let obs = match tokio::time::timeout(std::time::Duration::from_secs(180), rx.recv())
+                .await
+            {
+                Ok(Some(obs)) => obs,
+                Ok(None) => {
+                    anyhow::bail!("vigil: observance channel closed before an observance arrived")
+                }
+                Err(_) => anyhow::bail!("vigil: timed out after 180s waiting for an observance"),
+            };
+            let prompt = if obs.prompt.is_empty() {
+                format!("[vigil] {} - {} event(s)", obs.vigil_name, obs.event_count)
+            } else {
+                obs.prompt.clone()
+            };
+            eprintln!(
+                "info: vigil observance for '{}' ({} event(s))",
+                obs.vigil_name, obs.event_count
+            );
+            let (response, _tool_calls, _usage) = agent
+                .run_print(
+                    &prompt,
+                    cli.resolve_max_agent_turns(&cfg),
+                    cli.output_format,
+                    Vec::new(),
+                )
+                .await?;
+            // Release the in-flight flag so a future reap isn't skipped if
+            // the keeper outlives this one-shot turn.
+            obs.running
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            #[cfg(feature = "plugin")]
+            if let Some(pm_arc) = plugin_manager.as_ref() {
+                let signal =
+                    serde_json::to_string(&obs.context).unwrap_or_else(|_| "{}".to_string());
+                crate::extras::vigil::dispatch_observance_and_act(
+                    pm_arc,
+                    &obs.vigil_name,
+                    obs.event_count,
+                    &response,
+                    &signal,
+                )
+                .await;
+            }
+
+            crate::agent::tools::bg_shell::global().kill_all();
+            return Ok(());
+        }
+
         ui::run_interactive(
             client,
             agent,
@@ -2089,6 +2347,12 @@ async fn main() -> anyhow::Result<()> {
             dialog_rx,
             subagent_chat_rx,
             sysload,
+            #[cfg(feature = "vigil")]
+            vigil_wake_rx,
+            #[cfg(feature = "vigil")]
+            vigil_observance_rx,
+            #[cfg(feature = "vigil")]
+            vigil_ctl_tx,
         )
         .await?;
 
@@ -2139,15 +2403,17 @@ async fn main() -> anyhow::Result<()> {
 /// How a single run of [`run_headless_loop`] ended.
 ///
 /// `MaxIterations` is the normal terminal state (or non-recoverable
-/// iteration error). `ModelSwap` is only returned when a plugin
-/// called `harness/set-next-model` from `prepare-next-run` — the
-/// caller is expected to rebuild the agent with the requested model
+/// iteration error). `BoardDrained` is returned only when `--loop-drain`
+/// is set and the live issue board is empty. `ModelSwap` is only returned
+/// when a plugin called `harness/set-next-model` from `prepare-next-run` —
+/// the caller is expected to rebuild the agent with the requested model
 /// and re-invoke `run_headless_loop` with the same mutable state /
 /// session id so iteration counting and the transcript continue
 /// seamlessly across the swap.
 #[cfg(feature = "loop")]
 enum HeadlessLoopExit {
     MaxIterations,
+    BoardDrained,
     #[cfg(feature = "plugin")]
     ModelSwap(String),
 }
@@ -2165,7 +2431,42 @@ async fn run_headless_loop(
 ) -> anyhow::Result<HeadlessLoopExit> {
     use crate::extras::r#loop as loop_mod;
 
+    // --loop-drain: stop once the live issue board is empty. Open it once
+    // here and re-check at the top of every iteration — a vigil emit-issue
+    // upsert and the agent's issue tool write the same table.
+    let board_store = if cli.loop_drain {
+        let paths = crate::extras::dirge_paths::ProjectPaths::new(
+            &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        );
+        match crate::extras::issue_db::IssueStore::open(&paths) {
+            Ok(store) => Some(store),
+            Err(e) => {
+                eprintln!(
+                    "[loop] warning: --loop-drain cannot open the issue board ({e}); falling back to --loop-max only"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     loop {
+        // `board_store` is `Some` only when `--loop-drain` was set and the
+        // board opened successfully, so this doubles as the flag guard.
+        if let Some(store) = &board_store {
+            match store.board(None) {
+                Ok(board) if board.is_empty() => {
+                    eprintln!("[loop] live issue board is empty, draining complete, stopping");
+                    return Ok(HeadlessLoopExit::BoardDrained);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("[loop] warning: failed to read the issue board ({e})");
+                }
+            }
+        }
+
         // dirge-vpma.15: next_iteration checks the max BEFORE incrementing,
         // so --loop-max N runs exactly N iterations (was N-1).
         if !state.next_iteration() {
@@ -2726,4 +3027,283 @@ mod resume_staleness_tests {
             "expected no warnings, got {warnings:?}"
         );
     }
+}
+
+/// Handle `dirge vigil add/list/remove/pause/resume/rest` subcommands.
+#[cfg(feature = "vigil")]
+fn handle_vigil_command(
+    action: &crate::cli::VigilAction,
+    cfg: &config::Config,
+) -> anyhow::Result<()> {
+    use crate::extras::dirge_paths::ProjectPaths;
+    use crate::extras::vigil_db::{VigilStatus, VigilStore};
+
+    let paths = ProjectPaths::new(
+        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    );
+
+    match action {
+        crate::cli::VigilAction::List => {
+            let vigils = collect_vigils_for_list(&paths, cfg.vigils.clone().unwrap_or_default());
+            println!("Vigils:");
+            for (v, status) in &vigils {
+                let trigger = match &v.trigger {
+                    crate::config::VigilTrigger::Toll { interval_secs } => {
+                        format!("toll every {interval_secs}s")
+                    }
+                    crate::config::VigilTrigger::Watcher { path } => {
+                        format!("watcher on {path}")
+                    }
+                    crate::config::VigilTrigger::Harbinger {
+                        address, protocol, ..
+                    } => {
+                        let p = if protocol.is_empty() {
+                            "tcp"
+                        } else {
+                            protocol.as_str()
+                        };
+                        format!("harbinger {p}://{address}")
+                    }
+                };
+                let prompt = if v.prompt.is_empty() {
+                    "(default)".to_string()
+                } else {
+                    v.prompt.clone()
+                };
+                println!(
+                    "  {} - {trigger} - reap every {}s - {} - prompt: {prompt}",
+                    v.name,
+                    v.reap_interval_secs,
+                    status.as_str()
+                );
+            }
+            if vigils.is_empty() {
+                println!("  (none)");
+            }
+        }
+        crate::cli::VigilAction::Add {
+            name,
+            trigger,
+            args,
+        } => {
+            let store = VigilStore::open(&paths).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let entry = build_vigil_entry(name, trigger, args)?;
+            let json = serde_json::to_string(&entry)?;
+            store
+                .upsert(&entry.name, &json)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!(
+                "Added vigil '{}'. Run `dirge --vigil` to start the keeper.",
+                entry.name
+            );
+        }
+        crate::cli::VigilAction::Remove { name } => {
+            let store = VigilStore::open(&paths).map_err(|e| anyhow::anyhow!("{e}"))?;
+            store.remove(name).map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("Removed vigil '{name}'.");
+        }
+        crate::cli::VigilAction::Pause { name } => {
+            let store = VigilStore::open(&paths).map_err(|e| anyhow::anyhow!("{e}"))?;
+            store
+                .set_status(name, VigilStatus::Paused)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("Paused vigil '{name}'.");
+        }
+        crate::cli::VigilAction::Resume { name } => {
+            let store = VigilStore::open(&paths).map_err(|e| anyhow::anyhow!("{e}"))?;
+            store
+                .set_status(name, VigilStatus::Active)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("Resumed vigil '{name}'.");
+        }
+        crate::cli::VigilAction::Rest { name } => {
+            let store = VigilStore::open(&paths).map_err(|e| anyhow::anyhow!("{e}"))?;
+            store
+                .set_status(name, VigilStatus::Resting)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("vigil '{name}' resting (will sleep until next trigger).");
+        }
+    }
+    Ok(())
+}
+
+/// Build a VigilEntry from CLI `vigil add` args.
+#[cfg(feature = "vigil")]
+fn build_vigil_entry(
+    name: &str,
+    trigger: &crate::cli::VigilAddTrigger,
+    args: &[String],
+) -> anyhow::Result<crate::config::VigilEntry> {
+    use crate::config::{SocketMode, VigilEntry, VigilTrigger};
+
+    if name.trim().is_empty() {
+        anyhow::bail!("vigil name must not be empty");
+    }
+
+    // Parse key=value args strictly: a keyless arg is a typo, not a value,
+    // and a repeated key is an error rather than silent last-wins.
+    let mut parsed: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for arg in args {
+        let (key, value) = arg
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("invalid vigil arg '{arg}': expected key=value"))?;
+        if parsed.insert(key.to_string(), value.to_string()).is_some() {
+            anyhow::bail!("duplicate vigil arg '{key}'");
+        }
+    }
+
+    let known: &[&str] = match trigger {
+        crate::cli::VigilAddTrigger::Toll => &["interval_secs", "reap_interval_secs", "prompt"],
+        crate::cli::VigilAddTrigger::Watcher => &["path", "reap_interval_secs", "prompt"],
+        crate::cli::VigilAddTrigger::Harbinger => &[
+            "address",
+            "protocol",
+            "socket_mode",
+            "reap_interval_secs",
+            "prompt",
+        ],
+    };
+    for key in parsed.keys() {
+        if !known.contains(&key.as_str()) {
+            anyhow::bail!("unknown vigil arg '{key}' for {trigger:?}");
+        }
+    }
+
+    let trigger = match trigger {
+        crate::cli::VigilAddTrigger::Toll => {
+            let interval_secs = parse_positive_secs(&parsed, "interval_secs", 30)?;
+            VigilTrigger::Toll { interval_secs }
+        }
+        crate::cli::VigilAddTrigger::Watcher => {
+            let path = parsed
+                .get("path")
+                .cloned()
+                .unwrap_or_else(|| ".".to_string());
+            VigilTrigger::Watcher { path }
+        }
+        crate::cli::VigilAddTrigger::Harbinger => {
+            let address = parsed
+                .get("address")
+                .cloned()
+                .unwrap_or_else(|| "127.0.0.1:9000".to_string());
+            let protocol = parsed.get("protocol").cloned().unwrap_or_default();
+            // The flat key=value CLI cannot express a commands map, so a
+            // CLI-added harbinger is template mode. Commands-mode harbingers
+            // must come from config or a .dirge/vigils/*.json file.
+            let socket_mode = match parsed.get("socket_mode").map(String::as_str) {
+                None | Some("template") => SocketMode::Template,
+                Some("commands") => anyhow::bail!(
+                    "commands-mode harbingers need a commands map; define '{name}' in config or a vigil JSON file instead"
+                ),
+                Some(other) => {
+                    anyhow::bail!("invalid socket_mode '{other}': expected template or commands")
+                }
+            };
+            VigilTrigger::Harbinger {
+                address,
+                protocol,
+                socket_mode,
+                commands: std::collections::HashMap::new(),
+            }
+        }
+    };
+
+    let reap_interval_secs = parse_positive_secs(&parsed, "reap_interval_secs", 30)?;
+
+    let prompt = parsed.get("prompt").cloned().unwrap_or_default();
+
+    Ok(VigilEntry {
+        name: name.to_string(),
+        trigger,
+        reap_interval_secs,
+        cooldown_secs: 0,
+        prompt,
+        procession: None,
+        rite: None,
+        gate: None,
+    })
+}
+
+/// Parse a positive-integer seconds arg, rejecting zero and non-numeric
+/// values. Zero trips tokio's non-zero interval assert (the trigger dies
+/// silently) and a zero reap interval tight-loops the reaper.
+#[cfg(feature = "vigil")]
+fn parse_positive_secs(
+    parsed: &std::collections::HashMap<String, String>,
+    key: &str,
+    default: u64,
+) -> anyhow::Result<u64> {
+    match parsed.get(key) {
+        None => Ok(default),
+        Some(raw) => {
+            let secs: u64 = raw
+                .parse()
+                .map_err(|_| anyhow::anyhow!("{key} must be a positive integer, got '{raw}'"))?;
+            if secs == 0 {
+                anyhow::bail!("{key} must be greater than zero");
+            }
+            Ok(secs)
+        }
+    }
+}
+
+/// Enumerate vigils for `dirge vigil list`, merged from config and the SQLite
+/// store by name. Config entries win on name collision; the store is
+/// authoritative for status, so a config vigil paused or rested via the CLI
+/// still shows its state. Entries only in the store (added via
+/// `dirge vigil add`) show up too.
+#[cfg(feature = "vigil")]
+fn collect_vigils_for_list(
+    paths: &crate::extras::dirge_paths::ProjectPaths,
+    config_vigils: Vec<crate::config::VigilEntry>,
+) -> Vec<(
+    crate::config::VigilEntry,
+    crate::extras::vigil_db::VigilStatus,
+)> {
+    use crate::config::VigilEntry;
+    use crate::extras::vigil_db::{VigilStatus, VigilStore};
+    use std::collections::HashMap;
+
+    let mut status_by_name: HashMap<String, VigilStatus> = HashMap::new();
+    let mut entry_by_name: HashMap<String, VigilEntry> = HashMap::new();
+
+    // Store first (lowest entry precedence; authoritative for status).
+    match VigilStore::open(paths) {
+        Ok(store) => match store.list_all() {
+            Ok(rows) => {
+                for row in rows {
+                    status_by_name.insert(row.name.clone(), row.status);
+                    match serde_json::from_str::<VigilEntry>(&row.payload_json) {
+                        Ok(entry) => {
+                            entry_by_name.insert(row.name.clone(), entry);
+                        }
+                        Err(e) => eprintln!(
+                            "warning: skipping vigil '{}': unreadable stored payload: {e}",
+                            row.name
+                        ),
+                    }
+                }
+            }
+            Err(e) => eprintln!("warning: could not read stored vigils: {e}"),
+        },
+        Err(e) => eprintln!("warning: could not open the vigil store: {e}"),
+    }
+
+    // Config wins over store on name collision.
+    for entry in config_vigils {
+        entry_by_name.insert(entry.name.clone(), entry);
+    }
+
+    let mut out: Vec<(VigilEntry, VigilStatus)> = entry_by_name
+        .into_iter()
+        .map(|(name, entry)| {
+            let status = status_by_name
+                .get(&name)
+                .copied()
+                .unwrap_or(VigilStatus::Active);
+            (entry, status)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+    out
 }
