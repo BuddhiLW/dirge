@@ -142,7 +142,7 @@ keys and ignores the rest:
 | `:dirge/system-prompt` | `{:cwd :session-id}` | text appended to the system prompt |
 | `:dirge/on-prompt` | `{:prompt :session-id :first-prompt? :tokens :ctx-max :pressure}` | text added before the user's prompt |
 | `:dirge/before-tool-call` | `{:tool :args :tool-call-id}` | `nil`, `{:block "reason"}`, `{:context "text"}` or `{:args {…}}` |
-| `:dirge/after-tool-call` | `{:tool :args :result :error? :tool-use-id :tokens :ctx-max :pressure}` | text appended to the tool result |
+| `:dirge/after-tool-call` | `{:tool :args :result :error? :tool-use-id :tokens :ctx-max :pressure}` | text (or `{:context "text"}`) appended to the tool result, and/or `{:result "text"}` replacing what the model sees of it (the last replacement wins) |
 | `:dirge/before-compact` | `{:count :tokens :reason :ctx-max :pressure :session-id}` | ignored |
 | `:dirge/compact` | `{:span :tokens :reason :focus :ctx-max :pressure :session-id}` | `nil` or `{:summary "text"}`, see [Compaction](#compaction) |
 | `:dirge/transform-context` | `{:messages :tokens :session-id}` | `nil` or `{:messages [...]}`, see [Turns](#turns) |
