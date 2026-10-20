@@ -128,6 +128,7 @@ pub struct Issue {
     pub priority: String,
     pub session_id: Option<String>,
     pub epic_id: Option<String>,
+    pub dedup_key: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
@@ -178,14 +179,14 @@ fn row_to_issue(row: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
         priority: row.get(4)?,
         session_id: row.get(5)?,
         epic_id: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
-        closed_at: row.get(9)?,
+        dedup_key: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        closed_at: row.get(10)?,
     })
 }
 
-const COLS: &str =
-    "id, title, body, status, priority, session_id, epic_id, created_at, updated_at, closed_at";
+const COLS: &str = "id, title, body, status, priority, session_id, epic_id, dedup_key, created_at, updated_at, closed_at";
 
 /// SQLite-backed issue tracker over the per-project session DB. Mirrors
 /// [`super::spec_db::SpecStore`] — holds its own connection.
@@ -245,6 +246,7 @@ impl IssueStore {
                 priority    TEXT NOT NULL DEFAULT 'normal',
                 session_id  TEXT,
                 epic_id     TEXT,
+                dedup_key   TEXT,
                 created_at  TEXT NOT NULL,
                 updated_at  TEXT NOT NULL,
                 closed_at   TEXT
@@ -266,12 +268,13 @@ impl IssueStore {
                      priority    TEXT NOT NULL DEFAULT 'normal',
                      session_id  TEXT,
                      epic_id     TEXT,
+                     dedup_key   TEXT,
                      created_at  TEXT NOT NULL,
                      updated_at  TEXT NOT NULL,
                      closed_at   TEXT
                  );
-                 INSERT INTO issues_new (id, title, body, status, priority, session_id, epic_id, created_at, updated_at, closed_at)
-                     SELECT CAST(id AS TEXT), title, body, status, priority, session_id, NULL, created_at, updated_at, closed_at
+                 INSERT INTO issues_new (id, title, body, status, priority, session_id, epic_id, dedup_key, created_at, updated_at, closed_at)
+                     SELECT CAST(id AS TEXT), title, body, status, priority, session_id, NULL, NULL, created_at, updated_at, closed_at
                      FROM issues;
                  DROP TABLE issues;
                  ALTER TABLE issues_new RENAME TO issues;
@@ -280,6 +283,22 @@ impl IssueStore {
             )
             .map_err(|e| format!("migrate legacy issues schema: {e}"))?;
         }
+
+        // Non-legacy DBs predating the dedup_key column: add it in place.
+        if !has_column(&conn, "issues", "dedup_key") {
+            conn.execute_batch("ALTER TABLE issues ADD COLUMN dedup_key TEXT;")
+                .map_err(|e| format!("add dedup_key column: {e}"))?;
+        }
+
+        // Stable signal identity for vigil upserts: at most one live issue per
+        // dedup_key. Terminal issues drop out of the partial index, so closing
+        // an issue frees its key for a re-firing signal to create a fresh row.
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_dedup_key
+                 ON issues(dedup_key)
+                 WHERE dedup_key IS NOT NULL AND status IN ('open','in_progress','blocked');",
+        )
+        .map_err(|e| format!("ensure dedup_key index: {e}"))?;
 
         Ok(())
     }
@@ -314,6 +333,64 @@ impl IssueStore {
             params![id, title, body.trim(), priority, scoped, epic_normalized, now],
         )
         .map_err(|e| format!("create issue: {e}"))?;
+        Ok(id)
+    }
+
+    /// Upsert a vigil signal into a single live issue keyed by `dedup_key`.
+    /// If a live issue (open / in_progress / blocked) already carries the key,
+    /// its title, body, and priority are refreshed in place and its id is
+    /// returned; otherwise a new issue is created with the key. Closing an
+    /// issue frees its key (the partial unique index only covers live rows),
+    /// so a re-firing signal creates a fresh issue. `dedup_key` must be
+    /// non-empty and is trimmed.
+    #[cfg(any(feature = "plugin", test))]
+    pub fn upsert(
+        &self,
+        dedup_key: &str,
+        title: &str,
+        body: &str,
+        priority: Option<&str>,
+    ) -> Result<String, String> {
+        let key = dedup_key.trim();
+        if key.is_empty() {
+            return Err("dedup_key must not be empty".to_string());
+        }
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("issue title must not be empty".to_string());
+        }
+        let priority = priority.and_then(normalize_priority).unwrap_or("normal");
+        let conn = self.conn.lock_ignore_poison();
+        let now = now();
+
+        // Refresh an existing live issue if one carries this key.
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT id FROM issues
+                 WHERE dedup_key = ?1 AND status IN ('open','in_progress','blocked')",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("upsert lookup: {e}"))?;
+
+        if let Some(id) = existing {
+            conn.execute(
+                "UPDATE issues SET title = ?2, body = ?3, priority = ?4, updated_at = ?5
+                 WHERE id = ?1",
+                params![id, title, body.trim(), priority, now],
+            )
+            .map_err(|e| format!("upsert update: {e}"))?;
+            return Ok(id);
+        }
+
+        let id = generate_id(&conn)?;
+        conn.execute(
+            "INSERT INTO issues (id, title, body, status, priority, dedup_key, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'open', ?4, ?5, ?6, ?6)",
+            params![id, title, body.trim(), priority, key, now],
+        )
+        .map_err(|e| format!("upsert insert: {e}"))?;
         Ok(id)
     }
 
@@ -694,6 +771,17 @@ fn escape_like(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+/// Whether `table` has `column` (via pragma_table_info).
+fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    conn.query_row(
+        &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+        params![column],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
 }
 
 /// Detect whether the current `issues` table uses the legacy INTEGER
@@ -1474,5 +1562,64 @@ mod tests {
             .unwrap();
         let board = s.board_for_session(Some("sess-1"), None).unwrap();
         assert_eq!(board.len(), 2);
+    }
+
+    // ── upsert (dedup_key) ───────────────────────────────────────────────
+
+    #[test]
+    fn upsert_creates_new_issue_with_key() {
+        let s = store();
+        let id = s
+            .upsert("sig-1", "flaky test", "details", Some("high"))
+            .unwrap();
+        let issue = s.get(&id).unwrap().unwrap();
+        assert_eq!(issue.title, "flaky test");
+        assert_eq!(issue.body, "details");
+        assert_eq!(issue.priority, "high");
+        assert_eq!(issue.dedup_key.as_deref(), Some("sig-1"));
+        assert_eq!(issue.status, "open");
+    }
+
+    #[test]
+    fn upsert_refreshes_existing_live_issue_in_place() {
+        let s = store();
+        let id1 = s.upsert("sig-1", "first", "", None).unwrap();
+        let id2 = s.upsert("sig-1", "updated", "body2", Some("low")).unwrap();
+        assert_eq!(id1, id2, "same live key must reuse the row");
+        let issue = s.get(&id1).unwrap().unwrap();
+        assert_eq!(issue.title, "updated");
+        assert_eq!(issue.body, "body2");
+        assert_eq!(issue.priority, "low");
+        assert_eq!(s.board(None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn upsert_closed_issue_frees_key_for_refire() {
+        let s = store();
+        let id1 = s.upsert("sig-1", "first", "", None).unwrap();
+        s.set_status(&id1, "done").unwrap();
+        // The partial unique index covers only live rows, so the same key can
+        // create a fresh row once the old one is terminal.
+        let id2 = s.upsert("sig-1", "second", "", None).unwrap();
+        assert_ne!(id1, id2, "closed issue must free the key");
+        let live = s.board(None).unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].id, id2);
+    }
+
+    #[test]
+    fn upsert_blocked_issue_is_still_live_for_key() {
+        let s = store();
+        let id1 = s.upsert("sig-1", "first", "", None).unwrap();
+        s.set_status(&id1, "blocked").unwrap();
+        let id2 = s.upsert("sig-1", "still blocked", "", None).unwrap();
+        assert_eq!(id1, id2, "blocked is live and must reuse the row");
+    }
+
+    #[test]
+    fn upsert_rejects_empty_key_and_title() {
+        let s = store();
+        assert!(s.upsert("   ", "title", "", None).is_err());
+        assert!(s.upsert("sig-1", "   ", "", None).is_err());
     }
 }

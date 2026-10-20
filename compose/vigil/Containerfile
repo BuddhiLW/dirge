@@ -1,0 +1,14 @@
+# dirge vigil runtime. The host-built debug binary is volume-mounted by
+# compose.yml; this image supplies the glibc 2.39 base plus CA certs
+# (provider TLS), curl (health checks), and git (agent tooling).
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work

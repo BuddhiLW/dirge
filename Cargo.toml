@@ -6,9 +6,10 @@ name = "dirge-agent"
 version = "0.25.7"
 edition = "2024"
 # MSRV: edition 2024 needs 1.85, but the dependency tree (time, serde_with,
-# darling, instability) requires 1.88 — pin there so older toolchains fail
-# with a clear version error instead of a cryptic edition/build failure.
-rust-version = "1.88"
+# darling, instability) requires 1.88, and the patched russh 0.63 / pageant
+# 0.2.3 require 1.89. Pin there so older toolchains fail with a clear
+# version error instead of a cryptic edition/build failure.
+rust-version = "1.89"
 authors = ["Yogthos <yogthos@gmail.com>"]
 description = "Minimalistic coding agent written in Rust, optimized for memory footprint and performance"
 license = "GPL-3.0-only"
@@ -134,6 +135,7 @@ no-plugin = [
 # The release workflow builds the Windows target with this set.
 windows-default = ['no-plugin']
 loop = []
+vigil = ["dep:notify"]
 # Run dirge itself as an MCP server (`dirge mcp`) so another agent (e.g.
 # Claude Code) can delegate implementation tasks to dirge and review them.
 # Pulls rmcp's server side + stdio transport + the tool macros.
@@ -235,7 +237,7 @@ notify-rust = { version = "4.18", default-features = false, features = ["z"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "process", "fs", "io-util", "signal"] }
 # reqwest over ring/rustls. On wasm reqwest auto-selects its fetch backend
 # (no TLS crate needed); dirge's wasm core doesn't use reqwest directly.
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "charset", "http2", "system-proxy"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "charset", "http2", "system-proxy", "blocking"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["ring"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
@@ -364,6 +366,7 @@ lsp-types = { version = "0.97", optional = true }
 tree-sitter-elixir = { version = "0.3.5", optional = true }
 tree-sitter-sequel = { version = "0.3", optional = true }
 tree-sitter-dafny = { version = "0.1", optional = true }
+notify = { version = "7", optional = true, default-features = false, features = ["macos_kqueue"] }
 # DAP (Debug Adapter Protocol) — optional feature for driving
 # debuggers (lldb-dap, dlv, debugpy, node) to fix crashes instead
 # of sprinkling print statements. Types are hand-rolled in
@@ -382,7 +385,7 @@ libkrun-sys = { version = "0.9.5", optional = true }
 # russh: pure-Rust SSH client (no libssh2/OpenSSL — uses the `ring` crypto
 # backend so the build needs no system OpenSSL or cmake). Used by the
 # microVM sandbox to execute commands inside the guest VM.
-russh = { version = "0.62.5", default-features = false, features = ["ring"], optional = true }
+russh = { version = "0.63.2", default-features = false, features = ["ring"], optional = true }
 # sha2 + hex: OCI layer digest verification for the microVM sandbox.
 # Every blob downloaded from the registry is SHA-256 hashed and compared
 # against the manifest's declared digest before extraction.
@@ -460,4 +463,19 @@ debug = false
 # in a dev backtrace, set `debug = "line-tables-only"`.
 [profile.dev]
 debug = 0
+
+# Vendor evil-janet for two GC fixes (see drg-76a1), both in
+# vendor/evil-janet/csrc/janet.c:
+#  1. Root `janet_vm.top_dyns` during the GC mark phase (janet_collect).
+#     Upstream Janet never marks that table, so dirge — which populates it via
+#     janet_setdyn() with no fiber active (the :out/:err capture mirror) — gets
+#     it swept and then use-after-freed in janet_dyn("err-color") inside
+#     janet_stacktrace_ext.
+#  2. Root the fiber and error value at the top of janet_stacktrace_ext, before
+#     janet_to_string(err) can allocate and trigger GC. The errored fiber has
+#     already been unwound off the run stack and removed from active_tasks, so
+#     without a root the GC collects it (and its env table) before
+#     janet_dyn("err-color") reads janet_vm.fiber->env.
+[patch.crates-io]
+evil-janet = { path = "vendor/evil-janet" }
 
