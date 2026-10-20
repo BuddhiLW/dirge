@@ -45,6 +45,7 @@ pub(crate) mod toggle;
 pub(crate) mod tree;
 pub(crate) mod undo;
 pub(crate) mod view;
+pub(crate) mod vigil_cmd;
 #[cfg(feature = "git-worktree")]
 pub(crate) mod worktree;
 #[cfg(feature = "git-worktree")]

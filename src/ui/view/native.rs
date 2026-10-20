@@ -54,7 +54,7 @@ const COMMANDS: &[CommandRow] = &[
 ];
 
 /// `/panel`'s display modes.
-const PANEL_MODES: &[&str] = &["on", "off", "auto", "debug"];
+const PANEL_MODES: &[&str] = &["on", "off", "auto", "debug", "vigils"];
 
 /// What `/swarm` completes to.
 const SWARM_ARGS: &[&str] = &["on", "off"];
@@ -295,6 +295,7 @@ impl NativeReducer {
             "" => vec![ViewEffect::PanelStatus],
             "on" | "off" | "auto" => vec![mode(PanelScope::Both, arg), ViewEffect::PanelStatus],
             "debug" => vec![mode(PanelScope::Right, "debug"), ViewEffect::PanelStatus],
+            "vigils" => vec![mode(PanelScope::Left, "vigils"), ViewEffect::PanelStatus],
             _ => match ReplyAction::parse_among(&self.reply_verbs(), args) {
                 Ok(action) => {
                     vec![
@@ -307,7 +308,7 @@ impl NativeReducer {
                 }
                 Err(usage) => vec![notify(
                     NoticeLevel::Error,
-                    format!("{usage} (display modes: on|off|auto|debug)"),
+                    format!("{usage} (display modes: on|off|auto|debug|vigils)"),
                 )],
             },
         }

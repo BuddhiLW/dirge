@@ -37,6 +37,13 @@ pub const HOOK_NAMES: &[&str] = &[
     // ctx :messages (JSON); may call harness/set-compact-summary to
     // supply a summary instead of the LLM summarizer.
     "on-compact",
+    // --- vigil hooks (dirge-vigil) ---
+    "on-vigil-event",
+    "on-vigil-reap",
+    "on-vigil-enrich",
+    "on-vigil-rite",
+    "on-vigil-observance",
+    "on-vigil-outcome",
 ];
 
 /// Filter an input candidate list to only paths that exist as

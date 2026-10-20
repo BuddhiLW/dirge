@@ -77,6 +77,7 @@ fn interpret(renderer: &mut Renderer, effect: &ViewEffect) -> Outcome {
             Some(mode) => {
                 match scope {
                     PanelScope::Both => renderer.set_panel_mode(mode),
+                    PanelScope::Left => renderer.set_left_panel_mode(mode),
                     PanelScope::Right => renderer.set_right_panel_mode(mode),
                 }
                 Outcome::Done
@@ -180,6 +181,7 @@ fn panel_mode(name: &str) -> Option<PanelMode> {
         "off" => PanelMode::Off,
         "auto" => PanelMode::Auto,
         "debug" => PanelMode::Debug,
+        "vigils" => PanelMode::Vigil,
         _ => return None,
     })
 }

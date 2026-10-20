@@ -118,6 +118,11 @@ pub(super) struct SlashCtx<'a> {
     pub user_tx: &'a tokio::sync::mpsc::UnboundedSender<crate::event::UserEvent>,
     #[cfg(feature = "loop")]
     pub loop_state: &'a mut Option<crate::extras::r#loop::LoopState>,
+    #[cfg(feature = "vigil")]
+    #[allow(dead_code)]
+    pub vigil_state: &'a mut Option<crate::extras::vigil::VigilState>,
+    #[cfg(feature = "vigil")]
+    pub vigil_ctl_tx: &'a Option<tokio::sync::mpsc::Sender<crate::extras::vigil::types::VigilCtl>>,
     #[cfg(feature = "mcp")]
     pub mcp_manager: Option<&'a McpClientManager>,
     #[cfg(feature = "semantic")]
@@ -664,6 +669,10 @@ pub async fn handle_slash(
     sandbox: &Sandbox,
     #[cfg(unix)] user_tx: &tokio::sync::mpsc::UnboundedSender<crate::event::UserEvent>,
     #[cfg(feature = "loop")] loop_state: &mut Option<crate::extras::r#loop::LoopState>,
+    #[cfg(feature = "vigil")] vigil_state: &mut Option<crate::extras::vigil::VigilState>,
+    #[cfg(feature = "vigil")] vigil_ctl_tx: &Option<
+        tokio::sync::mpsc::Sender<crate::extras::vigil::types::VigilCtl>,
+    >,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
     #[cfg(feature = "semantic")] semantic_manager: Option<&SemanticManager>,
     // C8 (audit fix): every prior agent-rebuild path (/model,
@@ -697,6 +706,10 @@ pub async fn handle_slash(
         user_tx,
         #[cfg(feature = "loop")]
         loop_state,
+        #[cfg(feature = "vigil")]
+        vigil_state,
+        #[cfg(feature = "vigil")]
+        vigil_ctl_tx,
         #[cfg(feature = "mcp")]
         mcp_manager,
         #[cfg(feature = "semantic")]
@@ -746,6 +759,7 @@ pub async fn handle_slash(
         "/fork" => cmd::fork::cmd_fork(&mut ctx, &parts).await?,
         "/clone" => cmd::clone::cmd_clone(&mut ctx, &parts).await?,
         name if is_view_command(name) => cmd::view::cmd_view(&parts),
+        "/vigil" => cmd::vigil_cmd::cmd_vigil(&mut ctx, &parts, text).await?,
         "/btw" => return cmd::btw::cmd_btw(&mut ctx, &parts).await,
         "/learn" => return cmd::learn::cmd_learn(&mut ctx, &parts).await,
         "/code-review" => cmd::code_review::cmd_code_review(&mut ctx).await?,
@@ -1006,6 +1020,7 @@ fn slash_commands() -> Vec<SlashCommand> {
         "/loop",
         "start, stop, or show a background prompt loop",
     ));
+    cmds.push(cmd("/vigil", "manage vigil heartbeat/watch triggers"));
     #[cfg(feature = "dap")]
     cmds.push(cmd(
         "/debug",
