@@ -233,6 +233,9 @@ pub struct ExternalPanels {
     /// Insertion order (oldest first).
     panels: Vec<ExternalPanel>,
     focused: Option<String>,
+    /// The focused panel holds key focus (its bare-key verbs fire);
+    /// painted as a hint on its title. Set by the UI loop.
+    key_focus: bool,
 }
 
 fn clean(s: &str) -> String {
@@ -270,7 +273,16 @@ impl ExternalPanels {
         Self {
             panels: Vec::new(),
             focused: None,
+            key_focus: false,
         }
+    }
+
+    pub fn key_focus(&self) -> bool {
+        self.key_focus
+    }
+
+    pub fn set_key_focus(&mut self, on: bool) {
+        self.key_focus = on;
     }
 
     #[allow(dead_code)]

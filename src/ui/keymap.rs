@@ -96,6 +96,10 @@ pub enum KeyAction {
     /// Open or close the swarm view: the external panels as a
     /// full-screen grid instead of the compact left-panel boxes.
     ToggleSwarm,
+    /// Hand key focus to the focused external panel, so its bare-letter
+    /// verbs fire; pressed again (or Esc) gives focus back to the prompt.
+    /// Without it, typed letters always reach the prompt.
+    FocusPanel,
 }
 
 impl Command for KeyAction {
@@ -204,6 +208,13 @@ impl Command for KeyAction {
                     KeyModifiers::ALT.union(KeyModifiers::SHIFT),
                 ),
             ],
+        ),
+        (
+            // Alt+P: free in both keymaps (Ctrl+G, the other candidate,
+            // is the input editor's `external_editor`).
+            KeyAction::FocusPanel,
+            "focus_panel",
+            &[(KeyCode::Char('p'), KeyModifiers::ALT)],
         ),
     ];
 }
@@ -856,6 +867,29 @@ mod tests {
                 Some(KeyAction::ToggleSwarm)
             );
         }
+    }
+
+    /// Alt+P hands key focus to the focused panel; it shadows no other
+    /// default in either keymap and plain `p` stays text.
+    #[test]
+    fn alt_p_focuses_the_panel_and_collides_with_nothing() {
+        let km = Keymap::defaults();
+        let key = ev(KeyCode::Char('p'), KeyModifiers::ALT);
+        assert_eq!(km.resolve(&key), Some(KeyAction::FocusPanel));
+        assert_eq!(InputKeymap::defaults().resolve_lenient(&key), None);
+        let owners = KeyAction::ALL
+            .iter()
+            .filter(|(_, _, cs)| cs.contains(&(KeyCode::Char('p'), KeyModifiers::ALT)))
+            .count();
+        assert_eq!(owners, 1);
+        assert_eq!(
+            KeyAction::from_command("focus_panel"),
+            Some(KeyAction::FocusPanel)
+        );
+        assert_eq!(
+            km.resolve(&ev(KeyCode::Char('p'), KeyModifiers::NONE)),
+            None
+        );
     }
 
     /// dirge-e59d: Alt+X drops queued interjections (Ctrl+X stays

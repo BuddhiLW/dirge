@@ -1473,7 +1473,9 @@ impl Renderer {
     /// Replace the whole external panel set.
     #[allow(dead_code)]
     pub fn set_external_panels(&mut self, panels: crate::ui::panels_ext::ExternalPanels) {
+        let key_focus = self.external_panels.key_focus();
         self.external_panels = panels;
+        self.external_panels.set_key_focus(key_focus);
     }
 
     /// Fold one external panel op into the left-panel state; the
@@ -1490,6 +1492,11 @@ impl Renderer {
 
     /// The swarm grid's cells in paint order: external panels, then
     /// subagents.
+    /// Show whether the focused panel holds key focus (its title hint).
+    pub fn set_panel_key_focus(&mut self, on: bool) {
+        self.external_panels.set_key_focus(on);
+    }
+
     pub fn focused_external_panel_id(&self) -> Option<String> {
         self.external_panels.focused().map(str::to_string)
     }
