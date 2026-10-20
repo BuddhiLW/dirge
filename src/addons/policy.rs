@@ -8,8 +8,7 @@ use crate::command_class::CommandClass;
 
 use super::domain::{
     AddonSummary, AfterOutcome, BeforeOutcome, CommandOutput, CommandSpec, Folded, HookPoint,
-    HookReply,
-    LoadFailure, PanelRequest, ToolSpec,
+    HookReply, LoadFailure, PanelRequest, ToolSpec,
 };
 
 /// Longest tool name the providers accept.

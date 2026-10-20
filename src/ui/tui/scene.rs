@@ -206,8 +206,8 @@ fn paint_chat_and_panels(scene: &Scene, f: &mut Frame<'_>, layout: &Layout, fram
         {
             f.render_widget(
                 LeftPanel::new(scene.left_info, scene.subagents)
-                        .external_panels(scene.external_panels)
-                        .border_style(frame_style),
+                    .external_panels(scene.external_panels)
+                    .border_style(frame_style),
                 layout.left_panel,
             );
         }

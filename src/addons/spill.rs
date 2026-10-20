@@ -154,7 +154,12 @@ pub(crate) mod tests {
 
     #[test]
     fn text_past_the_cap_becomes_a_head_tail_preview_naming_its_handle() {
-        let text = format!("{}{}{}", "h".repeat(PREVIEW_HEAD), "m".repeat(CAP), "t".repeat(PREVIEW_TAIL));
+        let text = format!(
+            "{}{}{}",
+            "h".repeat(PREVIEW_HEAD),
+            "m".repeat(CAP),
+            "t".repeat(PREVIEW_TAIL)
+        );
         let Spill::Spilled { preview, handle } = plan(&text, CAP) else {
             panic!("spilled");
         };
@@ -215,7 +220,10 @@ pub(crate) mod tests {
         let dir = std::env::temp_dir().join(format!("dirge-spill-{}", uuid::Uuid::new_v4()));
         let store = FileSpillStore { root: dir.clone() };
         store.put(Some("s1"), "§deadbeef", "full").unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("s1/deadbeef.txt")).unwrap(), "full");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("s1/deadbeef.txt")).unwrap(),
+            "full"
+        );
         assert_eq!(
             store.path(Some("../etc"), "§00"),
             dir.join("no-session/00.txt"),

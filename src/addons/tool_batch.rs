@@ -19,8 +19,12 @@ use serde_json::{Value, json};
 use super::host::AddonHost;
 use super::policy;
 use super::spill::{self, SpillStore};
-use crate::agent::agent_loop::hooks::{PrepareNextTurnFn, TurnHookContext, compose_prepare_next_turn};
-use crate::agent::agent_loop::message::{ContentBlock, LoopMessage, UserMessage, loop_message_to_value};
+use crate::agent::agent_loop::hooks::{
+    PrepareNextTurnFn, TurnHookContext, compose_prepare_next_turn,
+};
+use crate::agent::agent_loop::message::{
+    ContentBlock, LoopMessage, UserMessage, loop_message_to_value,
+};
 use crate::agent::agent_loop::types::{LoopConfig, TurnUpdate};
 use crate::runtime::blocking_within;
 
@@ -37,9 +41,11 @@ pub fn batch_ctx(turn: &TurnHookContext, session_id: Option<&str>) -> Option<Val
             .content
             .iter()
             .find_map(|b| match b {
-                ContentBlock::ToolCall { id: call, arguments, .. } if call == id => {
-                    Some(arguments.clone())
-                }
+                ContentBlock::ToolCall {
+                    id: call,
+                    arguments,
+                    ..
+                } if call == id => Some(arguments.clone()),
                 _ => None,
             })
             .unwrap_or(Value::Null)
@@ -231,7 +237,12 @@ mod tests {
     fn nothing_installs_when_no_addon_listens() {
         let (host, _) = host(&["acme/other"], json!("x"));
         let mut config = config();
-        install(&mut config, &host, BUDGET, Arc::new(MemorySpillStore::default()));
+        install(
+            &mut config,
+            &host,
+            BUDGET,
+            Arc::new(MemorySpillStore::default()),
+        );
         assert!(config.prepare_next_turn.is_none());
     }
 
@@ -239,12 +250,20 @@ mod tests {
     async fn one_batch_is_heard_once_with_every_call_and_its_answer_becomes_one_note() {
         let (host, rt) = host(&[AFTER_TOOL_BATCH], json!({"context": "2 calls, 1 failed"}));
         let mut config = config();
-        install(&mut config, &host, BUDGET, Arc::new(MemorySpillStore::default()));
+        install(
+            &mut config,
+            &host,
+            BUDGET,
+            Arc::new(MemorySpillStore::default()),
+        );
         let prepare = config.prepare_next_turn.expect("installed");
 
-        let update = prepare(turn(vec![result("c1", "read", false), result("c2", "bash", true)]))
-            .await
-            .expect("a note");
+        let update = prepare(turn(vec![
+            result("c1", "read", false),
+            result("c2", "bash", true),
+        ]))
+        .await
+        .expect("a note");
 
         let heard = rt.heard.lock().unwrap().clone();
         assert_eq!(heard.len(), 1, "once per batch");
@@ -281,7 +300,9 @@ mod tests {
         let store = Arc::new(MemorySpillStore::default());
         let prepare = after_tool_batch(host, Some("s1".into()), BUDGET, store.clone());
 
-        let update = prepare(turn(vec![result("c1", "read", false)])).await.unwrap();
+        let update = prepare(turn(vec![result("c1", "read", false)]))
+            .await
+            .unwrap();
 
         let kept = store.kept.lock().unwrap().clone();
         assert_eq!(kept.len(), 1);
