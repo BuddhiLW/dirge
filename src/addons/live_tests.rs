@@ -248,6 +248,275 @@ fn posted_events_reach_the_event_hook_in_order() {
     );
 }
 
+/// A host running the `folds` fixture, whose tools run the addon host's
+/// `fold-answers` and `shape-ctx` on the data they are given.
+fn folds_host() -> AddonHost {
+    let host = super::start_with(
+        live_plan(&fixtures().join("folds")),
+        Harness::with_sink(Arc::new(QuietSink::default())),
+        PROTOCOL,
+        IsolateOptions::default(),
+    )
+    .expect("host starts");
+    assert!(host.failures().is_empty(), "{:?}", host.failures());
+    host
+}
+
+/// What the `folds` tool `name` answers for `args`.
+fn result(host: &AddonHost, name: &str, args: Value) -> Value {
+    let tool = host
+        .tools()
+        .into_iter()
+        .find(|t| t.name == name)
+        .unwrap_or_else(|| panic!("no tool {name}"));
+    let (_, details) = host.call_tool(&tool, &args).expect("tool runs");
+    details["result"].clone()
+}
+
+/// The host's fold of `answers` to hook `key` heard with `ctx`.
+fn fold(host: &AddonHost, key: &str, ctx: Value, answers: Value) -> Value {
+    result(
+        host,
+        "fold",
+        json!({"key": key, "ctx": ctx, "answers": answers}),
+    )
+}
+
+fn ok(addon: &str, v: Value) -> Value {
+    json!({"addon": addon, "ok": v})
+}
+
+fn failed(addon: &str) -> Value {
+    json!({"addon": addon, "error": "boom"})
+}
+
+#[test]
+fn the_host_folds_turn_hook_answers() {
+    use super::turn_hooks::{PREPARE_NEXT_TURN, SHOULD_STOP_AFTER_TURN, TRANSFORM_CONTEXT};
+
+    let host = folds_host();
+    let user = |text: &str| json!({"role": "user", "content": text});
+
+    // The first answer of one or more messages, each with a string role.
+    let answers = json!([
+        failed("a"),
+        ok("b", json!({"messages": []})),
+        ok("c", json!({"messages": [{"content": "no role"}]})),
+        ok("d", json!({"messages": "text"})),
+        ok("e", json!({"messages": [user("kept")]})),
+        ok("f", json!({"messages": [user("late")]})),
+    ]);
+    assert_eq!(
+        fold(&host, TRANSFORM_CONTEXT, json!({}), answers),
+        json!({"messages": [user("kept")]})
+    );
+    let none = json!([ok("a", json!("text")), ok("b", Value::Null)]);
+    assert_eq!(fold(&host, TRANSFORM_CONTEXT, json!({}), none), Value::Null);
+
+    // The first level the loop knows, and every note in load order.
+    let answers = json!([
+        ok("a", json!({"thinking": "loud", "context": " one "})),
+        ok("b", json!("two")),
+        failed("c"),
+        ok("d", json!({"thinking": "High"})),
+        ok("e", json!({"thinking": "low", "context": "  "})),
+    ]);
+    assert_eq!(
+        fold(&host, PREPARE_NEXT_TURN, json!({}), answers),
+        json!({"thinking": "High", "context": ["one", "two"]})
+    );
+    let none = json!([ok("a", json!({})), ok("b", json!(3))]);
+    assert_eq!(fold(&host, PREPARE_NEXT_TURN, json!({}), none), Value::Null);
+
+    // The first addon asking to stop, with its reason when it gave one.
+    let answers = json!([
+        ok("a", json!(false)),
+        ok("b", json!({"stop": "  "})),
+        failed("c"),
+        ok("d", json!({"stop": " goal met "})),
+        ok("e", json!(true)),
+    ]);
+    assert_eq!(
+        fold(&host, SHOULD_STOP_AFTER_TURN, json!({}), answers),
+        json!({"addon": "d", "reason": "goal met"})
+    );
+    for answer in [json!(true), json!({"stop": true})] {
+        assert_eq!(
+            fold(
+                &host,
+                SHOULD_STOP_AFTER_TURN,
+                json!({}),
+                json!([ok("a", answer)])
+            ),
+            json!({"addon": "a", "reason": null})
+        );
+    }
+    let none = json!([ok("a", json!({"stop": false})), ok("b", Value::Null)]);
+    assert_eq!(
+        fold(&host, SHOULD_STOP_AFTER_TURN, json!({}), none),
+        Value::Null
+    );
+}
+
+#[test]
+fn the_host_folds_acp_answers() {
+    use super::acp::{EXT_METHOD_KEY, META_KEY};
+
+    let host = folds_host();
+
+    // The first non-null answer, false included.
+    let answers = json!([
+        failed("a"),
+        ok("b", Value::Null),
+        ok("c", json!(false)),
+        ok("d", json!("x"))
+    ]);
+    assert_eq!(
+        fold(&host, EXT_METHOD_KEY, json!({}), answers),
+        json!(false)
+    );
+    let none = json!([ok("a", Value::Null)]);
+    assert_eq!(fold(&host, EXT_METHOD_KEY, json!({}), none), Value::Null);
+
+    // The response's own _meta wins, then earlier addons; non-maps add nothing.
+    let ctx = json!({"response-meta": {"usage": {"totalTokens": 12}}});
+    let answers = json!([
+        ok(
+            "a",
+            json!({"usage": "forged", "zed.dev/panel": {"open": true}})
+        ),
+        ok("b", json!({"zed.dev/panel": "later loses", "x/y": 2})),
+        ok("c", json!("not an object")),
+    ]);
+    assert_eq!(
+        fold(&host, META_KEY, ctx, answers),
+        json!({"usage": {"totalTokens": 12}, "zed.dev/panel": {"open": true}, "x/y": 2})
+    );
+    assert_eq!(fold(&host, META_KEY, json!({}), json!([])), Value::Null);
+}
+
+#[test]
+fn a_key_without_a_fold_answers_every_reply() {
+    let host = folds_host();
+    let answers = json!([ok("a", json!(1)), failed("b")]);
+    assert_eq!(
+        fold(&host, "acme/other", json!({}), answers.clone()),
+        answers
+    );
+}
+
+#[test]
+fn the_host_names_events_the_way_addons_hear_them() {
+    use super::events::{EVENT_KEY, project};
+    use crate::agent::agent_loop::message::EscalationReason;
+    use crate::event::{AgentEvent, CompactionKind};
+
+    let host = folds_host();
+    let cases = [
+        (
+            AgentEvent::ToolCall {
+                id: "c1".into(),
+                name: "read".into(),
+                args: json!({"path": "a.rs"}),
+            },
+            json!({"event": "tool-call", "id": "c1", "tool": "read", "args": {"path": "a.rs"}}),
+        ),
+        (
+            AgentEvent::ToolResult {
+                id: "c1".into(),
+                output: "out".into(),
+                kind: Default::default(),
+            },
+            json!({"event": "tool-result", "id": "c1", "output": "out"}),
+        ),
+        (
+            AgentEvent::Error("boom".into()),
+            json!({"event": "error", "message": "boom"}),
+        ),
+        (
+            AgentEvent::ContextOverflow {
+                prompt: "p".into(),
+                error: "too long".into(),
+            },
+            json!({"event": "context-overflow", "message": "too long"}),
+        ),
+        (
+            AgentEvent::ContextCompacted {
+                new_session_id: "s2".into(),
+                tokens_before: 9,
+                tokens_after: 4,
+                summary: "sum".into(),
+                first_kept_index: 1,
+                compaction_kind: CompactionKind::PruneAndFailedSummary,
+                summary_model: None,
+            },
+            json!({
+                "event": "context-compacted",
+                "session-id": "s2",
+                "tokens-before": 9,
+                "tokens-after": 4,
+                "summary": "sum",
+                "kind": "prune-and-failed-summary",
+            }),
+        ),
+        (
+            AgentEvent::CheckpointRefresh {
+                summary: "s".into(),
+            },
+            json!({"event": "checkpoint", "summary": "s"}),
+        ),
+        (
+            AgentEvent::CustomMessage {
+                payload: json!({"type": "x"}),
+            },
+            json!({"event": "custom-message", "payload": {"type": "x"}}),
+        ),
+        (
+            AgentEvent::Interjected {
+                partial_response: "part".into(),
+                tokens: 3,
+            },
+            json!({"event": "interjected", "response": "part", "tokens": 3}),
+        ),
+        (
+            AgentEvent::RetryNotice {
+                attempt: 2,
+                delay_ms: 500,
+                error: "slow".into(),
+            },
+            json!({"event": "retry", "attempt": 2, "delay-ms": 500, "message": "slow"}),
+        ),
+        (
+            AgentEvent::SystemNotice {
+                content: "cap".into(),
+            },
+            json!({"event": "notice", "content": "cap"}),
+        ),
+        (
+            AgentEvent::EscalationActivated {
+                provider: "big".into(),
+                reason: EscalationReason::RepairExhausted {
+                    tool: "edit".into(),
+                },
+            },
+            json!({
+                "event": "escalation",
+                "provider": "big",
+                "reason": "RepairExhausted { tool: \"edit\" }",
+            }),
+        ),
+        (
+            AgentEvent::TurnStart { index: 0 },
+            json!({"event": "turn-start", "index": 0}),
+        ),
+    ];
+    for (event, want) in cases {
+        let ctx = project(&event).expect("heard");
+        let heard = result(&host, "shape", json!({"key": EVENT_KEY, "ctx": ctx}));
+        assert_eq!(heard, want, "{event:?}");
+    }
+}
+
 #[cfg(feature = "addons-nrepl")]
 mod repl {
     use std::io::{Read, Write};

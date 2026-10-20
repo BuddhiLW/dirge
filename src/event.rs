@@ -53,7 +53,8 @@ pub enum CompactionKind {
 }
 
 /// Serializes as `{"<variant-name>": {<field-name>: value}}`, both names
-/// kebab-case; payloads without a serializable form are skipped.
+/// kebab-case; payloads without a serializable form are skipped or, when
+/// readers need them, written as their `Debug` text.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "kebab-case", rename_all_fields = "kebab-case")]
 pub enum AgentEvent {
@@ -250,9 +251,18 @@ pub enum AgentEvent {
     /// this so the user knows about the unexpected provider change.
     EscalationActivated {
         provider: CompactString,
-        #[serde(skip)]
+        #[serde(serialize_with = "debug_string")]
         reason: crate::agent::agent_loop::message::EscalationReason,
     },
+}
+
+/// Serializes `value` as its `Debug` text, for a field with no serializable
+/// form of its own.
+fn debug_string<T: std::fmt::Debug, S: serde::Serializer>(
+    value: &T,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(&format_args!("{value:?}"))
 }
 
 #[derive(Debug, Clone)]

@@ -1,9 +1,10 @@
 (ns dirge.addon.host
   "dirge's addon host inside the embedded cljrs runtime. Rust calls
    use-protocol!, load-addon!, shutdown-addon!, reload-sources!, call-tool,
-   run-command, run-hook and shutdown-all! with plain data and reads plain
-   data back."
-  (:require [clojure.edn :as edn]))
+   run-command, run-hook, emit-fold and shutdown-all! with plain data and
+   reads plain data back."
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]))
 
 ;; SPDX-License-Identifier: GPL-3.0-only
 
@@ -240,41 +241,208 @@
     (catch #?(:clj Throwable :default :default) t
       (failure t))))
 
-(def hook-keyword-fields
-  "Context fields a hook reads as keywords, by hook key, whatever the emit
-   site declares. They reach the host as strings."
-  {:dirge/session-end [:reason]
-   :dirge/event       [:event]})
-
 (def keyword-fields-key
   "The ctx key under which an emit site names, as a vector of strings, more
    fields its hook reads as keywords. No hook sees it."
   :dirge/keyword-fields)
 
-(defn hook-ctx
-  "`ctx` as the hook keyed `k` reads it: the fields `hook-keyword-fields`
-   names for `k`, and those the emit site declared, are keywords."
-  [k ctx]
+(defn keyword-fields
+  "`ctx` with each of `fields` that holds a string turned into a keyword."
+  [ctx fields]
   (reduce (fn [c field]
             (cond-> c (string? (get c field)) (update field keyword)))
-          (dissoc ctx keyword-fields-key)
-          (concat (get hook-keyword-fields k)
-                  (map keyword (get ctx keyword-fields-key)))))
+          ctx
+          fields))
+
+(defn hook-ctx
+  "`ctx` with the fields its emit site declared under `keyword-fields-key`
+   turned into keywords, that key removed."
+  [_k ctx]
+  (keyword-fields (dissoc ctx keyword-fields-key)
+                  (map keyword (get ctx keyword-fields-key))))
+
+(defn renamed
+  "`m` with each key of `kmap` present in it moved to the key it maps to."
+  [m kmap]
+  (reduce (fn [m [from to]]
+            (if (contains? m from)
+              (-> m (assoc to (get m from)) (dissoc from))
+              m))
+          m
+          kmap))
+
+(defmulti event-ctx
+  "The `:dirge/event` ctx for one event, given as it serialized (`:event`
+   its name as a keyword, its fields the other keys)."
+  :event)
+
+(defmethod event-ctx :default [ctx] ctx)
+
+(defmethod event-ctx :tool-call [ctx]
+  (renamed ctx {:name :tool}))
+
+(defmethod event-ctx :tool-result [ctx]
+  (dissoc ctx :kind))
+
+(defmethod event-ctx :error [ctx]
+  (renamed ctx {:value :message}))
+
+(defmethod event-ctx :context-overflow [ctx]
+  (-> ctx (dissoc :prompt) (renamed {:error :message})))
+
+(defmethod event-ctx :context-compacted [ctx]
+  (-> ctx
+      (dissoc :first-kept-index :summary-model)
+      (renamed {:new-session-id :session-id :compaction-kind :kind})))
+
+(defmethod event-ctx :checkpoint-refresh [ctx]
+  (assoc ctx :event :checkpoint))
+
+(defmethod event-ctx :interjected [ctx]
+  (renamed ctx {:partial-response :response}))
+
+(defmethod event-ctx :retry-notice [ctx]
+  (-> ctx (assoc :event :retry) (renamed {:error :message})))
+
+(defmethod event-ctx :system-notice [ctx]
+  (assoc ctx :event :notice))
+
+(defmethod event-ctx :escalation-activated [ctx]
+  (assoc ctx :event :escalation))
+
+(defmulti shape-ctx
+  "The ctx the hook keyed `k` hears, given `ctx` as its emit site sent it."
+  (fn [k _ctx] k))
+
+(defmethod shape-ctx :default [k ctx]
+  (hook-ctx k ctx))
+
+(defmethod shape-ctx :dirge/session-end [k ctx]
+  (keyword-fields (hook-ctx k ctx) [:reason]))
+
+(defmethod shape-ctx :dirge/event [k ctx]
+  (event-ctx (keyword-fields (hook-ctx k ctx) [:event])))
+
+(defn- answers
+  "Every loaded addon's answer to hook `k` on the shaped `ctx`, in load
+   order: {:addon id :ok result} or {:addon id :error msg}."
+  [k ctx]
+  (vec
+   (for [id @!order
+         :let [f (get-in @!addons [id :hooks k])]
+         :when f]
+     (try
+       {:addon id :ok (json-safe (f ctx))}
+       (catch #?(:clj Throwable :default :default) t
+         (assoc (failure t) :addon id))))))
 
 (defn run-hook
   "Call every loaded addon's `hook-key` hook with `ctx`, in load order:
    a vector of {:addon id :ok result} / {:addon id :error msg}."
   [hook-key ctx]
-  (let [k   (keyword hook-key)
-        ctx (hook-ctx k ctx)]
-    (vec
-     (for [id @!order
-           :let [f (get-in @!addons [id :hooks k])]
-           :when f]
-       (try
-         {:addon id :ok (json-safe (f ctx))}
-         (catch #?(:clj Throwable :default :default) t
-           (assoc (failure t) :addon id)))))))
+  (let [k (keyword hook-key)]
+    (answers k (shape-ctx k ctx))))
+
+(defmulti fold-answers
+  "One value from the answers `answers` of hook `k`, heard with `ctx`, or
+   nil for no answer."
+  (fn [k _ctx _answers] k))
+
+(defmethod fold-answers :default [_ _ answers]
+  answers)
+
+(defn oks
+  "The non-nil :ok values of `answers`, in load order; failures dropped."
+  [answers]
+  (keep :ok answers))
+
+(defn field
+  "`k` of map `m`, whether its key is the keyword or its name."
+  [m k]
+  (when (map? m)
+    (if (contains? m k) (get m k) (get m (name k)))))
+
+(defn- text
+  "`s` trimmed, or nil when `s` is not a string or is blank."
+  [s]
+  (when (string? s)
+    (let [t (str/trim s)]
+      (when-not (str/blank? t) t))))
+
+(defn- message?
+  [m]
+  (string? (field m :role)))
+
+(defmethod fold-answers :dirge/transform-context [_ _ answers]
+  (some (fn [v]
+          (let [ms (field v :messages)]
+            (when (and (sequential? ms) (seq ms) (every? message? ms))
+              {:messages (vec ms)})))
+        (oks answers)))
+
+(def thinking-levels
+  "The thinking levels a `:dirge/prepare-next-turn` answer may name."
+  #{"off" "minimal" "low" "medium" "high" "xhigh" "max"})
+
+(defn- thinking-level?
+  [s]
+  (and (string? s) (contains? thinking-levels (str/lower-case (str/trim s)))))
+
+(defn- note
+  "An answer's note: a bare string, or a map's :context, trimmed."
+  [v]
+  (if (map? v) (text (field v :context)) (text v)))
+
+(defmethod fold-answers :dirge/prepare-next-turn [_ _ answers]
+  (let [vs       (oks answers)
+        level    (fn [v] (let [t (field v :thinking)] (when (thinking-level? t) t)))
+        thinking (some level vs)
+        notes    (vec (keep note vs))]
+    (when (or thinking (seq notes))
+      {:thinking thinking :context notes})))
+
+(defn- stop-reason
+  "[reason-or-nil] when answer `v` asks to stop the run, else nil."
+  [v]
+  (if (true? v)
+    [nil]
+    (let [s (field v :stop)]
+      (cond
+        (true? s) [nil]
+        (text s)  [(text s)]
+        :else     nil))))
+
+(defmethod fold-answers :dirge/should-stop-after-turn [_ _ answers]
+  (some (fn [a]
+          (when-let [[reason] (and (contains? a :ok) (stop-reason (:ok a)))]
+            {:addon (:addon a) :reason reason}))
+        answers))
+
+(defmethod fold-answers :dirge/acp-ext-method [_ _ answers]
+  (first (oks answers)))
+
+(defn- key-name
+  [k]
+  (if (keyword? k) (subs (str k) 1) (str k)))
+
+(defn- string-keys
+  [m]
+  (into {} (map (fn [[k v]] [(key-name k) v])) m))
+
+(defmethod fold-answers :dirge/acp-meta [_ ctx answers]
+  (let [maps (cons (or (field ctx :response-meta) {})
+                   (filter map? (oks answers)))]
+    (not-empty (reduce (fn [acc m] (merge (string-keys m) acc)) {} maps))))
+
+(defn emit-fold
+  "Run hook `hook-key` on `ctx` and fold its answers: {:value v :failed
+   [{:addon id :error msg}]}, v json-safe and nil for no answer."
+  [hook-key ctx]
+  (let [k       (keyword hook-key)
+        ctx     (shape-ctx k ctx)
+        replies (answers k ctx)]
+    {:value  (json-safe (fold-answers k ctx replies))
+     :failed (filterv :error replies)}))
 
 (defn- load-source!
   "load-file `path`, leaving *ns* where it was: nil, or {:error msg}."

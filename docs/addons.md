@@ -576,6 +576,14 @@ answer is ignored and nothing waits for it: events are queued to the addon
 runtime and run in order after whatever it is doing, and when more than 256
 are waiting new ones are dropped.
 
+The renames in the table, and the way the addons' answers to a hook are
+combined into the one answer dirge reads (the first well-formed
+`:messages`, the first addon asking to stop, merged `_meta`, ...), are
+Clojure in the host namespace `dirge.addon.host`, each a method of a
+multimethod: `event-ctx` on `:event`, `shape-ctx` on the hook key (what a
+hook hears), and `fold-answers` on the hook key (how answers combine).
+Code running in the addon runtime can add a `defmethod` to any of them.
+
 ### Extending the host: `dirge/addon/host.cljc`
 
 The Clojure half of the addon host, `dirge.addon.host`, is built into dirge.
@@ -601,7 +609,7 @@ evaluated over the ones before it, in root order.
 
 dirge calls `use-protocol!`, `load-addon!`, `shutdown-addon!`,
 `reload-sources!`, `refresh!`, `call-tool`, `run-command`, `run-hook`,
-`run-hook-handler` and `shutdown-all!`. An overlay may redefine any of them,
+`run-hook-handler`, `emit-fold` and `shutdown-all!`. An overlay may redefine any of them,
 but each must still be a function afterwards. An overlay that fails to load,
 or that leaves one of them without a function, is undone whole, and the
 reason is logged at start and listed among the reload's source errors.
