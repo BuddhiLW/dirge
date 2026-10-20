@@ -74,7 +74,7 @@
 
 (def panel-modes
   "Mode word -> which side panels it sets."
-  {"on" :both "off" :both "auto" :both "debug" :right})
+  {"on" :both "off" :both "auto" :both "debug" :right "vigils" :left})
 
 (defn find-verb
   "The producer verb named `name` (after aliases), or nil."
@@ -117,7 +117,7 @@
       (let [[tag v] (parse-reply (:producer state) args)]
         (if (= tag :ok)
           [state [v (notify :info (str "panel reply '" (:action v) "' requested"))]]
-          [state [(notify :error (str v " (display modes: on|off|auto|debug)"))]])))))
+          [state [(notify :error (str v " (display modes: on|off|auto|debug|vigils)"))]])))))
 
 ;; ---------------------------------------------------------------------------
 ;; /display
@@ -282,7 +282,7 @@
 
 (def panel-mode-words
   "What `/panel` completes to before the producer's verbs."
-  ["on" "off" "auto" "debug"])
+  ["on" "off" "auto" "debug" "vigils"])
 
 (def commands
   "Slash command (no slash) -> {:run (fn [state args] [state' effects])
