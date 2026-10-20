@@ -80,6 +80,32 @@ jobs:
       # cannot drift from what CI actually runs.
       - uses: ./.github/actions/audit
 
+  # Property/law tests for the cljrs view reducer (src/addons/cljrs/view.cljc),
+  # run on the JVM against the real test.check through tests/cljrs/run.sh,
+  # with no dirge build. The cljrs leg (`run.sh cljrs`) is not gated here: it
+  # needs a cljrs binary on the runner, and its JIT panicked locally
+  # ("can't resolve symbol rt_mod") with the clojurust checkout at da66198.
+  # Add it once a pinned cljrs release binary can be installed.
+  cljrs-view-props:
+    name: view laws (jvm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Clojure CLI
+        uses: DeLaGoldo/setup-clojure@13.4
+        with:
+          cli: latest
+
+      - name: View reducer laws (JVM)
+        run: tests/cljrs/run.sh jvm
+
   # The `validate_all_plugins_compile` Rust test (mod_tests.rs) loads every
   # plugin against the full dirge harness surface.  It runs in the
   # --all-features test variant below.  That's the canonical gate; there is

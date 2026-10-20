@@ -312,7 +312,7 @@
 
 (deftest view-commands-are-the-command-registry
   (is (= (vec (sort (keys view/commands)))
-         (:view_commands (view/model closed)))))
+         (mapv :name (:view_commands (view/model closed))))))
 
 (defspec grid-keys-are-dirge-keys-plus-the-producers 200
   (prop/for-all [producer gen-producer]
