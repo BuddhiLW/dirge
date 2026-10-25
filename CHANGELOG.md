@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Cheaper Inference as a built-in provider. Set `CHEAPER_INFERENCE_API_KEY` and
+  select it with `--provider cheaperinference` (or a `providers.cheaperinference`
+  entry); defaults to `gpt-5.4-mini` against
+  `https://api.cheaperinference.com/v1`. Reasoning effort goes out as a
+  top-level `reasoning_effort` clamped to `low`/`medium`/`high`. It is not part
+  of key autodetection.
 - Opper as a built-in provider. Set `OPPER_API_KEY` and select it with
   `--provider opper` (or a `providers.opper` entry); defaults to
   `claude-sonnet-4-6` against `https://api.opper.ai/v3/compat`. Reasoning
