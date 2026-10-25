@@ -34,6 +34,7 @@ pub(crate) mod memory;
 pub(crate) mod mode;
 pub(crate) mod model;
 pub(crate) mod msg;
+pub(crate) mod panel;
 pub(crate) mod plan;
 pub(crate) mod plugins;
 pub(crate) mod quit;
@@ -45,6 +46,7 @@ pub(crate) mod toggle;
 pub(crate) mod tree;
 pub(crate) mod undo;
 pub(crate) mod view;
+pub(crate) mod vigil_cmd;
 #[cfg(feature = "git-worktree")]
 pub(crate) mod worktree;
 #[cfg(feature = "git-worktree")]

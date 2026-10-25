@@ -40,15 +40,27 @@ pub(crate) const SYNTAX_CHECK_PREFIX: &str = "Syntax check failed for ";
 /// fall back to the default stream.
 pub(crate) fn try_arm_escalation(config: &LoopConfig, reason: EscalationReason) {
     use std::sync::atomic::Ordering;
-    // Try to decrement the budget. `fetch_update` lets us peek-and-
-    // decrement atomically; if it returns Err, the budget is zero
-    // and we no-op.
-    let res = config
-        .escalation_remaining
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-            if v == 0 { None } else { Some(v - 1) }
-        });
-    if res.is_err() {
+    // Try to decrement the budget atomically; a zero budget
+    // no-ops. CAS loop rather than `fetch_update`, which rustc
+    // 1.99 deprecates (its replacement `try_update` is not yet
+    // stable on the 1.89 MSRV, so a rename would break older
+    // toolchains).
+    let mut current = config.escalation_remaining.load(Ordering::SeqCst);
+    let armed = loop {
+        if current == 0 {
+            break false;
+        }
+        match config.escalation_remaining.compare_exchange(
+            current,
+            current - 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => break true,
+            Err(actual) => current = actual,
+        }
+    };
+    if !armed {
         tracing::debug!(
             target: "dirge::agent_loop::escalation",
             cap = %config.escalation_max_per_session,
