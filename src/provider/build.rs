@@ -386,6 +386,7 @@ pub async fn build_agent(
         AnyModel::Ollama(m) => build_inner!(m, Ollama),
         AnyModel::Requesty(m) => build_inner!(m, Requesty),
         AnyModel::Opper(m) => build_inner!(m, Opper),
+        AnyModel::CheaperInference(m) => build_inner!(m, CheaperInference),
         AnyModel::Custom(m) => build_inner!(m, Custom),
     };
 
@@ -509,7 +510,7 @@ pub async fn build_agent(
                 eprintln!(
                     "error: escalation_provider '{}' is configured but does not match any entry \
                      in `providers` or any built-in (anthropic/openai/deepseek/glm/cerebras/\
-                     opencode/gemini/ollama/openrouter/requesty/opper). Either add it under `providers` or remove \
+                     opencode/gemini/ollama/openrouter/requesty/opper/cheaperinference). Either add it under `providers` or remove \
                      the `escalation_provider` setting.",
                     alias
                 );
