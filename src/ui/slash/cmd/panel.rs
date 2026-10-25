@@ -1,0 +1,52 @@
+//! /panel vigil-mode handler.
+
+use crate::ui::renderer::PanelMode;
+use crate::ui::slash::{SlashCtx, c_agent, c_error};
+
+pub(crate) async fn cmd_panel(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow::Result<()> {
+    let arg = parts.get(1).copied().unwrap_or("").trim();
+    let new_mode = match arg {
+        "" => None,
+        "on" => Some(PanelMode::On),
+        "off" => Some(PanelMode::Off),
+        "auto" => Some(PanelMode::Auto),
+        "debug" => Some(PanelMode::Debug),
+        "vigils" => Some(PanelMode::Vigil),
+        other => {
+            ctx.renderer.write_line(
+                &format!(
+                    "unknown /panel mode '{}' (use on|off|auto|debug|vigils)",
+                    other
+                ),
+                c_error(),
+            )?;
+            return Ok(());
+        }
+    };
+    if let Some(mode) = new_mode {
+        if mode == PanelMode::Debug {
+            ctx.renderer.set_right_panel_mode(mode);
+        } else if mode == PanelMode::Vigil {
+            ctx.renderer.set_left_panel_mode(mode);
+        } else {
+            ctx.renderer.set_panel_mode(mode);
+        }
+        ctx.renderer.render_viewport()?;
+    }
+
+    let left_mode = ctx.renderer.left_panel_mode();
+    let right_mode = ctx.renderer.right_panel_mode();
+    let left = ctx.renderer.left_panel_visible();
+    let right = ctx.renderer.right_panel_visible();
+    ctx.renderer.write_line(
+        &format!(
+            "left panel: {:?} ({})  right panel: {:?} ({}). Use /display for per-pane control.",
+            left_mode,
+            if left { "shown" } else { "hidden" },
+            right_mode,
+            if right { "shown" } else { "hidden" },
+        ),
+        c_agent(),
+    )?;
+    Ok(())
+}

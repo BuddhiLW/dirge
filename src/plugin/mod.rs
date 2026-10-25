@@ -140,15 +140,22 @@ pub enum PostDoneAction {
     LoopIter,
     LoopStop,
     Idle,
+    #[cfg(feature = "vigil")]
+    VigilSleep,
 }
 
 pub fn decide_post_done_action(
     followup: Option<String>,
     loop_active: bool,
     loop_should_stop: bool,
+    #[cfg(feature = "vigil")] vigil_active: bool,
 ) -> PostDoneAction {
     if let Some(text) = followup {
         return PostDoneAction::Followup(text);
+    }
+    #[cfg(feature = "vigil")]
+    if vigil_active {
+        return PostDoneAction::VigilSleep;
     }
     if !loop_active {
         return PostDoneAction::Idle;
@@ -430,6 +437,43 @@ impl PluginManager {
         self.take_string_slot("harness-replace-result")
     }
 
+    /// Read and clear the `harness-toil` slot. When present the value is
+    /// either a JSON array of shell commands or a bare single command —
+    /// both mean "run this directly instead of waking the agent" for a
+    /// vigil `on-vigil-rite` gate. A non-string value is treated as no
+    /// toil.
+    pub fn take_pending_toil(&mut self) -> Option<Vec<String>> {
+        let raw = self.take_string_slot("harness-toil")?;
+        if let Ok(commands) = serde_json::from_str::<Vec<String>>(&raw) {
+            return Some(commands);
+        }
+        Some(vec![raw])
+    }
+
+    /// Read and clear the `harness-enrich` slot. Set by a vigil
+    /// `on-vigil-enrich` hook via `harness/enrich` to a JSON object string
+    /// the host should shallow-merge into the event context before the
+    /// rite gate and observance run.
+    pub fn take_pending_enrich(&mut self) -> Option<String> {
+        self.take_string_slot("harness-enrich")
+    }
+
+    /// Read and clear the `harness-outcome` slot. Set by a vigil
+    /// `on-vigil-outcome` hook via `harness/outcome` to a JSON object
+    /// string `{"label":...,"useful":...}` the host persists as the
+    /// observance's (signal, outcome) pair.
+    pub fn take_pending_outcome(&mut self) -> Option<String> {
+        self.take_string_slot("harness-outcome")
+    }
+
+    /// Read and clear the `harness-verdict` slot. Set by a vigil
+    /// `on-vigil-rite` hook via `harness/verdict` to a JSON object string
+    /// `{"p":0.0..1.0}` — the oracle's confidence, which the host compares
+    /// to the vigil's wake threshold.
+    pub fn take_pending_verdict(&mut self) -> Option<String> {
+        self.take_string_slot("harness-verdict")
+    }
+
     /// Read and clear the `harness-next-model` slot. Set by
     /// plugins from `prepare-next-run` to swap the active model
     /// before the next user prompt runs. Mid-stream model swap
@@ -698,7 +742,7 @@ impl PluginManager {
         // default — a wedged worker must not stretch the pre-clear out
         // past the per-hook budget (dirge-u5ig).
         let _ = self.worker.eval_with_timeout(
-            "(set harness-block nil) (set harness-mutate-input nil) (set harness-replace-result nil)",
+            "(set harness-block nil) (set harness-mutate-input nil) (set harness-replace-result nil) (set harness-toil nil) (set harness-enrich nil) (set harness-outcome nil) (set harness-verdict nil)",
             HOOK_TIMEOUT,
         );
 
@@ -774,6 +818,10 @@ impl PluginManager {
             block: self.take_pending_block(),
             mutate_input: self.take_pending_mutate_input(),
             replace_result: self.take_pending_replace_result(),
+            toil: self.take_pending_toil(),
+            enrich: self.take_pending_enrich(),
+            outcome: self.take_pending_outcome(),
+            verdict: self.take_pending_verdict(),
         })
     }
 
@@ -1700,4 +1748,21 @@ pub struct ToolHookResult {
     pub block: Option<String>,
     pub mutate_input: Option<String>,
     pub replace_result: Option<String>,
+    /// Commands a vigil hook asks the host to run directly. `on-vigil-rite`
+    /// sets this for a gate Toil verdict; `on-vigil-observance` sets it for
+    /// the post-turn "act" half of act/chaining (`harness/toil`).
+    pub toil: Option<Vec<String>>,
+    /// JSON object a vigil `on-vigil-enrich` hook asks the host to merge
+    /// into the event context. Only that hook sets this (`harness/enrich`).
+    pub enrich: Option<String>,
+    /// JSON object `{"label":...,"useful":...}` an `on-vigil-outcome` hook
+    /// asks the host to persist as the observance's (signal, outcome) pair.
+    /// Only that hook sets this (`harness/outcome`).
+    pub outcome: Option<String>,
+    /// JSON object `{"p":0.0..1.0}` an `on-vigil-rite` hook returns as its
+    /// confidence. The host compares `p` to the vigil's wake threshold so the
+    /// plugin never applies its own magic number. Only that hook sets this
+    /// (`harness/verdict`); `harness/block` and `harness/toil` remain the
+    /// explicit override paths, checked before this slot.
+    pub verdict: Option<String>,
 }

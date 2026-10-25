@@ -198,7 +198,7 @@ static SUBCOMMAND_ENTRIES: &[(&str, &[&str])] = &[
     (
         "/panel",
         &[
-            "on", "off", "auto", "debug", "next", "prev", "refresh", "focus", "unfocus",
+            "on", "off", "auto", "debug", "vigils", "next", "prev", "refresh", "focus", "unfocus",
         ],
     ),
     ("/plugins", &["load"]),
