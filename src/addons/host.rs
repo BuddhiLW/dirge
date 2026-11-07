@@ -9,6 +9,7 @@ use super::domain::{
     AddonSummary, AfterOutcome, BeforeOutcome, CommandOutput, CommandSpec, HookPoint, LoadFailure,
     ReloadReport, ToolSpec,
 };
+use super::host_config;
 use super::policy;
 use super::port::AddonRuntime;
 #[allow(unused_imports)]
@@ -101,7 +102,7 @@ fn load_all(runtime: &dyn AddonRuntime, set: &LoadSet, host_config: &Value) -> L
     let mut addons = Vec::new();
     let mut reports = Vec::new();
     for manifest in &set.manifests {
-        let report = runtime.load(manifest, host_config);
+        let report = runtime.load(manifest, &host_config::for_manifest(host_config, manifest));
         match policy::parse_summary(manifest, &report) {
             Ok(summary) => {
                 reports.push((summary.id.clone(), report));
@@ -156,7 +157,7 @@ fn nothing_reserved() -> Mutex<Reserved> {
 
 pub struct AddonHost {
     runtime: Arc<dyn AddonRuntime>,
-    host_config: Value,
+    host_config: Mutex<Value>,
     loaded: Mutex<Loaded>,
     reserved: Mutex<Reserved>,
 }
@@ -182,7 +183,7 @@ impl AddonHost {
     ) -> Self {
         Self {
             runtime,
-            host_config: Value::Object(Default::default()),
+            host_config: Mutex::new(Value::Object(Default::default())),
             loaded: Mutex::new(Loaded::new(addons, failures)),
             reserved: nothing_reserved(),
         }
@@ -199,7 +200,7 @@ impl AddonHost {
         let loaded = Loaded::new(addons, Vec::new()).with_reported_keys(reports);
         Self {
             runtime,
-            host_config: Value::Object(Default::default()),
+            host_config: Mutex::new(Value::Object(Default::default())),
             loaded: Mutex::new(loaded),
             reserved: nothing_reserved(),
         }
@@ -210,10 +211,16 @@ impl AddonHost {
         let loaded = load_all(runtime.as_ref(), &set, &host_config);
         Self {
             runtime,
-            host_config,
+            host_config: Mutex::new(host_config),
             loaded: Mutex::new(loaded),
             reserved: nothing_reserved(),
         }
+    }
+
+    /// What the next [`reload`](Self::reload) hands the addons as
+    /// `:dirge/host`, e.g. once the user's `addons.settings` changed.
+    pub fn set_host_config(&self, host_config: Value) {
+        *self.host_config.lock_ignore_poison() = host_config;
     }
 
     /// Replace every addon with what `set` loads now, in the order the
@@ -231,7 +238,8 @@ impl AddonHost {
         let outcome = self.runtime.reload_sources_outcome(&set.sources);
         let source_errors = policy::as_failures(outcome.errors);
         let source_skips = policy::as_failures(outcome.skipped);
-        let after = load_all(self.runtime.as_ref(), &set, &self.host_config);
+        let host_config = self.host_config.lock_ignore_poison().clone();
+        let after = load_all(self.runtime.as_ref(), &set, &host_config);
         // What a refresh re-read before this reload describes addons that no
         // longer run; taking it in later would undo the reload.
         let _ = self.runtime.take_refreshed();
