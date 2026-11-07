@@ -15,6 +15,7 @@ pub mod command_hooks;
 pub mod compaction;
 pub mod discovery;
 pub mod domain;
+pub mod emit;
 pub mod events;
 pub mod host;
 pub mod host_config;
@@ -261,12 +262,14 @@ fn taken_by_dirge(name: &str) -> bool {
 }
 
 /// What `dirge.harness` reaches in this process: the TUI for notifications
-/// and panels, dirge's loop tools, and the MCP servers dirge connects to.
+/// and panels, dirge's loop tools, the MCP servers dirge connects to, and
+/// the running host for addon-to-addon emits.
 fn harness() -> Harness {
     let tui = Arc::new(sink::TuiSink);
     let mut harness = Harness::with_sink(tui.clone());
     harness.panels = tui;
     harness.config = Arc::new(settings::LiveConfig);
+    harness.emitter = Arc::new(emit::HostEmitter::live());
     #[cfg(feature = "plugin")]
     if let Some(live) = tool_calls::LoopTools::live() {
         harness.tools = Arc::new(live);

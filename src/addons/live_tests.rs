@@ -517,6 +517,109 @@ fn the_host_names_events_the_way_addons_hear_them() {
     }
 }
 
+/// The `relay` fixture: addon `sender` emits, addon `listener` hears
+/// `:acme/x`. The emitter reaches the host through a slot filled once the
+/// host exists, as the process-wide host is in production.
+fn relay_host() -> Arc<AddonHost> {
+    use super::emit::HostEmitter;
+    use std::sync::OnceLock;
+
+    let slot: Arc<OnceLock<Arc<AddonHost>>> = Arc::new(OnceLock::new());
+    let source = slot.clone();
+    let mut harness = Harness::with_sink(Arc::new(QuietSink::default()));
+    harness.emitter = Arc::new(HostEmitter::from_source(Arc::new(move || {
+        source.get().cloned()
+    })));
+    let host = Arc::new(
+        super::start_with(
+            live_plan(&fixtures().join("relay")),
+            harness,
+            PROTOCOL,
+            IsolateOptions::default(),
+        )
+        .expect("host starts"),
+    );
+    assert!(host.failures().is_empty(), "{:?}", host.failures());
+    let _ = slot.set(host.clone());
+    host
+}
+
+#[test]
+fn an_addon_emit_reaches_another_addon_listening_on_the_key() {
+    let host = relay_host();
+    assert!(host.listens_key("acme/x"));
+
+    for n in [1, 2] {
+        let answer = tool_text(&host, "send", json!({"key": "acme/x", "payload": {"n": n}}));
+        assert_eq!(answer, "ok");
+    }
+    // A key nobody listens on is posted to nobody, and still answers ok.
+    assert_eq!(
+        tool_text(&host, "send", json!({"key": ":acme/nobody"})),
+        "ok"
+    );
+
+    // Posts run before the next queued call, so both were heard, in order.
+    assert_eq!(tool_text(&host, "got", json!({})), "1,2");
+}
+
+#[test]
+fn emit_refuses_reserved_and_bare_keys_and_non_map_payloads() {
+    let host = relay_host();
+    for (args, why) in [
+        (
+            json!({"key": "dirge/event", "payload": {"n": 1}}),
+            "reserved",
+        ),
+        (json!({"key": "dirge.hook/Stop"}), "reserved"),
+        (json!({"key": "x"}), "namespaced"),
+        (json!({"key": "acme/x", "payload": [1]}), "map payload"),
+    ] {
+        let answer = tool_text(&host, "send", args.clone());
+        assert!(
+            answer.starts_with("error: ") && answer.contains(why),
+            "{args}: {answer}"
+        );
+    }
+    assert_eq!(tool_text(&host, "got", json!({})), "", "nothing was posted");
+}
+
+#[test]
+fn emit_is_refused_inside_a_posted_call_and_from_the_event_loop() {
+    let host = relay_host();
+
+    // A listener emitting from inside a posted call would let listeners
+    // feed each other without end.
+    host.post("acme/echo", &json!({}));
+    let nested = tool_text(&host, "nested", json!({}));
+    assert!(nested.contains("unavailable"), "{nested}");
+    assert_eq!(tool_text(&host, "got", json!({})), "");
+
+    // While dirge's event loop waits on the addon, as for call-tool.
+    let h = host.clone();
+    let refused = std::thread::spawn(move || {
+        super::cljrs::isolate::mark_event_loop_thread();
+        tool_text(&h, "send", json!({"key": "acme/x", "payload": {"n": 5}}))
+    })
+    .join()
+    .unwrap();
+    assert!(
+        refused.contains("unavailable while dirge waits"),
+        "{refused}"
+    );
+    assert_eq!(tool_text(&host, "got", json!({})), "");
+}
+
+#[test]
+fn emit_without_a_host_answers_an_error() {
+    use super::emit::HostEmitter;
+    use super::port::{AddonEmitter, NoEmitter};
+
+    let orphan = HostEmitter::from_source(Arc::new(|| None));
+    assert!(orphan.emit("acme/x", &json!({})).is_err());
+    assert!(NoEmitter.emit("acme/x", &json!({})).is_err());
+}
+
 #[cfg(feature = "addons-nrepl")]
 mod repl {
     use std::io::{Read, Write};

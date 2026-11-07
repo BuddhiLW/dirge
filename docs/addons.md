@@ -354,6 +354,7 @@ The `dirge.harness` namespace is available to addon code:
 | `(mcp-call server tool)` / `(mcp-call server tool args)` | call an MCP tool over dirge's own connection |
 | `(json-parse text)` | JSON text as data (keyword keys), or `nil` |
 | `(config id)` / `(config)` | the `addons.settings` entry of addon `id` (keyword keys, `{}` when absent), or every addon's settings keyed by id |
+| `(emit key)` / `(emit key payload)` | post the map `payload` to every addon's hook keyed `key`, see [Addon to addon](#addon-to-addon-emit); answers `{:ok true}` or `{:error msg}` |
 
 `panel` takes one of:
 
@@ -547,6 +548,36 @@ key an addon registered. A seam in dirge reaches such a key by name
 (`AddonHost::emit`) without a new hook point in the host, so adding a seam
 costs one call site, not a change to the addon host's types. The
 [turn hooks](#turns) are reached this way.
+
+### Addon to addon: `emit`
+
+Addons reach each other over the same open keys. `(dirge.harness/emit
+:acme/x {:n 1})` posts `{:n 1}` to the `:acme/x` hook of every loaded
+addon that registered one (the emitter's own included):
+
+```clojure
+;; addon A, in a command, a tool or a tool-call hook
+(dirge.harness/emit :acme/x {:n 1})   ;=> {:ok true}
+
+;; addon B
+(hooks [_] {:acme/x (fn [{:keys [n]}] (swap! !seen conj n) nil)})
+```
+
+- The key must be a namespaced keyword (or `"ns/name"` string). The
+  `dirge` and `dirge.*` namespaces are reserved for dirge's own hooks:
+  `(emit :dirge/event ...)` answers `{:error}`, so an addon cannot forge a
+  dirge event.
+- The payload is a map of plain data (it crosses as JSON); `nil` or no
+  payload sends `{}`. Anything else answers `{:error}`.
+- The post is queued and never awaited: `emit` returns before the
+  listeners run, their answers are dropped, and the post is dropped
+  outright when the isolate already holds 256 unrun posts (the bound the
+  `:dirge/event` stream shares). `{:ok true}` means queued, not heard.
+- It is refused, like `call-tool`, while dirge's event loop waits on the
+  addon (loading at startup, shutdown at exit, the system-prompt and
+  on-prompt hooks), and inside a posted hook call (an `emit` listener or
+  `:dirge/event`), so listeners cannot emit to each other without end.
+  Emit from a command, a tool or a tool-call hook.
 
 ### Watching the run: `:dirge/event`
 

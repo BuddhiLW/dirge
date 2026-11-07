@@ -129,6 +129,25 @@ pub trait ToolGateway: Send + Sync + 'static {
     fn call(&self, tool: &str, args: &Value) -> Result<String, String>;
 }
 
+/// Where `dirge.harness/emit` posts an open hook key, addon to addon. The
+/// key is already checked ([`crate::addons::emit::emit_key`]); the post is
+/// queued and never awaited.
+pub trait AddonEmitter: Send + Sync + 'static {
+    /// Post `ctx` to every addon's hook keyed `key`. `Err` when it cannot
+    /// be posted at all (no host); a post dropped because the runtime is
+    /// backed up is still `Ok`.
+    fn emit(&self, key: &str, ctx: &Value) -> Result<(), String>;
+}
+
+/// A host where addons cannot reach each other.
+pub struct NoEmitter;
+
+impl AddonEmitter for NoEmitter {
+    fn emit(&self, _key: &str, _ctx: &Value) -> Result<(), String> {
+        Err("emit is unavailable: no addon host receives it".to_string())
+    }
+}
+
 /// The per-addon settings the user wrote under `addons.settings` in
 /// `config.json`, as `dirge.harness/config` and `:dirge/host :config` read
 /// them. Answers are read at call time, so an adapter may change underneath.
@@ -164,11 +183,12 @@ pub struct Harness {
     pub mcp: Arc<dyn McpGateway>,
     pub tools: Arc<dyn ToolGateway>,
     pub config: Arc<dyn ConfigSource>,
+    pub emitter: Arc<dyn AddonEmitter>,
 }
 
 impl Harness {
     /// Notifications to `sink`; no panels, no MCP servers, no tools, no
-    /// addon settings.
+    /// addon settings, no addon-to-addon emits.
     pub fn with_sink(sink: Arc<dyn HarnessSink>) -> Self {
         Self {
             sink,
@@ -176,6 +196,7 @@ impl Harness {
             mcp: Arc::new(NoMcp),
             tools: Arc::new(NoTools),
             config: Arc::new(NoConfig),
+            emitter: Arc::new(NoEmitter),
         }
     }
 }
