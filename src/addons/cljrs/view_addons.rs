@@ -101,7 +101,8 @@ mod tests {
     #[test]
     fn reads_view_namespaces_from_manifests() {
         let (_dir, manifest, src) = fixture("read");
-        let addons = ViewAddons::from_manifests(&[manifest.clone(), manifest], &[src.clone()]);
+        let addons =
+            ViewAddons::from_manifests(&[manifest.clone(), manifest], std::slice::from_ref(&src));
         assert_eq!(addons.namespaces, vec!["hello.view".to_string()]);
         assert_eq!(addons.roots, vec![src]);
     }

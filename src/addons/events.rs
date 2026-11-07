@@ -11,7 +11,7 @@
 //! [`MAX_TEXT_BYTES`]. The addon host's `event-ctx` renames what some
 //! events are heard as.
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::event::AgentEvent;
 

@@ -195,9 +195,11 @@ mod tests {
         let client = RecordingClient::default();
         load(&sessions, &store, "acp-1", &client).await.unwrap();
 
-        let recorded = client.0.lock().unwrap();
-        assert_eq!(kinds(&recorded), ["user", "agent", "tool", "agent"]);
-        assert!(recorded.iter().all(|n| n.session_id.0.as_ref() == "acp-1"));
+        {
+            let recorded = client.0.lock().unwrap();
+            assert_eq!(kinds(&recorded), ["user", "agent", "tool", "agent"]);
+            assert!(recorded.iter().all(|n| n.session_id.0.as_ref() == "acp-1"));
+        }
         let map = sessions.lock().await;
         let restored = map.get("acp-1").expect("session registered for prompts");
         assert_eq!(restored.session.messages.len(), saved.messages.len());
