@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::domain::{HookPoint, with_keyword_fields};
+use super::events::{self, HostEvent};
 use super::host::AddonHost;
 use crate::agent::session_lifecycle::{
     Budgets, Lifecycle, LifecycleHook, SessionEnd, SessionLifecycle, SessionStart, collect,
@@ -44,15 +45,43 @@ impl SessionLifecycle for AddonLifecycle {
     }
 
     fn session_start(&self, event: &SessionStart) -> Vec<String> {
-        (self.host)()
-            .map(|host| host.session_start(&start_ctx(event)))
+        let host = (self.host)();
+        if let Some(host) = &host {
+            post(host, &start_event(event));
+        }
+        host.map(|host| host.session_start(&start_ctx(event)))
             .unwrap_or_default()
     }
 
     fn session_end(&self, event: &SessionEnd) {
         if let Some(host) = (self.host)() {
+            post(&host, &end_event(event));
             host.session_end(&end_ctx(event));
         }
+    }
+}
+
+/// Hand `event` to `host`'s `:dirge/event` listeners without waiting.
+fn post(host: &AddonHost, event: &HostEvent) {
+    host.post(events::EVENT_KEY, &events::project_host(event));
+}
+
+/// The session's opening as a `:dirge/event`.
+pub fn start_event(event: &SessionStart) -> HostEvent {
+    HostEvent::SessionStart {
+        session_id: event.session_id.clone(),
+        cwd: event.cwd.clone(),
+        first_prompt: event.first_prompt,
+        mcp_servers: event.mcp_servers.clone(),
+    }
+}
+
+/// The session's close as a `:dirge/event`.
+pub fn end_event(event: &SessionEnd) -> HostEvent {
+    HostEvent::SessionEnd {
+        session_id: event.session_id.clone(),
+        cwd: event.cwd.clone(),
+        reason: event.reason.key().to_string(),
     }
 }
 

@@ -242,6 +242,7 @@ pub(crate) fn land_live(
     let Some(report) = host.sync() else {
         return Landing::default();
     };
+    crate::addons::events::post_host(&[crate::addons::events::reloaded(&report)]);
     let (_, installed) = adopt(&host, agent, permission, ask_tx);
     live_landing(&report, &installed)
 }

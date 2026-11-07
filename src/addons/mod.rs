@@ -41,6 +41,8 @@ mod acceptance_tests;
 #[cfg(test)]
 mod dispatch_tests;
 #[cfg(test)]
+mod host_event_tests;
+#[cfg(test)]
 mod live_tests;
 
 use std::path::PathBuf;
@@ -141,6 +143,7 @@ pub fn reload(
         host.set_host_config(host_wide_config(&settings::LiveConfig));
         let report = host.reload(load_set(&plan, true));
         register_commands(&host);
+        events::post_host(&[events::reloaded(&report)]);
         return Ok((host, report));
     }
     let protocol = protocol_ns(settings, &plan);
