@@ -263,16 +263,99 @@
           panel                                    [state [(reply (:verb binding) panel)]]
           :else                                    [state [(reply (:verb binding))]])))))
 
+;; ---------------------------------------------------------------------------
+;; Addon registrations
+;;
+;; Addons extend the view from their `:dirge/view-ns`, a namespace dirge
+;; requires in the view runtime after this one (never in the addon
+;; isolate, so an addon view stays off the agent loop). Registration is
+;; an open set: one map per kind, keyed by command name or key name.
+;;
+;; Conflict rule: a built-in always wins. Registering a name `commands`
+;; (or a key `grid-keymap`) already holds is refused and leaves a warning,
+;; which the next `dispatch!` hands to the UI as a notice. Among addons
+;; the last registration wins. A dirge or addon grid key wins over a key
+;; the panel producer binds.
+
+(def registry
+  "What addons registered: :commands (name -> command, as `commands`),
+   :grid-keymap (key -> [verb]), :grid-verbs (verb -> fn), and
+   :warnings not yet shown."
+  (atom {:commands {} :grid-keymap {} :grid-verbs {} :warnings []}))
+
+(defn refuse!
+  "Record `text` as a registration warning; [:refused text]."
+  [text]
+  (swap! registry update :warnings conj text)
+  [:refused text])
+
+(defn guarded
+  "(apply f args) kept only when it answers a well-formed [state'
+   effects]; a throw or a malformed answer leaves `state` and says why.
+   Addon code runs through this, so it cannot break the view."
+  [label state f & args]
+  (try
+    (let [answer (apply f args)]
+      (if (and (vector? answer) (= 2 (count answer)) (map? (first answer))
+               (sequential? (second answer)))
+        [(first answer) (vec (second answer))]
+        [state [(notify :error (str label " did not answer [state effects]"))]]))
+    (catch #?(:clj Throwable :default :default) t
+      [state [(notify :error (str label " failed: " (or (ex-message t) (str t))))]])))
+
+(defn register-grid-key!
+  "Bind grid `key` to `run`, a (fn [state grid] [state' effects]) called
+   while the swarm grid is open; `grid` is {:cells :n :cur :cols :last-i}.
+   [:ok key] or [:refused why]; one of dirge's own keys is refused
+   (built-in wins)."
+  [key run]
+  (cond
+    (not (and (string? key) (not (str/blank? key))))
+    (refuse! (str "grid key must be a non-blank string: " (pr-str key)))
+
+    (not (fn? run))
+    (refuse! (str "grid key " key " needs a function"))
+
+    (contains? grid-keymap key)
+    (refuse! (str "grid key " key " is built in; the addon's binding is ignored"))
+
+    :else
+    (let [verb (keyword "addon" key)
+          f    (fn [state g _] (guarded (str "grid key " key) state run state g))]
+      (swap! registry (fn [r] (-> r
+                                  (assoc-in [:grid-keymap key] [verb])
+                                  (assoc-in [:grid-verbs verb] f))))
+      [:ok key])))
+
+(defn all-grid-keymap
+  "dirge's grid keys over the addons' (built-in wins)."
+  []
+  (merge (:grid-keymap @registry) grid-keymap))
+
+(defn all-grid-verbs
+  "dirge's grid verbs over the addons'."
+  []
+  (merge (:grid-verbs @registry) grid-verbs))
+
+(defn drain-warnings!
+  "The registration warnings not yet shown, as notices; clears them."
+  []
+  (let [ws (:warnings @registry)]
+    (when (seq ws)
+      (swap! registry assoc :warnings []))
+    (mapv #(notify :warn %) ws)))
+
 (defn grid-step
   "A dirge key runs its verb, except Enter on a panel cell; that key and
-   any other go to the producer's bindings."
+   any other go to the producer's bindings. Keys addons registered run
+   like dirge's own (see `register-grid-key!`)."
   [state event]
   (if (nil? (:swarm state))
     [state []]
     (let [g          (grid-of state event)
           cell       (get (:cells g) (:cur g))
-          [verb arg] (get grid-keymap (:key event))
-          f          (get grid-verbs verb)]
+          [verb arg] (get (all-grid-keymap) (:key event))
+          f          (get (all-grid-verbs) verb)]
       (if (or (nil? f) (and (= verb :focus) (= "panel" (:kind cell))))
         (producer-key state (:key event) cell)
         (f state g arg)))))
@@ -299,17 +382,53 @@
               :summary "open or close the full-screen grid of external panels (Alt+S)"
               :args    (fn [_] ["on" "off"])}})
 
+(defn register-view-command!
+  "Register `/name` as a view command: `spec` is {:run (fn [state args]
+   [state' effects]) :summary text :args (fn [state] words)}, :summary and
+   :args optional. [:ok name] or [:refused why]; a built-in name is
+   refused (built-in wins)."
+  [name spec]
+  (cond
+    (not (and (string? name) (not (str/blank? name))))
+    (refuse! (str "view command name must be a non-blank string: " (pr-str name)))
+
+    (not (fn? (:run spec)))
+    (refuse! (str "view command /" name " has no :run function"))
+
+    (contains? commands name)
+    (refuse! (str "view command /" name " is built in; the addon's registration is ignored"))
+
+    :else
+    (let [run  (:run spec)
+          args (:args spec)
+          cmd  {:run     (fn [state argv] (guarded (str "/" name) state run state argv))
+                :summary (str (or (:summary spec) ""))
+                :args    (if (fn? args)
+                           (fn [state]
+                             (try (vec (args state))
+                                  (catch #?(:clj Throwable :default :default) _ [])))
+                           (fn [_] []))}]
+      (swap! registry assoc-in [:commands name] cmd)
+      [:ok name])))
+
+(defn all-commands
+  "Built-in and registered view commands; a built-in shadows an addon's."
+  []
+  (merge (:commands @registry) commands))
+
 (defn view-commands
-  "The view commands as /help and completion show them, sorted by name."
+  "The view commands as /help and completion show them, sorted by name:
+   the built-ins and every addon registration."
   [state]
-  (mapv (fn [n]
-          (let [c (get commands n)]
-            {:name n :summary (:summary c) :args ((:args c) state)}))
-        (sort (keys commands))))
+  (let [cmds (all-commands)]
+    (mapv (fn [n]
+            (let [c (get cmds n)]
+              {:name n :summary (:summary c) :args ((:args c) state)}))
+          (sort (keys cmds)))))
 
 (defn command-step
   [state event]
-  (if-let [f (:run (get commands (:name event)))]
+  (if-let [f (:run (get (all-commands) (:name event)))]
     (f state (vec (:args event)))
     [state [(notify :error (str "not a view command: /" (:name event)))]]))
 
@@ -334,7 +453,7 @@
 (defn model
   [state]
   {:swarm         (when-let [s (:swarm state)] {:selected (:selected s)})
-   :grid_keys     (vec (sort (distinct (concat (keys grid-keymap)
+   :grid_keys     (vec (sort (distinct (concat (keys (all-grid-keymap))
                                                (map :key (:keys (:producer state)))))))
    :panel_keys    (panels/panel-keys (:panels state))
    :producer_keys (vec (:keys (:producer state)))
@@ -353,8 +472,9 @@
                   :producer {:replies [] :keys [] :usage ""}}))
 
 (defn dispatch!
-  "Fold `event` into the view state; {:model :effects}."
+  "Fold `event` into the view state; {:model :effects}. Registration
+   warnings not yet shown lead the effects, as notices."
   [event]
   (let [[s effects] (step @state event)]
     (reset! state s)
-    {:model (model s) :effects effects}))
+    {:model (model s) :effects (into (drain-warnings!) effects)}))

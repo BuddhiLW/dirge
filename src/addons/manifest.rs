@@ -32,6 +32,10 @@ pub struct AddonManifest {
     pub init_fn: String,
     /// The IAddon protocol namespace the addon implements, when declared.
     pub protocol_ns: Option<String>,
+    /// `:dirge/view-ns`: a namespace dirge requires in the VIEW runtime
+    /// (after `dirge.view`), never in the addon isolate, where the addon
+    /// registers view commands and grid keys. Optional.
+    pub view_ns: Option<String>,
 }
 
 /// Why a manifest could not be used.
@@ -62,6 +66,7 @@ const KEY_ID: &str = "addon/id";
 const KEY_INIT_NS: &str = "addon/init-ns";
 const KEY_INIT_FN: &str = "addon/init-fn";
 const KEY_PROTOCOL_NS: &str = "addon/protocol-ns";
+const KEY_VIEW_NS: &str = "dirge/view-ns";
 
 impl AddonManifest {
     /// Parse a manifest from EDN source. `origin` labels read errors.
@@ -79,6 +84,7 @@ impl AddonManifest {
         let init_ns = required(entries, KEY_INIT_NS)?;
         let init_fn_raw = required(entries, KEY_INIT_FN)?;
         let protocol_ns = optional(entries, KEY_PROTOCOL_NS)?;
+        let view_ns = optional(entries, KEY_VIEW_NS)?;
 
         let init_fn = match init_fn_raw.split_once('/') {
             Some((fn_ns, name)) if !fn_ns.is_empty() && !name.is_empty() => {
@@ -99,6 +105,7 @@ impl AddonManifest {
             init_ns,
             init_fn,
             protocol_ns,
+            view_ns,
         })
     }
 
@@ -160,8 +167,23 @@ mod tests {
                 init_ns: "example.probe.addon".into(),
                 init_fn: "addon-ctor".into(),
                 protocol_ns: None,
+                view_ns: None,
             }
         );
+    }
+
+    #[test]
+    fn reads_an_optional_view_namespace() {
+        let m =
+            parse("{:addon/id a :addon/init-ns a.core :addon/init-fn ctor :dirge/view-ns a.view}")
+                .unwrap();
+        assert_eq!(m.view_ns.as_deref(), Some("a.view"));
+        assert!(matches!(
+            parse("{:addon/id a :addon/init-ns a.core :addon/init-fn ctor :dirge/view-ns 1}"),
+            Err(ManifestError::BadValue {
+                key: "dirge/view-ns"
+            })
+        ));
     }
 
     #[test]
