@@ -62,3 +62,7 @@ __pycache__/
 2404.07439v1.md
 test_program_c
 test_program_rs
+
+# Beads / Dolt files (added by bd init)
+.beads/proxieddb/
+*.gate.lock*

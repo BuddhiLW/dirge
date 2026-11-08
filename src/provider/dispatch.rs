@@ -55,6 +55,9 @@ pub enum AnyClient {
     Opper(
         openai::CompletionsClient<super::compressing_http::CompressingHttpClient<reqwest::Client>>,
     ),
+    CheaperInference(
+        openai::CompletionsClient<super::compressing_http::CompressingHttpClient<reqwest::Client>>,
+    ),
     Custom(
         openai::CompletionsClient<super::compressing_http::CompressingHttpClient<reqwest::Client>>,
     ),
@@ -92,6 +95,7 @@ impl AnyClient {
             AnyClient::Ollama(c) => AnyModel::Ollama(c.completion_model(name)),
             AnyClient::Requesty(c) => AnyModel::Requesty(c.completion_model(name)),
             AnyClient::Opper(c) => AnyModel::Opper(c.completion_model(name)),
+            AnyClient::CheaperInference(c) => AnyModel::CheaperInference(c.completion_model(name)),
             AnyClient::Custom(c) => AnyModel::Custom(c.completion_model(name)),
         }
     }
@@ -413,6 +417,11 @@ pub enum AnyModel {
             super::compressing_http::CompressingHttpClient<reqwest::Client>,
         >,
     ),
+    CheaperInference(
+        openai::completion::CompletionModel<
+            super::compressing_http::CompressingHttpClient<reqwest::Client>,
+        >,
+    ),
     Custom(
         openai::completion::CompletionModel<
             super::compressing_http::CompressingHttpClient<reqwest::Client>,
@@ -477,6 +486,7 @@ impl AnyModel {
             AnyModel::Ollama(m) => one_shot!(m),
             AnyModel::Requesty(m) => one_shot!(m),
             AnyModel::Opper(m) => one_shot!(m),
+            AnyModel::CheaperInference(m) => one_shot!(m),
             AnyModel::Custom(m) => one_shot!(m),
         }
     }
@@ -537,6 +547,7 @@ impl AnyModel {
             AnyModel::Ollama(_) => "ollama",
             AnyModel::Requesty(_) => "requesty",
             AnyModel::Opper(_) => "opper",
+            AnyModel::CheaperInference(_) => "cheaperinference",
             AnyModel::Custom(_) => "custom",
         }
     }
@@ -563,6 +574,7 @@ impl AnyModel {
             AnyModel::Ollama(m) => m.model.clone(),
             AnyModel::Requesty(m) => m.model.clone(),
             AnyModel::Opper(m) => m.model.clone(),
+            AnyModel::CheaperInference(m) => m.model.clone(),
             AnyModel::Custom(m) => m.model.clone(),
         }
     }

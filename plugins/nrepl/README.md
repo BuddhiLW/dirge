@@ -33,6 +33,15 @@ attempt. Strings and line comments are skipped.
 `/nrepl-timeout`). An `interrupt` op is sent when the limit is exceeded.
 `/nrepl-interrupt` is available for manual cancellation.
 
+A timed-out eval is *not* retried. The eval keeps running server-side after
+the timeout, so its late reply would desync every later eval; instead the
+connection is dropped, and the next `nrepl_eval` reconnects cleanly. Only a
+genuine transport failure (broken pipe / closed socket) triggers the
+reconnect-and-retry path — an ordinary eval error (compile error, thrown
+exception) just propagates with the connection intact. The connect handshake
+is also bounded (`nrepl-connect-timeout`, 10 s) so a server that accepts the
+TCP connection but never answers fails fast instead of hanging the harness.
+
 ## Installation
 
 Copy into one of two auto-discovered directories:
