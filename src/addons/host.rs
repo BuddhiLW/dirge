@@ -6,9 +6,10 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use super::domain::{
-    AddonSummary, BeforeOutcome, CommandOutput, CommandSpec, HookPoint, LoadFailure, ReloadReport,
-    ToolSpec,
+    AddonSummary, AfterOutcome, BeforeOutcome, CommandOutput, CommandSpec, HookPoint, LoadFailure,
+    ReloadReport, ToolSpec,
 };
+use super::host_config;
 use super::policy;
 use super::port::AddonRuntime;
 #[allow(unused_imports)]
@@ -101,7 +102,7 @@ fn load_all(runtime: &dyn AddonRuntime, set: &LoadSet, host_config: &Value) -> L
     let mut addons = Vec::new();
     let mut reports = Vec::new();
     for manifest in &set.manifests {
-        let report = runtime.load(manifest, host_config);
+        let report = runtime.load(manifest, &host_config::for_manifest(host_config, manifest));
         match policy::parse_summary(manifest, &report) {
             Ok(summary) => {
                 reports.push((summary.id.clone(), report));
@@ -156,7 +157,7 @@ fn nothing_reserved() -> Mutex<Reserved> {
 
 pub struct AddonHost {
     runtime: Arc<dyn AddonRuntime>,
-    host_config: Value,
+    host_config: Mutex<Value>,
     loaded: Mutex<Loaded>,
     reserved: Mutex<Reserved>,
 }
@@ -182,7 +183,7 @@ impl AddonHost {
     ) -> Self {
         Self {
             runtime,
-            host_config: Value::Object(Default::default()),
+            host_config: Mutex::new(Value::Object(Default::default())),
             loaded: Mutex::new(Loaded::new(addons, failures)),
             reserved: nothing_reserved(),
         }
@@ -199,7 +200,7 @@ impl AddonHost {
         let loaded = Loaded::new(addons, Vec::new()).with_reported_keys(reports);
         Self {
             runtime,
-            host_config: Value::Object(Default::default()),
+            host_config: Mutex::new(Value::Object(Default::default())),
             loaded: Mutex::new(loaded),
             reserved: nothing_reserved(),
         }
@@ -210,10 +211,16 @@ impl AddonHost {
         let loaded = load_all(runtime.as_ref(), &set, &host_config);
         Self {
             runtime,
-            host_config,
+            host_config: Mutex::new(host_config),
             loaded: Mutex::new(loaded),
             reserved: nothing_reserved(),
         }
+    }
+
+    /// What the next [`reload`](Self::reload) hands the addons as
+    /// `:dirge/host`, e.g. once the user's `addons.settings` changed.
+    pub fn set_host_config(&self, host_config: Value) {
+        *self.host_config.lock_ignore_poison() = host_config;
     }
 
     /// Replace every addon with what `set` loads now, in the order the
@@ -231,7 +238,8 @@ impl AddonHost {
         let outcome = self.runtime.reload_sources_outcome(&set.sources);
         let source_errors = policy::as_failures(outcome.errors);
         let source_skips = policy::as_failures(outcome.skipped);
-        let after = load_all(self.runtime.as_ref(), &set, &self.host_config);
+        let host_config = self.host_config.lock_ignore_poison().clone();
+        let after = load_all(self.runtime.as_ref(), &set, &host_config);
         // What a refresh re-read before this reload describes addons that no
         // longer run; taking it in later would undo the reload.
         let _ = self.runtime.take_refreshed();
@@ -344,6 +352,18 @@ impl AddonHost {
         }
     }
 
+    /// Every addon's answer to the hook keyed `key`, folded by the runtime
+    /// into one value; failures logged. `None` when no addon listens or the
+    /// fold gives no answer.
+    pub fn fold(&self, key: &str, ctx: &Value) -> Option<Value> {
+        if !self.listens_key(key) {
+            return None;
+        }
+        let folded = self.runtime.fold_hook(key, ctx);
+        log_key_failures(key, &folded.failures);
+        folded.value
+    }
+
     /// Take in what the runtime re-read since the last call (after a REPL
     /// evaluation or `dirge.harness/refresh!`): the addons' tools, hooks and
     /// commands are replaced, their lifecycles untouched. `None` when
@@ -431,6 +451,12 @@ impl AddonHost {
         policy::fold_before(&self.emit(HookPoint::BeforeToolCall.key(), ctx))
     }
 
+    /// The folded `AfterToolCall` answer: appended texts and the last
+    /// `{:result "text"}` replacement.
+    pub fn after_tool_call(&self, ctx: &Value) -> AfterOutcome {
+        policy::fold_after(&self.emit(HookPoint::AfterToolCall.key(), ctx))
+    }
+
     /// Texts every addon answered `:dirge/session-start` with.
     pub fn session_start(&self, ctx: &Value) -> Vec<String> {
         self.texts(HookPoint::SessionStart, ctx)
@@ -477,7 +503,7 @@ fn log_key_failures(key: &str, replies: &[super::domain::HookReply]) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::addons::domain::HookReply;
+    use crate::addons::domain::{Folded, HookReply};
     use serde_json::json;
     use std::collections::VecDeque;
     use std::path::Path;
@@ -488,6 +514,8 @@ pub(crate) mod tests {
         pub tool_answer: Option<Result<Value, String>>,
         pub command_answer: Option<Result<Value, String>>,
         pub hook_answers: Vec<HookReply>,
+        /// What every fold answers.
+        pub folded: Folded,
         /// Load reports, answered in order.
         pub load_answers: Mutex<VecDeque<Value>>,
         pub source_errors: Vec<(PathBuf, String)>,
@@ -543,6 +571,11 @@ pub(crate) mod tests {
         fn run_hook_key(&self, key: &str, ctx: &Value) -> Vec<HookReply> {
             self.record(format!("hook {key} {ctx}"));
             self.hook_answers.clone()
+        }
+
+        fn fold_hook(&self, key: &str, ctx: &Value) -> Folded {
+            self.record(format!("fold {key} {ctx}"));
+            self.folded.clone()
         }
 
         fn take_refreshed(&self) -> Option<Vec<Value>> {
@@ -619,6 +652,31 @@ pub(crate) mod tests {
         assert_eq!(
             *rt.calls.lock().unwrap(),
             vec![r#"hook dirge/system-prompt {"cwd":"/w"}"#.to_string()]
+        );
+    }
+
+    #[test]
+    fn a_fold_answers_the_runtime_folded_value_only_when_an_addon_listens() {
+        let folded = Folded {
+            value: Some(json!({"x": 1})),
+            failures: vec![HookReply {
+                addon_id: "a".into(),
+                result: Err("boom".into()),
+            }],
+        };
+        let (host, rt) = host(
+            ScriptedRuntime {
+                folded,
+                ..Default::default()
+            },
+            vec![summary("a", &[], &[HookPoint::SystemPrompt])],
+        );
+        let key = HookPoint::SystemPrompt.key();
+        assert_eq!(host.fold(key, &json!({"n": 1})), Some(json!({"x": 1})));
+        assert_eq!(host.fold("acme/unheard", &json!({})), None);
+        assert_eq!(
+            *rt.calls.lock().unwrap(),
+            vec![format!(r#"fold {key} {{"n":1}}"#)]
         );
     }
 

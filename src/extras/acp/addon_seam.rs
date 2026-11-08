@@ -6,7 +6,7 @@
 //!
 //! The addons are reached through the [`AddonSeam`] the composition root
 //! (`main`) hands [`serve`](super::serve): an
-//! [`AddonEmitter`](crate::addons::port::AddonEmitter) port, never the
+//! [`AddonHooks`](crate::addons::port::AddonHooks) port, never the
 //! process-wide host.
 
 use agent_client_protocol::Responder;
@@ -18,13 +18,13 @@ use serde_json::Value;
 #[derive(Clone, Default)]
 pub struct AddonSeam {
     #[cfg(feature = "addons")]
-    emitter: Option<std::sync::Arc<dyn crate::addons::port::AddonEmitter>>,
+    emitter: Option<std::sync::Arc<dyn crate::addons::port::AddonHooks>>,
 }
 
 impl AddonSeam {
     /// A seam onto `emitter`.
     #[cfg(feature = "addons")]
-    pub fn new(emitter: Option<std::sync::Arc<dyn crate::addons::port::AddonEmitter>>) -> Self {
+    pub fn new(emitter: Option<std::sync::Arc<dyn crate::addons::port::AddonHooks>>) -> Self {
         Self { emitter }
     }
 
@@ -32,7 +32,7 @@ impl AddonSeam {
     pub fn current() -> Self {
         #[cfg(feature = "addons")]
         {
-            Self::new(crate::addons::emitter::current())
+            Self::new(crate::addons::hooks::current())
         }
         #[cfg(not(feature = "addons"))]
         {
@@ -202,19 +202,15 @@ mod tests {
     #[cfg(feature = "addons")]
     #[tokio::test]
     async fn an_injected_emitter_answers_ext_methods() {
-        use crate::addons::domain::HookReply;
-        use crate::addons::port::AddonEmitter;
+        use crate::addons::port::AddonHooks;
 
         struct Pong;
-        impl AddonEmitter for Pong {
+        impl AddonHooks for Pong {
             fn listens_key(&self, key: &str) -> bool {
                 key == crate::addons::acp::EXT_METHOD_KEY
             }
-            fn emit(&self, _key: &str, ctx: &Value) -> Vec<HookReply> {
-                vec![HookReply {
-                    addon_id: "pong".into(),
-                    result: Ok(json!({ "method": ctx["method"] })),
-                }]
+            fn fold(&self, _key: &str, ctx: &Value) -> Option<Value> {
+                Some(json!({ "method": ctx["method"] }))
             }
             fn post(&self, _key: &str, _ctx: &Value) {}
         }

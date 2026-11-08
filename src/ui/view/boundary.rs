@@ -77,6 +77,7 @@ fn interpret(renderer: &mut Renderer, effect: &ViewEffect) -> Outcome {
             Some(mode) => {
                 match scope {
                     PanelScope::Both => renderer.set_panel_mode(mode),
+                    PanelScope::Left => renderer.set_left_panel_mode(mode),
                     PanelScope::Right => renderer.set_right_panel_mode(mode),
                 }
                 Outcome::Done
@@ -180,6 +181,7 @@ fn panel_mode(name: &str) -> Option<PanelMode> {
         "off" => PanelMode::Off,
         "auto" => PanelMode::Auto,
         "debug" => PanelMode::Debug,
+        "vigils" => PanelMode::Vigil,
         _ => return None,
     })
 }
@@ -301,6 +303,7 @@ mod tests {
     fn panel_modes_and_panes_read_as_the_renderer_names_them() {
         assert_eq!(panel_mode("on"), Some(PanelMode::On));
         assert_eq!(panel_mode("debug"), Some(PanelMode::Debug));
+        assert_eq!(panel_mode("vigils"), Some(PanelMode::Vigil));
         assert_eq!(panel_mode("sideways"), None);
         assert_eq!(shown_panes(true, false), "left|main");
         assert_eq!(shown_panes(false, true), "main|right");

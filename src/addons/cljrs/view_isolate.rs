@@ -12,6 +12,7 @@ use cljrs_runtime::{ExecutionMode, Runtime};
 use serde_json::Value as Json;
 
 use super::isolate::{ISOLATE_STACK_BYTES, eval_source, install_args};
+use super::view_addons::ViewAddons;
 use crate::ui::view::engine::ThreadEngine;
 use crate::ui::view::port::{Reducer, UpdateSink};
 use crate::ui::view::{ViewEvent, ViewModel, ViewUpdate, wire};
@@ -34,9 +35,19 @@ pub struct CljrsReducer {
 }
 
 impl CljrsReducer {
+    /// [`Self::boot_with`] the addons recorded by
+    /// [`view_addons::set`](super::view_addons::set).
     pub fn boot() -> Result<Self, String> {
+        Self::boot_with(super::view_addons::current())
+    }
+
+    /// Boot `dirge.view`, then require each of `addons`' view
+    /// namespaces. One that fails to load is logged and skipped: an
+    /// addon never keeps the view from starting.
+    pub fn boot_with(addons: ViewAddons) -> Result<Self, String> {
         let runtime = Runtime::builder()
             .execution_mode(ExecutionMode::Tiered)
+            .source_paths(addons.roots.clone())
             .builtin_source(PANELS_NS, PANELS_SRC)
             .builtin_source(VIEW_NS, VIEW_SRC)
             .build()
@@ -50,6 +61,11 @@ impl CljrsReducer {
         };
         eval_source(&mut reducer.env, &format!("(require '{VIEW_NS})"))
             .map_err(|e| format!("cannot load {VIEW_NS}: {e}"))?;
+        for ns in &addons.namespaces {
+            if let Err(error) = eval_source(&mut reducer.env, &format!("(require '{ns})")) {
+                tracing::warn!(target: "dirge::view", view_ns = %ns, %error, "addon view namespace not loaded");
+            }
+        }
         Ok(reducer)
     }
 }

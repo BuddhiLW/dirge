@@ -206,6 +206,15 @@ pub struct HookReply {
     pub result: Result<Value, String>,
 }
 
+/// The addons' answers to one hook call, folded by the host into one value.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Folded {
+    /// The folded answer; `None` when there is none.
+    pub value: Option<Value>,
+    /// The replies that failed, each an `Err`.
+    pub failures: Vec<HookReply>,
+}
+
 /// The ctx key under which an emit site names the fields its hook reads as
 /// keywords. The host converts them and drops the key before any hook runs;
 /// the fields the host already converts for a hook key apply as well.
@@ -228,4 +237,14 @@ pub struct BeforeOutcome {
     pub context: Vec<String>,
     /// The last replacement args any addon returned.
     pub args: Option<Value>,
+}
+
+/// The folded answer of every addon to `AfterToolCall`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AfterOutcome {
+    /// The last `{:result "text"}` replacement any addon returned: the text
+    /// the model sees instead of the tool's own output.
+    pub result: Option<String>,
+    /// Texts appended to the (possibly replaced) result, in load order.
+    pub context: Vec<String>,
 }

@@ -205,6 +205,32 @@ fn requesty_builtin_name_is_protected_from_plugin_shadowing() {
     );
 }
 
+#[test]
+fn opper_standard_key_lookup_uses_only_opper_api_key() {
+    let kind = parse_provider("opper").expect("opper should be a built-in provider");
+    let key = resolve_api_key_from(
+        kind,
+        None,
+        None,
+        mock_env(&[("OPPER_API_KEY", "test-opper-key")]),
+    )
+    .expect("standard Opper key should resolve");
+
+    assert_eq!(key, "test-opper-key");
+    assert!(provider_env_var_fallbacks(kind).is_empty());
+}
+
+#[test]
+fn opper_builtin_name_is_protected_from_plugin_shadowing() {
+    let err = validate_custom_provider("OPPER", "https://interceptor.invalid/v1", false, true)
+        .expect_err("plugins must not shadow the Opper built-in");
+
+    assert!(
+        err.contains("collides with built-in"),
+        "unexpected error: {err}"
+    );
+}
+
 /// No stored `dirge auth` login → no provider implied, so the
 /// caller falls through to the openrouter default.
 #[test]
@@ -1412,6 +1438,31 @@ fn default_model_for_alias_uses_map_then_builtin_fallback() {
     assert_eq!(default_model_for("my-openai"), "deepseek/deepseek-v4-flash");
 }
 
+/// A provider alias resolves to the provider TYPE its entry declares; a name
+/// with no entry, or an entry with no explicit type, is its own type.
+#[test]
+fn provider_type_for_alias_uses_map_then_the_alias_itself() {
+    let providers = HashMap::from([
+        (
+            "work-claude".to_string(),
+            ProviderEntry {
+                provider_type: Some("anthropic".to_string()),
+                ..Default::default()
+            },
+        ),
+        ("deepseek".to_string(), ProviderEntry::default()),
+    ]);
+    assert_eq!(
+        provider_type_for_alias("work-claude", &providers),
+        "anthropic"
+    );
+    assert_eq!(provider_type_for_alias("deepseek", &providers), "deepseek");
+    assert_eq!(
+        provider_type_for_alias("Anthropic", &providers),
+        "anthropic"
+    );
+}
+
 /// dirge-8sku: an UNTRUSTED plugin shadowing a built-in name is still
 /// rejected (collision guard ENFORCED) — guards against credential
 /// interception. Tested directly via the validator since the plugin
@@ -2000,4 +2051,38 @@ fn upsert_keeps_the_search_registry_in_step() {
         .collect();
     assert_eq!(listed, vec!["read", "fresh"]);
     assert!(filter.lock().unwrap().is_empty(), "nothing force-loaded");
+}
+
+/// An MCP server that connects after boot cannot take a live addon tool's
+/// name: the installed tool keeps it, the arriving one is skipped and
+/// reported, and only the tools that did install join the MCP-name set.
+#[cfg(feature = "mcp")]
+#[test]
+fn a_late_mcp_tool_cannot_take_a_live_tool_name() {
+    use std::sync::Arc;
+
+    let mut agent = build_openai_any_agent();
+    agent.upsert_loop_tools(
+        "addon",
+        vec![Arc::new(SourcedTool("shared", Some("addon")))],
+    );
+
+    let skipped = agent.extend_loop_tools(vec![
+        Arc::new(SourcedTool("shared", Some("mcp"))),
+        Arc::new(SourcedTool("mcp_only", Some("mcp"))),
+        Arc::new(SourcedTool("mcp_only", Some("mcp"))),
+    ]);
+
+    assert_eq!(skipped, vec!["shared".to_string(), "mcp_only".to_string()]);
+    let live: Vec<(&str, Option<&str>)> = agent
+        .loop_tools
+        .iter()
+        .map(|t| (t.name(), t.source()))
+        .collect();
+    assert_eq!(
+        live,
+        vec![("shared", Some("addon")), ("mcp_only", Some("mcp"))]
+    );
+    assert!(!agent.mcp_tool_names.contains("shared"));
+    assert!(agent.mcp_tool_names.contains("mcp_only"));
 }

@@ -25,7 +25,8 @@ use rmcp::handler::server::ServerHandler;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, ContentBlock, Implementation, InitializeResult, ServerCapabilities, ServerInfo,
+    CallToolResult, ContentBlock, Implementation, InitializeResult, ServerCapabilities,
+    ServerConfig,
 };
 use rmcp::transport::stdio;
 use rmcp::{schemars, tool, tool_handler, tool_router};
@@ -92,7 +93,7 @@ struct NewSessionArgs {
 
 #[tool_handler]
 impl ServerHandler for DirgeMcp {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("dirge", env!("CARGO_PKG_VERSION")))
             .with_instructions(

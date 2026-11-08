@@ -183,6 +183,10 @@ const HARNESS_INIT: &str = r#"
 (var harness-block nil)
 (var harness-mutate-input nil)
 (var harness-replace-result nil)
+(var harness-toil nil)
+(var harness-enrich nil)
+(var harness-outcome nil)
+(var harness-verdict nil)
 
 # Entity/relation record accumulators (experimental-graph-search).
 # Janet compressors call harness/record-entity and harness/record-relation
@@ -228,6 +232,20 @@ const HARNESS_INIT: &str = r#"
   (when (string? json-str) (set harness-mutate-input json-str)))
 (defn harness/replace-result [output]
   (when (string? output) (set harness-replace-result output)))
+# Act half of act/chaining: ask the host to run shell commands directly.
+# Set from `on-vigil-rite` (gate Toil, instead of waking the agent) or
+# `on-vigil-observance` (post-turn actuation). `commands` is a JSON array
+# of command strings, e.g. "[\"curl -fsS http://x/health\" \"systemctl restart x\"]";
+# a bare non-JSON string is treated as a single command.
+(defn harness/toil [commands]
+  (when (string? commands) (set harness-toil commands)))
+# on-vigil-enrich stage only: hand the host a JSON object to merge into the
+# event context before the rite gate and observance run. `json` must be a
+# JSON object string, e.g. "{\"author\":\"jane\"}" — the host shallow-merges
+# its keys into each event's context so the prompt template can reference
+# them ({author}) and the gate sees the enriched payload.
+(defn harness/enrich [json]
+  (when (string? json) (set harness-enrich json)))
 
 # Entity/relation recording for graph-search (#393).
 # Compressors call these from `on-tool-end` to persist structured facts.
@@ -825,8 +843,60 @@ const HARNESS_INIT: &str = r#"
                    (harness/-escape label) "\t"
                    (harness/-escape parameters) "\t"
                    (harness/-escape handler) "\t"
-                   mode "\t"
-                    (harness/-escape prep) "\n")))))
+                    mode "\t"
+                     (harness/-escape prep) "\n")))))
+
+# (harness/store key value) -> value
+# (harness/load key) -> value | nil
+# Session-scoped transient composition state shared by all plugins in this
+# process. Mirrors pi's codemode `store()`/`load()`: intermediates an agent
+# produces while composing tools (e.g. a batch of classified verdicts) live
+# here, not on the filesystem. Cleared when the plugin VM is torn down at
+# session end — durable results belong in vigil_db or the issue bridge, not
+# here.
+(var harness-session-store @{})
+(defn harness/store [key value]
+  (put harness-session-store (string key) value)
+  value)
+(defn harness/load [key]
+  (get harness-session-store (string key)))
+
+# (json-encode value) -> JSON string
+# (json-escape string) -> escaped string
+# Minimal Janet -> JSON serializer shared by every plugin, not just vigil: any
+# plugin that POSTs JSON or returns a structured tool result needs it. Handles
+# strings, numbers, booleans, nil, indexed arrays, and dictionaries.
+# NOTE: the :null keyword json-decode produces DOES round-trip: Janet
+# keywords stringify without their leading colon, so the fallback
+# `(string x)` arm emits a bare `null` (valid JSON null), not `":null"`.
+(defn- json-escape [s]
+  (->> s
+       (string/replace-all "\\" "\\\\")
+       (string/replace-all "\"" "\\\"")
+       (string/replace-all "\n" "\\n")
+       (string/replace-all "\r" "\\r")
+       (string/replace-all "\t" "\\t")))
+
+(defn- json-encode [x]
+  (cond
+    (string? x) (string "\"" (json-escape x) "\"")
+    (number? x) (string x)
+    (= x true) "true"
+    (= x false) "false"
+    (nil? x) "null"
+    (dictionary? x)
+      (string "{"
+              (string/join
+                (map (fn [[k v]]
+                       (string "\"" k "\":" (json-encode v)))
+                     (pairs x))
+                ",")
+              "}")
+    (indexed? x)
+      (string "["
+              (string/join (map json-encode x) ",")
+              "]")
+    (string x)))
 
 # (harness/json-extract json-str key) -> string | nil
 # Uses serde_json to extract a string value from a JSON object. Returns
@@ -1037,6 +1107,129 @@ const HARNESS_TOOL_INIT: &str = r#"
                  (string? args) args
                  (error "harness/call-tool: args must be a JSON string")))
   (harness/__call-tool name payload))
+"#;
+
+/// Janet wrapper for the issue bridge, installed on the **plugin VM only**.
+///
+/// Kept out of `HARNESS_INIT` for the same reason as `HARNESS_NOTEBOOK_INIT`:
+/// the notebook VM runs that prelude but does NOT register `harness/__emit-issue`,
+/// so a `defn` body that names the symbol would fail to compile there.
+#[cfg(feature = "plugin")]
+const HARNESS_ISSUE_INIT: &str = r#"
+# (harness/emit-issue title &opt body priority dedup-key) -> issue id string | nil
+# Files a durable, session-unscoped issue on the board and returns its id
+# (e.g. "drg-a1b2"). A non-empty dedup-key upserts into the single live issue
+# carrying that key instead of creating a new row. Returns nil when the issue
+# bridge is not installed (plugin tests, --no-session without the store) or
+# the title is empty.
+(defn harness/emit-issue [title &opt body priority dedup-key]
+  (harness/__emit-issue
+    (string title)
+    (if (nil? body) "" (string body))
+    (if (nil? priority) "" (string priority))
+    (if (nil? dedup-key) "" (string dedup-key))))
+"#;
+
+/// Janet wrapper for the HTTP bridge, installed on the **plugin VM only**.
+///
+/// Kept out of `HARNESS_INIT` for the same reason as `HARNESS_NOTEBOOK_INIT`:
+/// the notebook VM runs that prelude but does NOT register `harness/__http-post`,
+/// so a `defn` body that names the symbol would fail to compile there.
+#[cfg(feature = "plugin")]
+const HARNESS_HTTP_INIT: &str = r#"
+# (harness/http-post url body &opt headers) -> response body string | nil
+# Blocking HTTP POST with Content-Type: application/json. `headers` is an
+# optional JSON object of string -> string pairs. Returns the raw response
+# body on a 2xx status, or nil on any error / non-2xx / timeout.
+(defn harness/http-post [url body &opt headers]
+  (harness/__http-post
+    (string url)
+    (string body)
+    (if (nil? headers) "" (string headers))))
+
+# (harness/http-get url &opt headers) -> response body string | nil
+# Blocking HTTP GET with no body. `headers` is an optional JSON object of
+# string -> string pairs. Returns the raw response body on a 2xx status, or
+# nil on any error / non-2xx / timeout.
+(defn harness/http-get [url &opt headers]
+  (harness/__http-get
+    (string url)
+    (if (nil? headers) "" (string headers))))
+
+# (harness/http-post-many url bodies limit &opt headers) -> JSON array string | nil
+# `bodies` is a JSON array of request-body strings; `limit` caps how many POSTs
+# are in flight at once. Returns a JSON array of response bodies (null where a
+# request failed), in input order. Real bounded concurrency lives in Rust
+# because Janet fibers are cooperative and http-post blocks the worker thread.
+(defn harness/http-post-many [url bodies limit &opt headers]
+  (harness/__http-post-many
+    (string url)
+    (string bodies)
+    (string limit)
+    (if (nil? headers) "" (string headers))))
+"#;
+
+/// Vigil Janet prelude — exposes vigil/emit, vigil/list, vigil/set-state,
+/// vigil/get, vigil/live? for plugins running inside a vigil-keeper.
+#[cfg(all(feature = "plugin", feature = "vigil"))]
+const HARNESS_VIGIL_INIT: &str = r#"
+(defn vigil/live?
+  "True when the vigil bridge is active. False on builds without the
+   vigil feature, and also when vigil is not running — so a true result
+   guarantees that vigil/emit will actually reach the keeper."
+  []
+  (if-let [entry (get (curenv) 'harness/__vigil-live)]
+    (truthy? ((entry :value)))
+    false))
+
+# on-vigil-outcome stage only: classify a finished observance so the host
+# can persist (signal, outcome) and build the empirical prior that feeds
+# GateFail::Prior (wake iff P(useful) > threshold when the oracle is
+# unavailable). `label` is a short token ("resolved", "false-alarm",
+# "escalated", ...); `useful` is an optional boolean marking whether the
+# wake was worth it and defaults to true when omitted.
+(defn harness/outcome [label &opt useful]
+  (when (string? label)
+    (set harness-outcome
+         (json-encode {:label label :useful (if (nil? useful) true (truthy? useful))}))))
+
+# on-vigil-rite predicate: return the oracle's confidence p in [0,1] and let
+# the host apply the vigil's cost-matrix threshold (p > threshold -> rouse,
+# otherwise shroud). The host keeps the threshold math so the plugin never
+# bakes in its own magic number; `harness/block` and `harness/toil` remain
+# the explicit override paths checked before this slot.
+(defn harness/verdict [p]
+  (when (number? p)
+    (set harness-verdict (json-encode {:p p}))))
+
+(defn vigil/emit
+  "Push an event into the vigil-keeper. `event-name` is a string key;
+   `data` is a dict or JSON string with event context."
+  [event-name &opt data]
+  (when (and (vigil/live?) (string? event-name))
+    (let [payload (if data
+                   (if (string? data) data (json-encode data))
+                   "")
+          msg (string event-name "\t" payload)]
+      (harness/__vigil-emit msg))))
+
+(defn vigil/list
+  "Return an array of all active vigil names."
+  []
+  (when (vigil/live?)
+    (harness/__vigil-list)))
+
+(defn vigil/set-state
+  "Set a state key for a named vigil. (vigil/set-state name key value)"
+  [name key value]
+  (when (and (vigil/live?) (string? name) (string? key))
+    (harness/__vigil-set-state name key (string value))))
+
+(defn vigil/get
+  "Get the state table for a named vigil. (vigil/get name)"
+  [name]
+  (when (and (vigil/live?) (string? name))
+    (harness/__vigil-get name)))
 "#;
 
 /// dirge-l6bf: neuter the Janet escape hatches that can terminate or
@@ -1943,6 +2136,30 @@ fn worker_loop(
             env.add_c_fn(CFunOptions::new(c"__lsp", janet_lsp_cfn).namespace(c"harness"));
             env.add_c_fn(CFunOptions::new(c"__lsp-live", janet_lsp_live_cfn).namespace(c"harness"));
         }
+        // Vigil bridge: expose vigil/live? and vigil/emit C functions
+        // so Janet plugins can interact with the vigil-keeper at runtime.
+        #[cfg(all(feature = "plugin", feature = "vigil"))]
+        {
+            env.add_c_fn(
+                CFunOptions::new(c"__vigil-live", vigil_bridge::vigil_live_cfn)
+                    .namespace(c"harness"),
+            );
+            env.add_c_fn(
+                CFunOptions::new(c"__vigil-emit", vigil_bridge::vigil_emit_cfn)
+                    .namespace(c"harness"),
+            );
+            env.add_c_fn(
+                CFunOptions::new(c"__vigil-list", vigil_bridge::vigil_list_cfn)
+                    .namespace(c"harness"),
+            );
+            env.add_c_fn(
+                CFunOptions::new(c"__vigil-get", vigil_bridge::vigil_get_cfn).namespace(c"harness"),
+            );
+            env.add_c_fn(
+                CFunOptions::new(c"__vigil-set-state", vigil_bridge::vigil_set_state_cfn)
+                    .namespace(c"harness"),
+            );
+        }
         // Computer-use exec: forwards actions to the sandbox drainer.
         // The C function reads SANDBOX_EXEC_TX; if the channel wasn't
         // installed (e.g. --sandbox off), it returns nil gracefully.
@@ -1956,6 +2173,18 @@ fn worker_loop(
         env.add_c_fn(CFunOptions::new(c"__call-tool", janet_call_tool_cfn).namespace(c"harness"));
         env.add_c_fn(CFunOptions::new(c"__list-tools", janet_list_tools_cfn).namespace(c"harness"));
         env.add_c_fn(CFunOptions::new(c"__tools-live", janet_tools_live_cfn).namespace(c"harness"));
+        // Issue bridge: lets a plugin file a durable issue on the board.
+        env.add_c_fn(
+            CFunOptions::new(c"__emit-issue", issue_bridge::issue_emit_cfn).namespace(c"harness"),
+        );
+        // HTTP bridge: blocking POST for sidecar services (e.g. lev).
+        env.add_c_fn(CFunOptions::new(c"__http-post", janet_http_post_cfn).namespace(c"harness"));
+        // HTTP bridge: blocking GET for issue-tracker / structured-API fetch.
+        env.add_c_fn(CFunOptions::new(c"__http-get", janet_http_get_cfn).namespace(c"harness"));
+        // HTTP bridge: bounded-concurrent fan-out of N POSTs to one URL.
+        env.add_c_fn(
+            CFunOptions::new(c"__http-post-many", janet_http_post_many_cfn).namespace(c"harness"),
+        );
     }
     // Register DAP C functions when both features are enabled.
     #[cfg(feature = "dap")]
@@ -1991,6 +2220,23 @@ fn worker_loop(
     if let Err(e) = client.run(HARNESS_TOOL_INIT) {
         let _ = init_tx.send(Err(format!("harness tool-bridge init failed: {e}")));
         return;
+    }
+    if let Err(e) = client.run(HARNESS_ISSUE_INIT) {
+        let _ = init_tx.send(Err(format!("harness issue-bridge init failed: {e}")));
+        return;
+    }
+    if let Err(e) = client.run(HARNESS_HTTP_INIT) {
+        let _ = init_tx.send(Err(format!("harness http-bridge init failed: {e}")));
+        return;
+    }
+    // Vigil Janet prelude — defines (vigil/emit), (vigil/list),
+    // (vigil/set-state), (vigil/get), (vigil/live?).
+    #[cfg(all(feature = "plugin", feature = "vigil"))]
+    {
+        if let Err(e) = client.run(HARNESS_VIGIL_INIT) {
+            let _ = init_tx.send(Err(format!("vigil init failed: {e}")));
+            return;
+        }
     }
     // dirge-l6bf: disable host-terminating Janet functions. MUST run after
     // the harness preludes and before any plugin loads, so plugin code
@@ -2740,20 +2986,292 @@ unsafe fn json_to_janet_depth(v: &serde_json::Value, depth: usize) -> janetrs::l
             serde_json::Value::String(s) => wrap_string(s),
             serde_json::Value::Array(items) => {
                 let arr = janet_array(items.len().min(i32::MAX as usize) as i32);
+                // Root the half-built array before the recursive calls allocate:
+                // a GC inside json_to_janet_depth would otherwise collect it mid-fill.
+                janet_gcroot(janet_wrap_array(arr));
                 for item in items {
                     janet_array_push(arr, json_to_janet_depth(item, depth + 1));
                 }
+                janet_gcunroot(janet_wrap_array(arr));
                 janet_wrap_array(arr)
             }
             serde_json::Value::Object(map) => {
                 let tbl = janet_table(map.len().min(i32::MAX as usize) as i32);
+                // Root the half-built table before wrap_string and the recursive
+                // calls allocate: a GC would otherwise collect it mid-fill.
+                janet_gcroot(janet_wrap_table(tbl));
                 for (k, val) in map {
                     let key = wrap_string(k);
                     janet_table_put(tbl, key, json_to_janet_depth(val, depth + 1));
                 }
+                janet_gcunroot(janet_wrap_table(tbl));
                 janet_wrap_table(tbl)
             }
         }
+    }
+}
+
+/// C-function backing `harness/__http-post`. Performs a blocking HTTP POST
+/// and returns the raw response body as a string on a 2xx status, or nil on
+/// any error / non-2xx / timeout. Uses reqwest's blocking client, which owns
+/// its own runtime, so it is safe to call from the Janet worker thread (which
+/// is not parked on the tokio runtime).
+#[cfg(feature = "plugin")]
+unsafe extern "C-unwind" fn janet_http_post_cfn(
+    argc: i32,
+    argv: *mut janetrs::lowlevel::Janet,
+) -> janetrs::lowlevel::Janet {
+    use janetrs::lowlevel::*;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        if argc < 2 {
+            return janet_wrap_nil();
+        }
+        let Some(url) = read_string_arg(argv, 0) else {
+            return janet_wrap_nil();
+        };
+        let Some(body) = read_string_arg(argv, 1) else {
+            return janet_wrap_nil();
+        };
+        let headers_json = if argc >= 3 {
+            read_string_arg(argv, 2).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        http_request(reqwest::Method::POST, true, &url, &body, &headers_json)
+    }));
+    match result {
+        Ok(j) => j,
+        Err(payload) => {
+            let msg = panic_payload_to_string(&payload);
+            tracing::error!(
+                target: "dirge::plugin",
+                cfn = "harness/http-post",
+                panic = %msg,
+                "FFI panic in http-post cfn — returning nil",
+            );
+            unsafe { janet_wrap_nil() }
+        }
+    }
+}
+
+/// C-function backing `harness/__http-get`. Blocking HTTP GET with no body;
+/// the optional `headers` JSON object is argv[1].
+#[cfg(feature = "plugin")]
+unsafe extern "C-unwind" fn janet_http_get_cfn(
+    argc: i32,
+    argv: *mut janetrs::lowlevel::Janet,
+) -> janetrs::lowlevel::Janet {
+    use janetrs::lowlevel::*;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        if argc < 1 {
+            return janet_wrap_nil();
+        }
+        let Some(url) = read_string_arg(argv, 0) else {
+            return janet_wrap_nil();
+        };
+        let headers_json = if argc >= 2 {
+            read_string_arg(argv, 1).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        http_request(reqwest::Method::GET, false, &url, "", &headers_json)
+    }));
+    match result {
+        Ok(j) => j,
+        Err(payload) => {
+            let msg = panic_payload_to_string(&payload);
+            tracing::error!(
+                target: "dirge::plugin",
+                cfn = "harness/http-get",
+                panic = %msg,
+                "FFI panic in http-get cfn — returning nil",
+            );
+            unsafe { janet_wrap_nil() }
+        }
+    }
+}
+
+/// C-function backing `harness/__http-post-many`. Fans out N blocking POSTs to
+/// one URL over a bounded number of scoped threads and returns a JSON array of
+/// response bodies (or `null` per failed request) in input order.
+///
+/// This is dirge's answer to pi's `createLimiter(4)`. Janet fibers are
+/// cooperative single-threaded and `harness/http-post` blocks the worker
+/// thread, so an `ev/spawn` fan-out would SERIALIZE the requests, not overlap
+/// them. Real bounded concurrency over blocking HTTP has to live here, in
+/// Rust.
+#[cfg(feature = "plugin")]
+unsafe extern "C-unwind" fn janet_http_post_many_cfn(
+    argc: i32,
+    argv: *mut janetrs::lowlevel::Janet,
+) -> janetrs::lowlevel::Janet {
+    use janetrs::lowlevel::*;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        // argv: url, bodies (JSON array of strings), limit (int), headers (JSON obj, optional)
+        if argc < 3 {
+            return janet_wrap_nil();
+        }
+        let Some(url) = read_string_arg(argv, 0) else {
+            return janet_wrap_nil();
+        };
+        let Some(bodies_json) = read_string_arg(argv, 1) else {
+            return janet_wrap_nil();
+        };
+        let Some(limit) = read_string_arg(argv, 2).and_then(|s| s.parse::<usize>().ok()) else {
+            return janet_wrap_nil();
+        };
+        let headers_json = if argc >= 4 {
+            read_string_arg(argv, 3).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        http_post_many(&url, &bodies_json, limit, &headers_json)
+    }));
+    match result {
+        Ok(j) => j,
+        Err(payload) => {
+            let msg = panic_payload_to_string(&payload);
+            tracing::error!(
+                target: "dirge::plugin",
+                cfn = "harness/http-post-many",
+                panic = %msg,
+                "FFI panic in http-post-many cfn — returning nil",
+            );
+            unsafe { janet_wrap_nil() }
+        }
+    }
+}
+
+/// Upper bound on a single HTTP bridge call. Like the LSP bridge, a hung
+/// sidecar must not pin the Janet worker thread — and thus every plugin
+/// hook — forever.
+#[cfg(feature = "plugin")]
+// The rite gate and enrich stage dispatch through `dispatch_tool_hook`, whose
+// budget is `HOOK_TIMEOUT` (5 s) plus the post-interrupt `INTERRUPT_GRACE`
+// (2 s) — 7 s before a blocking hook result is abandoned. `eval_with_timeout`
+// interrupts the Janet VM, not a blocking C call like this bridge, so the
+// HTTP timeout must stay strictly under that 7 s budget or a slow-but-successful
+// lev verdict is dropped and the gate fails open. The reaper's outer oneshot
+// timeout (10 s) sits above the hook budget.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Blocking HTTP request shared by the POST/GET/many bridge C-fns. Returns the
+/// raw body on a 2xx status, `None` otherwise. Pure Rust (no Janet values) so
+/// it is safe to call from the scoped fan-out threads in `http_post_many`.
+#[cfg(feature = "plugin")]
+fn http_send_blocking(
+    method: reqwest::Method,
+    has_body: bool,
+    url: &str,
+    body: &str,
+    headers_json: &str,
+) -> Option<String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .build()
+        .ok()?;
+
+    let mut request = client
+        .request(method, url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json");
+
+    if !headers_json.is_empty()
+        && let Ok(map) =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(headers_json)
+    {
+        for (name, value) in map {
+            if let serde_json::Value::String(v) = value {
+                request = request.header(name, v);
+            }
+        }
+    }
+
+    if has_body {
+        request = request.body(body.to_owned());
+    }
+
+    let response = request.send().ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.text().ok()
+}
+
+/// Wrap a single `http_send_blocking` result as a Janet string-or-nil. Runs on
+/// the Janet worker thread only — never from the fan-out threads.
+#[cfg(feature = "plugin")]
+unsafe fn http_request(
+    method: reqwest::Method,
+    has_body: bool,
+    url: &str,
+    body: &str,
+    headers_json: &str,
+) -> janetrs::lowlevel::Janet {
+    match http_send_blocking(method, has_body, url, body, headers_json) {
+        Some(text) => unsafe { wrap_string(&text) },
+        None => unsafe { janetrs::lowlevel::janet_wrap_nil() },
+    }
+}
+
+/// Fan out `bodies_json` (a JSON array of request-body strings) against `url`
+/// over at most `limit` scoped threads. Returns a JSON array string whose i-th
+/// element is the i-th response body, or `null` when that request failed.
+#[cfg(feature = "plugin")]
+unsafe fn http_post_many(
+    url: &str,
+    bodies_json: &str,
+    limit: usize,
+    headers_json: &str,
+) -> janetrs::lowlevel::Janet {
+    use janetrs::lowlevel::*;
+    let bodies: Vec<String> = match serde_json::from_str(bodies_json) {
+        Ok(b) => b,
+        Err(_) => return unsafe { janet_wrap_nil() },
+    };
+    if bodies.is_empty() {
+        return unsafe { wrap_string("[]") };
+    }
+
+    let limit = limit.clamp(1, bodies.len());
+    let slots: Vec<std::sync::Mutex<Option<String>>> = (0..bodies.len())
+        .map(|_| std::sync::Mutex::new(None))
+        .collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+
+    std::thread::scope(|scope| {
+        for _ in 0..limit {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= bodies.len() {
+                        break;
+                    }
+                    let body = http_send_blocking(
+                        reqwest::Method::POST,
+                        true,
+                        url,
+                        &bodies[i],
+                        headers_json,
+                    );
+                    *slots[i].lock().expect("fan-out result slot poisoned") = body;
+                }
+            });
+        }
+    });
+
+    let out: Vec<serde_json::Value> = slots
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .ok()
+                .flatten()
+                .map_or(serde_json::Value::Null, serde_json::Value::String)
+        })
+        .collect();
+
+    match serde_json::to_string(&out) {
+        Ok(json) => unsafe { wrap_string(&json) },
+        Err(_) => unsafe { janet_wrap_nil() },
     }
 }
 
@@ -3636,6 +4154,323 @@ unsafe fn get_dict_int_array(v: janetrs::lowlevel::Janet, key: &str) -> Option<V
         }
     }
     Some(out)
+}
+
+/// Bridge from the Janet worker thread to the durable issue board.
+///
+/// Exposes Janet function:
+/// - `harness/emit-issue` — (title [body] [priority] [dedup-key]) -> issue id string or nil
+///
+/// Guarded by `plugin` only (issues are core, not vigil-gated): a flow plugin
+/// can file an issue in loop, vigil, or interactive mode. The issue is created
+/// session-unscoped (`session_id = None`); `assign_to_session` can pull it onto
+/// a conversation board later.
+#[cfg(feature = "plugin")]
+pub(crate) mod issue_bridge {
+    use super::{read_string_arg, wrap_string};
+    use crate::extras::issue_db::IssueStore;
+    use std::sync::Arc;
+
+    /// Process-global handle to the issue store, installed once at startup
+    /// and read from the Janet worker thread (mirrors `VIGIL_TX` /
+    /// `SANDBOX_EXEC_TX` — a thread-local would be invisible to the CFn).
+    static ISSUE_STORE: std::sync::OnceLock<Arc<IssueStore>> = std::sync::OnceLock::new();
+
+    /// Install the issue store for the bridge. Called from `main.rs` once at
+    /// plugin startup. No-op (warn) if already installed.
+    pub fn install_issue_store(store: Arc<IssueStore>) {
+        if ISSUE_STORE.set(store).is_err() {
+            tracing::warn!(target: "dirge::plugin", "issue bridge already installed");
+        }
+    }
+
+    /// (harness/emit-issue title [body] [priority] [dedup-key]) -> issue id or nil.
+    /// Files a durable, session-unscoped issue on the board and returns its id
+    /// (e.g. `drg-a1b2`), or nil when the store is absent / the title is empty.
+    /// A non-empty `dedup-key` upserts into the single live issue carrying that
+    /// key instead of creating a new row.
+    pub unsafe extern "C-unwind" fn issue_emit_cfn(
+        argc: i32,
+        argv: *mut janetrs::lowlevel::Janet,
+    ) -> janetrs::lowlevel::Janet {
+        use janetrs::lowlevel::*;
+        if argc < 1 {
+            return unsafe { janet_wrap_nil() };
+        }
+        let Some(title) = (unsafe { read_string_arg(argv, 0) }) else {
+            return unsafe { janet_wrap_nil() };
+        };
+        let body = if argc > 1 {
+            unsafe { read_string_arg(argv, 1) }
+        } else {
+            None
+        };
+        let priority = if argc > 2 {
+            unsafe { read_string_arg(argv, 2) }
+        } else {
+            None
+        };
+        let dedup_key = if argc > 3 {
+            unsafe { read_string_arg(argv, 3) }
+        } else {
+            None
+        };
+        let Some(store) = ISSUE_STORE.get() else {
+            return unsafe { janet_wrap_nil() };
+        };
+        // An absent or empty dedup key falls back to a plain create.
+        let result = match dedup_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+        {
+            Some(key) => store.upsert(
+                key,
+                title.trim(),
+                body.as_deref().unwrap_or(""),
+                priority.as_deref(),
+            ),
+            None => store.create(
+                title.trim(),
+                body.as_deref().unwrap_or(""),
+                priority.as_deref(),
+                None,
+                None,
+            ),
+        };
+        match result {
+            Ok(id) => unsafe { wrap_string(&id) },
+            Err(_) => unsafe { janet_wrap_nil() },
+        }
+    }
+}
+
+/// Bridge from the Janet worker thread to the vigil-keeper's event channel.
+/// Thread-local mpsc sender installed once at startup.
+///
+/// Exposes Janet functions:
+/// - `vigil/live` — true if the bridge has been installed (keeper is running)
+/// - `vigil/emit` — push a vigil event from Janet
+/// - `vigil/list` — list all active vigil names
+/// - `vigil/get` — get state for a named vigil
+/// - `vigil/set-state` — set key-value state on a named vigil
+///
+/// All functions are installed into the Janet environment by the plugin
+/// loader and are guarded by the `plugin` + `vigil` feature gates.
+#[cfg(all(feature = "plugin", feature = "vigil"))]
+pub(crate) mod vigil_bridge {
+    use super::read_string_arg;
+    use std::collections::HashMap;
+
+    // Process-global (not thread-local): install_* runs on the tokio
+    // runtime thread while the C functions read these on the Janet worker
+    // thread, so a thread_local value would never be visible where it's
+    // consumed (mirrors the SANDBOX_EXEC_TX OnceLock pattern above).
+    /// Sender to the vigil-keeper's event channel. Installed once at
+    /// keeper startup during `--vigil` mode.
+    static VIGIL_TX: std::sync::OnceLock<tokio::sync::mpsc::Sender<String>> =
+        std::sync::OnceLock::new();
+
+    /// Active vigil names, populated at keeper startup via install_vigil_names.
+    static VIGIL_NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+    /// Per-vigil state map (name → JSON value). Janet code can
+    /// read/write this via vigil/get and vigil/set-state. Lazy-initialized
+    /// because `HashMap::new` is not const.
+    static VIGIL_STATE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, serde_json::Value>>> =
+        std::sync::OnceLock::new();
+
+    fn vigil_state() -> &'static std::sync::Mutex<HashMap<String, serde_json::Value>> {
+        VIGIL_STATE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+    }
+
+    /// Install the vigil bridge sender. Called from the tokio runtime
+    /// after the vigil-keeper is created. Panics if called twice.
+    pub fn install_vigil_tx(tx: tokio::sync::mpsc::Sender<String>) {
+        assert!(VIGIL_TX.set(tx).is_ok(), "vigil bridge already installed");
+    }
+
+    /// Install vigil names into the bridge. Called at keeper startup
+    /// after install_vigil_tx.
+    pub fn install_vigil_names(names: Vec<String>) {
+        let _ = VIGIL_NAMES.set(names);
+    }
+
+    /// Return a Janet boolean — true if the vigil bridge has been installed.
+    pub unsafe extern "C-unwind" fn vigil_live_cfn(
+        _argc: i32,
+        _argv: *mut janetrs::lowlevel::Janet,
+    ) -> janetrs::lowlevel::Janet {
+        use janetrs::lowlevel::*;
+        let live = VIGIL_TX.get().is_some();
+        unsafe { janet_wrap_boolean(if live { 1 } else { 0 }) }
+    }
+
+    /// Push a vigil event from Janet into the keeper. Takes one
+    /// string argument (the event payload).
+    pub unsafe extern "C-unwind" fn vigil_emit_cfn(
+        argc: i32,
+        argv: *mut janetrs::lowlevel::Janet,
+    ) -> janetrs::lowlevel::Janet {
+        use janetrs::lowlevel::*;
+        if argc < 1 {
+            return unsafe { janet_wrap_nil() };
+        }
+        let msg = match unsafe { read_string_arg(argv, 0) } {
+            Some(s) => s,
+            None => return unsafe { janet_wrap_nil() },
+        };
+        if let Some(tx) = VIGIL_TX.get() {
+            let _ = tx.try_send(msg);
+        }
+        unsafe { janet_wrap_nil() }
+    }
+
+    /// (vigil/list) — return a Janet array of all active vigil names.
+    #[allow(clippy::ptr_offset_with_cast)]
+    pub unsafe extern "C-unwind" fn vigil_list_cfn(
+        _argc: i32,
+        _argv: *mut janetrs::lowlevel::Janet,
+    ) -> janetrs::lowlevel::Janet {
+        use janetrs::lowlevel::*;
+        let names = VIGIL_NAMES.get().map(|v| v.as_slice()).unwrap_or(&[]);
+        let tup = unsafe { janet_tuple_begin(names.len() as i32) };
+        // Root the half-built tuple before the loop allocates: janet_cstring can
+        // trigger GC, which would otherwise collect the unrooted tuple mid-fill.
+        unsafe { janet_gcroot(janet_wrap_tuple(tup)) };
+        for (i, name) in names.iter().enumerate() {
+            unsafe {
+                let c_str = std::ffi::CString::new(name.as_str()).unwrap();
+                let s = janet_wrap_string(janet_cstring(c_str.as_ptr()));
+                *tup.offset(i as isize) = s;
+            }
+        }
+        unsafe {
+            janet_gcunroot(janet_wrap_tuple(tup));
+            janet_wrap_tuple(janet_tuple_end(tup))
+        }
+    }
+
+    /// (vigil/get name) — return a Janet table of state for the named vigil.
+    /// Returns nil if the vigil is not found.
+    pub unsafe extern "C-unwind" fn vigil_get_cfn(
+        argc: i32,
+        argv: *mut janetrs::lowlevel::Janet,
+    ) -> janetrs::lowlevel::Janet {
+        use janetrs::lowlevel::*;
+        if argc < 1 {
+            return unsafe { janet_wrap_nil() };
+        }
+        let name = match unsafe { read_string_arg(argv, 0) } {
+            Some(s) => s,
+            None => return unsafe { janet_wrap_nil() },
+        };
+        let state = vigil_state().lock().unwrap();
+        if let Some(value) = state.get(&name) {
+            json_to_janet(value)
+        } else {
+            let known = VIGIL_NAMES.get().is_some_and(|n| n.contains(&name));
+            if known {
+                // Vigil exists but has no state yet — return empty table.
+                let tab = unsafe { janet_table(0) };
+                unsafe { janet_wrap_table(tab) }
+            } else {
+                unsafe { janet_wrap_nil() }
+            }
+        }
+    }
+
+    /// (vigil/set-state name key value) — set a key-value pair on a vigil's
+    /// state. Returns the vigil name on success, nil on failure.
+    pub unsafe extern "C-unwind" fn vigil_set_state_cfn(
+        argc: i32,
+        argv: *mut janetrs::lowlevel::Janet,
+    ) -> janetrs::lowlevel::Janet {
+        use janetrs::lowlevel::*;
+        if argc < 3 {
+            return unsafe { janet_wrap_nil() };
+        }
+        let name = match unsafe { read_string_arg(argv, 0) } {
+            Some(s) => s,
+            None => return unsafe { janet_wrap_nil() },
+        };
+        let key = match unsafe { read_string_arg(argv, 1) } {
+            Some(s) => s,
+            None => return unsafe { janet_wrap_nil() },
+        };
+        let value_str = match unsafe { read_string_arg(argv, 2) } {
+            Some(s) => s,
+            None => return unsafe { janet_wrap_nil() },
+        };
+        // Parse as JSON — if the value looks like JSON, use it; otherwise
+        // treat it as a raw string.
+        let value: serde_json::Value =
+            serde_json::from_str(&value_str).unwrap_or(serde_json::Value::String(value_str));
+        let mut state = vigil_state().lock().unwrap();
+        let entry = state
+            .entry(name.clone())
+            .or_insert(serde_json::Value::Object(serde_json::Map::new()));
+        if let serde_json::Value::Object(map) = entry {
+            map.insert(key, value);
+        }
+        drop(state);
+        let c_str = std::ffi::CString::new(name.as_str()).unwrap();
+        unsafe { janet_wrap_string(janet_cstring(c_str.as_ptr())) }
+    }
+
+    /// Convert a serde_json::Value to a Janet value.
+    #[allow(clippy::ptr_offset_with_cast)]
+    pub(super) fn json_to_janet(value: &serde_json::Value) -> janetrs::lowlevel::Janet {
+        use janetrs::lowlevel::*;
+        match value {
+            serde_json::Value::Null => unsafe { janet_wrap_nil() },
+            serde_json::Value::Bool(b) => unsafe { janet_wrap_boolean(if *b { 1 } else { 0 }) },
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    unsafe { janet_wrap_number(i as f64) }
+                } else if let Some(f) = n.as_f64() {
+                    unsafe { janet_wrap_number(f) }
+                } else {
+                    unsafe { janet_wrap_nil() }
+                }
+            }
+            serde_json::Value::String(s) => {
+                let c_str = std::ffi::CString::new(s.as_str()).unwrap();
+                unsafe { janet_wrap_string(janet_cstring(c_str.as_ptr())) }
+            }
+            serde_json::Value::Array(arr) => {
+                let tup = unsafe { janet_tuple_begin(arr.len() as i32) };
+                // Root the half-built tuple before the recursive json_to_janet
+                // calls allocate: a GC would otherwise collect it mid-fill.
+                unsafe { janet_gcroot(janet_wrap_tuple(tup)) };
+                for (i, v) in arr.iter().enumerate() {
+                    unsafe {
+                        *tup.offset(i as isize) = json_to_janet(v);
+                    }
+                }
+                unsafe {
+                    janet_gcunroot(janet_wrap_tuple(tup));
+                    janet_wrap_tuple(janet_tuple_end(tup))
+                }
+            }
+            serde_json::Value::Object(map) => {
+                let tab = unsafe { janet_table(map.len() as i32) };
+                // Root the half-built table before janet_cstring and the recursive
+                // json_to_janet calls allocate: a GC would otherwise collect it mid-fill.
+                unsafe { janet_gcroot(janet_wrap_table(tab)) };
+                for (k, v) in map {
+                    let c_str = std::ffi::CString::new(k.as_str()).unwrap();
+                    let key = unsafe { janet_wrap_string(janet_cstring(c_str.as_ptr())) };
+                    let val = json_to_janet(v);
+                    unsafe { janet_table_put(tab, key, val) };
+                }
+                unsafe {
+                    janet_gcunroot(janet_wrap_table(tab));
+                    janet_wrap_table(tab)
+                }
+            }
+        }
+    }
 }
 
 #[cfg(all(test, feature = "plugin"))]
@@ -4767,5 +5602,494 @@ mod tests {
         assert!(r.contains("漢字"), "lost CJK: {r:?}");
         assert!(r.contains("Привет"), "lost Cyrillic: {r:?}");
         helper.join().unwrap();
+    }
+
+    /// vigil/emit uses json-encode to serialize event data. Verify
+    /// the Janet dict → JSON round-trip produces valid JSON that
+    /// serde_json can parse back into structured fields — the keeper
+    /// path at src/extras/vigil/mod.rs:171.
+    #[cfg(feature = "vigil")]
+    #[test]
+    fn json_encode_produces_valid_json_for_vigil_emit() {
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        let json_str = worker
+            .eval(
+                r#"(json-encode {:job "my-pipeline"
+                             :build_number "42"
+                             :url "http://jenkins:8080/job/my-pipeline/42"
+                             :status "FAILURE"})"#,
+            )
+            .unwrap();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("json-encode must produce valid JSON");
+
+        assert_eq!(parsed["job"], "my-pipeline");
+        assert_eq!(parsed["build_number"], "42");
+        assert_eq!(parsed["url"], "http://jenkins:8080/job/my-pipeline/42");
+        assert_eq!(parsed["status"], "FAILURE");
+    }
+
+    /// json-decode maps JSON null to the `:null` keyword; json-encode must
+    /// round-trip it back to a real JSON null. Janet keywords stringify
+    /// WITHOUT their leading colon (`(string :null)` == "null" — the reader
+    /// strips the colon at janet.c, and janet_to_string_b pushes raw bytes),
+    /// so the fallback `(string x)` arm emits a bare `null`, not `":null"`.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn json_null_keyword_round_trips() {
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        let r = worker
+            .eval(r#"(json-encode (harness/json-decode "{\"a\":null}"))"#)
+            .unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&r).expect("null round-trip must be valid JSON");
+        assert_eq!(parsed["a"], serde_json::Value::Null);
+    }
+
+    /// Regression: verify that the full vigil/emit message format
+    /// (name\tjson) can be split and parsed by the keeper router.
+    #[cfg(feature = "vigil")]
+    #[test]
+    fn vigil_emit_message_format_is_parseable_by_keeper() {
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+
+        // Simulate what (vigil/emit "jenkins-remediate" {...}) sends
+        // through harness/__vigil-emit. We can't call vigil/emit directly
+        // (vigil/live? is false in tests), so we call json-encode and
+        // format the message manually.
+        let payload = worker
+            .eval(
+                r#"(json-encode {:job "my-pipeline"
+                             :build_number "42"
+                             :url "http://jenkins:8080/job/my-pipeline/42"
+                             :status "FAILURE"})"#,
+            )
+            .unwrap();
+        let msg = format!("jenkins-remediate\t{payload}");
+
+        // Simulate the keeper router (src/extras/vigil/mod.rs:167-173)
+        let (name, payload_str) = msg.split_once('\t').expect("tab-separated message");
+        assert_eq!(name, "jenkins-remediate");
+
+        let context: serde_json::Value =
+            serde_json::from_str(payload_str).expect("payload must be valid JSON");
+
+        assert_eq!(context["job"], "my-pipeline");
+        assert_eq!(context["build_number"], "42");
+        assert_eq!(context["url"], "http://jenkins:8080/job/my-pipeline/42");
+        assert_eq!(context["status"], "FAILURE");
+    }
+
+    /// harness/json-decode parses nested JSON into a Janet table keyed by
+    /// string (not keyword) — the poller fixtures rely on this to read
+    /// `jobs[0].lastBuild.result` from a Jenkins API response.
+    #[cfg(feature = "vigil")]
+    #[test]
+    fn json_decode_parses_nested_json_with_string_keys() {
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        let r = worker
+            .eval(
+                r#"(let [d (harness/json-decode "{\"jobs\":[{\"name\":\"test-pipeline\",\"lastBuild\":{\"number\":1,\"result\":\"FAILURE\"}}]}")]
+                 (let [job (get (get d "jobs") 0)]
+                   (string (get job "name") "|" (get-in job ["lastBuild" "result"]))))"#,
+            )
+            .unwrap();
+        assert!(r.contains("test-pipeline"), "got {r:?}");
+        assert!(r.contains("FAILURE"), "got {r:?}");
+    }
+
+    /// harness/json-decode returns nil (not a panic) for malformed JSON.
+    #[cfg(feature = "vigil")]
+    #[test]
+    fn json_decode_returns_nil_on_invalid_json() {
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        let r = worker.eval(r#"(harness/json-decode "not json")"#).unwrap();
+        assert_eq!(r, "nil");
+    }
+
+    /// Regression: the vigil bridge sender installed on one thread must be
+    /// visible to `vigil_emit_cfn` running on the Janet worker thread. The
+    /// original `thread_local!` bridge wrote VIGIL_TX on the tokio runtime
+    /// thread and read it on the worker thread, so (vigil/emit ...) was a
+    /// silent no-op. This pins the cross-thread contract with a real worker.
+    #[cfg(feature = "vigil")]
+    #[test]
+    fn vigil_bridge_delivers_emit_across_threads() {
+        // Install on the TEST thread; the worker evaluates on its own thread.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(16);
+        vigil_bridge::install_vigil_tx(tx);
+
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        let r = worker
+            .eval(r#"(vigil/emit "test-vigil" {:job "my-pipeline"})"#)
+            .unwrap();
+        assert_eq!(r, "nil");
+
+        let msg = rx
+            .blocking_recv()
+            .expect("vigil/emit must reach the bridge tx across threads");
+        let (name, payload) = msg.split_once('\t').expect("name\tpayload");
+        assert_eq!(name, "test-vigil");
+        let context: serde_json::Value =
+            serde_json::from_str(payload).expect("payload must be valid JSON");
+        assert_eq!(context["job"], "my-pipeline");
+
+        // Chaining half of act/chaining: a hook body is just a Janet defn,
+        // so prove vigil/emit also reaches the bus when called from one.
+        let r = worker
+            .eval(
+                r#"(do
+                     (defn chain [ctx] (vigil/emit "chained" {:from (ctx :vigil)}))
+                     (chain @{:vigil "sig-a"}))"#,
+            )
+            .unwrap();
+        assert_eq!(r, "nil");
+
+        let msg = rx
+            .blocking_recv()
+            .expect("vigil/emit from a defn must reach the bridge tx across threads");
+        let (name, payload) = msg.split_once('\t').expect("name\tpayload");
+        assert_eq!(name, "chained");
+        let context: serde_json::Value =
+            serde_json::from_str(payload).expect("payload must be valid JSON");
+        assert_eq!(context["from"], "sig-a");
+    }
+
+    /// Minimal single-threaded HTTP server for the HTTP-bridge and lev-gate
+    /// tests. Binds an ephemeral localhost port and answers every request with
+    /// `response_body`, then returns the base URL (`http://127.0.0.1:<port>`).
+    /// Pure-Rust helper with no vigil dependency: plugin-gated so the
+    /// lev_classify / http-bridge tests compile under default features too.
+    #[cfg(feature = "plugin")]
+    fn spawn_mock_lev(response_body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock lev");
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                // Read through the request head so the client finishes sending
+                // before we write the response (the body is small and arrives
+                // with the head in one write).
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                loop {
+                    match stream.read(&mut tmp) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// harness/http-post returns the raw body on 2xx and nil on error, without
+    /// panicking at the FFI boundary.
+    #[cfg(feature = "vigil")]
+    #[test]
+    fn http_post_returns_body_and_nil_on_error() {
+        let url = spawn_mock_lev(r#"{"answers":{"judgment":{"noul":0.42}}}"#);
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+
+        let r = worker
+            .eval(&format!(
+                r#"(harness/http-post "{url}/v1/systemone" "{{}}")"#
+            ))
+            .unwrap();
+        assert!(r.contains("noul"), "2xx must return the body, got {r:?}");
+
+        let r = worker
+            .eval(r#"(harness/http-post "http://127.0.0.1:1/" "{}")"#)
+            .unwrap();
+        assert_eq!(r, "nil");
+    }
+
+    /// `lev-verdict` returns lev's raw `noul` signal; the host applies the
+    /// vigil's wake threshold, so the plugin holds no threshold of its own.
+    #[cfg(feature = "vigil")]
+    #[test]
+    fn lev_verdict_returns_noul_signal() {
+        let url = spawn_mock_lev(r#"{"answers":{"judgment":{"noul":0.42}}}"#);
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/plugins/vigil_lev.janet"
+        ))
+        .expect("lev plugin source must exist");
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        worker.eval(&src).unwrap();
+
+        let r = worker
+            .eval(&format!(
+                r#"(lev-verdict @{{:vigil "v" :trigger :toll :event_count 1 :payload "{{}}"}}
+             @{{:endpoint "{url}"}})"#
+            ))
+            .unwrap();
+        assert_eq!(
+            r, "0.42",
+            "lev-verdict must return the noul signal, got {r:?}"
+        );
+    }
+
+    /// A high noul signal is reported as-is; whether it rouses is the host's
+    /// threshold decision, not the plugin's.
+    #[cfg(feature = "vigil")]
+    #[test]
+    fn lev_verdict_returns_high_noul_signal() {
+        let url = spawn_mock_lev(r#"{"answers":{"judgment":{"noul":0.95}}}"#);
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/plugins/vigil_lev.janet"
+        ))
+        .expect("lev plugin source must exist");
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        worker.eval(&src).unwrap();
+
+        let r = worker
+            .eval(&format!(
+                r#"(lev-verdict @{{:vigil "v" :trigger :toll :event_count 1 :payload "{{}}"}}
+             @{{:endpoint "{url}"}})"#
+            ))
+            .unwrap();
+        assert_eq!(
+            r, "0.95",
+            "lev-verdict must return the noul signal, got {r:?}"
+        );
+    }
+
+    /// harness/http-get returns the raw body on 2xx and nil on error.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn http_get_returns_body_and_nil_on_error() {
+        let url = spawn_mock_lev(r#"{"models":["english"]}"#);
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+
+        let r = worker
+            .eval(&format!(r#"(harness/http-get "{url}/v1/models")"#))
+            .unwrap();
+        assert!(
+            r.contains("models"),
+            "2xx GET must return the body, got {r:?}"
+        );
+
+        let r = worker
+            .eval(r#"(harness/http-get "http://127.0.0.1:1/")"#)
+            .unwrap();
+        assert_eq!(r, "nil");
+    }
+
+    /// harness/http-post-many fans out N bodies over a bounded pool and
+    /// returns a JSON array in input order.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn http_post_many_fans_out_in_order() {
+        let url = spawn_mock_lev(r#"{"answers":{"judgment":{"noul":0.42}}}"#);
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+
+        let r = worker
+            .eval(&format!(
+                r#"(harness/http-post-many "{url}/v1/systemone" "[\"{{}}\",\"{{}}\",\"{{}}\"]" 2)"#
+            ))
+            .unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&r).expect("http-post-many must return a JSON array");
+        let arr = parsed.as_array().expect("must be an array");
+        assert_eq!(arr.len(), 3);
+        assert!(arr[0].as_str().unwrap().contains("noul"));
+        assert!(arr[2].as_str().unwrap().contains("noul"));
+    }
+
+    /// harness/store / harness/load round-trip a value within the session.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn store_and_load_roundtrip() {
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        let r = worker
+            .eval(r#"(do (harness/store "verdicts" "done") (harness/load "verdicts"))"#)
+            .unwrap();
+        assert_eq!(r, "done");
+        let r = worker.eval(r#"(harness/load "missing")"#).unwrap();
+        assert_eq!(r, "nil");
+    }
+
+    /// lev/classify returns a typed score answer with stop-reason "stop".
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn lev_classify_returns_typed_answers() {
+        let url = spawn_mock_lev(
+            r#"{"answers":{"rating":{"type":"score","score":1.83,"confidence":0.8}}}"#,
+        );
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/plugins/lev_classify.janet"
+        ))
+        .expect("lev_classify plugin source must exist");
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        worker.eval(&src).unwrap();
+
+        let r = worker
+            .eval(&format!(
+                r#"(let [res (lev/classify @{{:title "x"}} @{{"rating" @{{:type "score" :instructions "Rate" :criteria @["a" "b" "c"]}}}} @{{:endpoint "{url}"}})]
+                     (string (get res :stop-reason) " " (get-in res [:answers "rating" "score"])))"#
+            ))
+            .unwrap();
+        assert_eq!(r, "stop 1.83");
+    }
+
+    /// lev/classify maps pi's `bool` question to the noul wire type and back
+    /// to a `{:type "bool" :probability ...}` answer.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn lev_classify_maps_bool_to_noul() {
+        let url =
+            spawn_mock_lev(r#"{"answers":{"j":{"type":"noul","noul":0.83,"confidence":0.83}}}"#);
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/plugins/lev_classify.janet"
+        ))
+        .expect("lev_classify plugin source must exist");
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        worker.eval(&src).unwrap();
+
+        let r = worker
+            .eval(&format!(
+                r#"(let [res (lev/classify @{{:title "x"}} @{{"j" @{{:type "bool" :instructions "Intervene?"}}}} @{{:endpoint "{url}"}})]
+                     (string (get-in res [:answers "j" "type"]) " " (get-in res [:answers "j" "probability"])))"#
+            ))
+            .unwrap();
+        assert_eq!(r, "bool 0.83");
+    }
+
+    /// lev/classify returns an error value (never throws) when lev is down.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn lev_classify_returns_error_on_unreachable() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/plugins/lev_classify.janet"
+        ))
+        .expect("lev_classify plugin source must exist");
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        worker.eval(&src).unwrap();
+
+        let r = worker
+            .eval(
+                r#"(get (lev/classify @{:title "x"} @{"j" @{:type "noul" :instructions "x"}} @{:endpoint "http://127.0.0.1:1"}) :stop-reason)"#,
+            )
+            .unwrap();
+        assert_eq!(r, "error");
+    }
+
+    /// lev/classify-many fans out N states with bounded concurrency and
+    /// returns an array of result tables in order.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn lev_classify_many_fans_out() {
+        let url = spawn_mock_lev(
+            r#"{"answers":{"rating":{"type":"score","score":1.83,"confidence":0.8}}}"#,
+        );
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/plugins/lev_classify.janet"
+        ))
+        .expect("lev_classify plugin source must exist");
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        worker.eval(&src).unwrap();
+
+        let r = worker
+            .eval(&format!(
+                r#"(let [res (lev/classify-many @[@{{:a 1}} @{{:a 2}} @{{:a 3}}] @{{"rating" @{{:type "score" :instructions "Rate" :criteria @["a" "b"]}}}} @{{:endpoint "{url}" :limit 2}})]
+                     (string (length res) " " (get-in (first res) [:answers "rating" "score"]) " " (get-in (last res) [:answers "rating" "score"])))"#
+            ))
+            .unwrap();
+        assert_eq!(r, "3 1.83 1.83");
+    }
+
+    /// lev_classify.janet registers both classify tools at load time.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn lev_classify_registers_tools() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/plugins/lev_classify.janet"
+        ))
+        .expect("lev_classify plugin source must exist");
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        worker.eval(&src).unwrap();
+
+        let r = worker.eval("harness-tools-list").unwrap();
+        assert!(r.contains("lev_classify"), "tool not registered, got {r:?}");
+        assert!(
+            r.contains("lev_classify_many"),
+            "tool not registered, got {r:?}"
+        );
+    }
+
+    /// vigil_fire.janet registers the vigil_fire tool at load time.
+    #[cfg(feature = "vigil")]
+    #[test]
+    fn vigil_fire_registers_tool() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/plugins/vigil_fire.janet"
+        ))
+        .expect("vigil_fire plugin source must exist");
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        worker.eval(&src).unwrap();
+
+        let r = worker.eval("harness-tools-list").unwrap();
+        assert!(r.contains("vigil_fire"), "tool not registered, got {r:?}");
+    }
+
+    /// lev/vigilmode composes classify-many + store + rank: it returns the full
+    /// verdicts, a top-N ranked slice, and stashes the verdicts under "verdicts".
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn lev_vigilmode_ranks_and_stores() {
+        let url = spawn_mock_lev(
+            r#"{"answers":{"value":{"type":"score","score":1.83,"confidence":0.8}}}"#,
+        );
+        let classify = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/plugins/lev_classify.janet"
+        ))
+        .expect("lev_classify plugin source must exist");
+        let vigilmode = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/plugins/lev_vigilmode.janet"
+        ))
+        .expect("lev_vigilmode plugin source must exist");
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        worker.eval(&classify).unwrap();
+        worker.eval(&vigilmode).unwrap();
+
+        let r = worker
+            .eval(&format!(
+                r#"(let [res (lev/vigilmode @[@{{:id 1}} @{{:id 2}} @{{:id 3}}] @{{"value" @{{:type "score" :instructions "Value" :criteria @["a" "b" "c"]}}}} @{{:endpoint "{url}" :top-n 2}})]
+                     (string (length (get res :verdicts)) " " (length (get res :ranked)) " " (harness/load "verdicts")))"#
+            ))
+            .unwrap();
+        assert!(
+            r.starts_with("3 2 "),
+            "verdicts/ranked counts wrong, got {r:?}"
+        );
+        assert!(
+            r.contains("1.83"),
+            "stored verdicts must contain the score, got {r:?}"
+        );
     }
 }

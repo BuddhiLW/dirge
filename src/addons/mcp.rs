@@ -65,11 +65,14 @@ pub fn publish(manager: &McpClientManager, permission: Option<PermCheck>) {
             connection,
         })
         .collect();
+    let before = published_names(&live());
     *live().lock_ignore_poison() = Published {
         servers,
         permission,
     };
     readiness().send_replace(Readiness::Published);
+    let after = published_names(&live());
+    super::events::post_host(&super::events::mcp_changes(&before, &after));
 }
 
 /// Where the MCP servers addon code reaches stand.

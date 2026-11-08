@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::domain::{HookPoint, HookReply, PanelRequest, SourceOutcome};
+use super::domain::{Folded, HookPoint, HookReply, PanelRequest, SourceOutcome};
 
 /// A running addon runtime. Calls are synchronous round trips: the only
 /// adapter serializes them onto one interpreter thread, so an async caller
@@ -65,6 +65,13 @@ pub trait AddonRuntime: Send + Sync + 'static {
         let _ = self.run_hook_key(key, ctx);
     }
 
+    /// Call every addon's hook keyed `key` with `ctx` and fold their answers
+    /// into one value, the way the host's fold for `key` does. The default
+    /// folds nothing.
+    fn fold_hook(&self, _key: &str, _ctx: &Value) -> Folded {
+        Folded::default()
+    }
+
     /// The addons' summaries as the runtime re-read them since the last
     /// call, when it did: after a REPL evaluation, or when addon code asked
     /// with `dirge.harness/refresh!`. One load report per addon, in load
@@ -122,6 +129,51 @@ pub trait ToolGateway: Send + Sync + 'static {
     fn call(&self, tool: &str, args: &Value) -> Result<String, String>;
 }
 
+/// Where `dirge.harness/emit` posts an open hook key, addon to addon. The
+/// key is already checked ([`crate::addons::emit::emit_key`]); the post is
+/// queued and never awaited.
+pub trait AddonEmitter: Send + Sync + 'static {
+    /// Post `ctx` to every addon's hook keyed `key`. `Err` when it cannot
+    /// be posted at all (no host); a post dropped because the runtime is
+    /// backed up is still `Ok`.
+    fn emit(&self, key: &str, ctx: &Value) -> Result<(), String>;
+}
+
+/// A host where addons cannot reach each other.
+pub struct NoEmitter;
+
+impl AddonEmitter for NoEmitter {
+    fn emit(&self, _key: &str, _ctx: &Value) -> Result<(), String> {
+        Err("emit is unavailable: no addon host receives it".to_string())
+    }
+}
+
+/// The per-addon settings the user wrote under `addons.settings` in
+/// `config.json`, as `dirge.harness/config` and `:dirge/host :config` read
+/// them. Answers are read at call time, so an adapter may change underneath.
+pub trait ConfigSource: Send + Sync + 'static {
+    /// Every addon's settings, keyed by addon id.
+    fn settings(&self) -> serde_json::Map<String, Value>;
+}
+
+/// The settings of `addon_id` in `settings`: its entry, or an empty map
+/// when it has none.
+pub fn addon_settings(settings: &serde_json::Map<String, Value>, addon_id: &str) -> Value {
+    settings
+        .get(addon_id)
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Default::default()))
+}
+
+/// A host without addon settings.
+pub struct NoConfig;
+
+impl ConfigSource for NoConfig {
+    fn settings(&self) -> serde_json::Map<String, Value> {
+        serde_json::Map::new()
+    }
+}
+
 /// Everything the `dirge.harness` natives reach, injected when the runtime
 /// boots.
 #[derive(Clone)]
@@ -130,16 +182,21 @@ pub struct Harness {
     pub panels: Arc<dyn PanelSink>,
     pub mcp: Arc<dyn McpGateway>,
     pub tools: Arc<dyn ToolGateway>,
+    pub config: Arc<dyn ConfigSource>,
+    pub emitter: Arc<dyn AddonEmitter>,
 }
 
 impl Harness {
-    /// Notifications to `sink`; no panels, no MCP servers, no tools.
+    /// Notifications to `sink`; no panels, no MCP servers, no tools, no
+    /// addon settings, no addon-to-addon emits.
     pub fn with_sink(sink: Arc<dyn HarnessSink>) -> Self {
         Self {
             sink,
             panels: Arc::new(NoPanels),
             mcp: Arc::new(NoMcp),
             tools: Arc::new(NoTools),
+            config: Arc::new(NoConfig),
+            emitter: Arc::new(NoEmitter),
         }
     }
 }
@@ -218,19 +275,21 @@ pub trait HarnessSink: Send + Sync + 'static {
     fn notify(&self, addon_level: Level, message: &str);
 }
 
-// --- AddonEmitter port -----------------------------------------------------
+// --- AddonHooks port -------------------------------------------------------
 
-/// The narrow face of the addon host a seam outside it needs: hand a ctx to
-/// the hook keyed `key` and read the replies, or post it without waiting.
+/// The narrow face of the addon host a seam outside it needs: fold the
+/// addons' answers to the hook keyed `key`, or post a ctx without waiting.
 /// [`AddonHost`](super::host::AddonHost) implements it; a seam (ACP, say)
 /// takes it injected from the composition root instead of reaching for the
-/// process-wide host, so its tests run against a stub.
-pub trait AddonEmitter: Send + Sync + 'static {
+/// process-wide host, so its tests run against a stub. Distinct from
+/// [`AddonEmitter`], which is the addon-to-addon `dirge.harness/emit` port.
+pub trait AddonHooks: Send + Sync + 'static {
     /// True when at least one addon registered a hook keyed `key`.
     fn listens_key(&self, key: &str) -> bool;
 
-    /// Every addon's answer to the hook keyed `key`, in load order.
-    fn emit(&self, key: &str, ctx: &Value) -> Vec<HookReply>;
+    /// The addons' answers to the hook keyed `key`, folded the way the
+    /// host's fold for `key` does. `None` when nothing was answered.
+    fn fold(&self, key: &str, ctx: &Value) -> Option<Value>;
 
     /// Hand `ctx` to the hook keyed `key` without waiting; answers dropped.
     fn post(&self, key: &str, ctx: &Value);
@@ -238,7 +297,19 @@ pub trait AddonEmitter: Send + Sync + 'static {
 
 #[cfg(test)]
 mod tests {
-    use super::{Level, ToolGateway, ToolsUnavailable};
+    use super::{ConfigSource, Level, NoConfig, ToolGateway, ToolsUnavailable, addon_settings};
+
+    #[test]
+    fn an_addon_without_settings_reads_an_empty_map() {
+        let mut settings = serde_json::Map::new();
+        settings.insert("echo".into(), serde_json::json!({"greeting": "hi"}));
+        assert_eq!(
+            addon_settings(&settings, "echo"),
+            serde_json::json!({"greeting": "hi"})
+        );
+        assert_eq!(addon_settings(&settings, "other"), serde_json::json!({}));
+        assert!(NoConfig.settings().is_empty());
+    }
 
     #[test]
     fn unavailable_tools_offer_nothing_and_answer_why() {

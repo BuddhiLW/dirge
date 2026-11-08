@@ -20,7 +20,7 @@ use cljrs_value::{Arity, NativeFn, PersistentVector, Value};
 use serde_json::{Value as Json, json};
 
 use super::{bridge, harness};
-use crate::addons::domain::{HookPoint, HookReply, SourceOutcome};
+use crate::addons::domain::{Folded, HookPoint, HookReply, SourceOutcome};
 use crate::addons::port::{AddonRuntime, Harness};
 use crate::addons::{layout, policy};
 use crate::sync_util::LockExt;
@@ -41,7 +41,7 @@ pub(crate) const PROTOCOL_SRC: &str = include_str!("vendor/hive_addon/protocol.c
 
 /// The `dirge.addon.host` functions dirge calls. A host overlay may
 /// redefine any of them but must leave each one a function.
-const HOST_CONTRACT: [&str; 10] = [
+const HOST_CONTRACT: [&str; 11] = [
     "use-protocol!",
     "load-addon!",
     "shutdown-addon!",
@@ -51,6 +51,7 @@ const HOST_CONTRACT: [&str; 10] = [
     "run-command",
     "run-hook",
     "run-hook-handler",
+    "emit-fold",
     "shutdown-all!",
 ];
 
@@ -132,6 +133,12 @@ enum Command {
         key: String,
         ctx: Json,
         reply: Sender<Vec<HookReply>>,
+    },
+    /// A hook call whose answers the host folds into one.
+    Fold {
+        key: String,
+        ctx: Json,
+        reply: Sender<Folded>,
     },
     /// A hook call nobody waits for; counted in `Isolate::posted`.
     Post {
@@ -383,6 +390,18 @@ impl AddonRuntime for Isolate {
         })
     }
 
+    fn fold_hook(&self, key: &str, ctx: &Json) -> Folded {
+        self.ask(|reply| Command::Fold {
+            key: key.to_string(),
+            ctx: ctx.clone(),
+            reply,
+        })
+        .unwrap_or_else(|error| {
+            tracing::warn!(target: "dirge::addon", hook = key, %error, "addon hooks skipped");
+            Folded::default()
+        })
+    }
+
     fn post_hook(&self, key: &str, ctx: &Json) {
         if self.posted.fetch_add(1, Ordering::SeqCst) >= MAX_POSTED {
             self.posted.fetch_sub(1, Ordering::SeqCst);
@@ -561,6 +580,9 @@ struct Interp {
     /// True while serving a caller that blocks dirge's runtime; the harness
     /// refuses anything that would wait on it.
     caller_on_runtime: Rc<Cell<bool>>,
+    /// True while delivering a posted hook call; `dirge.harness/emit`
+    /// refuses then, so emits cannot feed each other without end.
+    delivering_post: Rc<Cell<bool>>,
     /// Set by `dirge.harness/refresh!`: re-read the addons once the current
     /// work is done.
     refresh_requested: Rc<Cell<bool>>,
@@ -581,10 +603,12 @@ impl Interp {
         cljrs_stdlib::install(&runtime);
         let caller_on_runtime = Rc::new(Cell::new(false));
         let refresh_requested = Rc::new(Cell::new(false));
+        let delivering_post = Rc::new(Cell::new(false));
         harness::install(
             runtime.globals(),
             harness,
             caller_on_runtime.clone(),
+            delivering_post.clone(),
             refresh_requested.clone(),
         );
         let inbox = Rc::new(RefCell::new(Vec::new()));
@@ -595,6 +619,7 @@ impl Interp {
             roots,
             inbox,
             caller_on_runtime,
+            delivering_post,
             refresh_requested,
             overlays: Vec::new(),
             stopped: false,
@@ -664,8 +689,14 @@ impl Interp {
             Command::Hook { key, ctx, reply } => {
                 let _ = reply.send(self.run_hook(&key, ctx));
             }
+            Command::Fold { key, ctx, reply } => {
+                let _ = reply.send(self.fold(&key, ctx));
+            }
             Command::Post { key, ctx } => {
-                for reply in self.run_hook(&key, ctx) {
+                self.delivering_post.set(true);
+                let replies = self.run_hook(&key, ctx);
+                self.delivering_post.set(false);
+                for reply in replies {
                     if let Err(error) = reply.result {
                         tracing::warn!(target: "dirge::addon", addon = %reply.addon_id, hook = %key, %error, "addon hook failed; ignored");
                     }
@@ -701,6 +732,15 @@ impl Interp {
             .unwrap_or_else(|e| {
                 tracing::warn!(target: "dirge::addon", hook = key, error = %e, "run-hook failed");
                 Vec::new()
+            })
+    }
+
+    fn fold(&mut self, key: &str, ctx: Json) -> Folded {
+        self.call("emit-fold", vec![key.into(), ctx])
+            .map(|answer| policy::folded(&answer))
+            .unwrap_or_else(|e| {
+                tracing::warn!(target: "dirge::addon", hook = key, error = %e, "emit-fold failed");
+                Folded::default()
             })
     }
 

@@ -97,6 +97,8 @@ use crate::ui::events::{render_session, sanitize_output};
 use crate::ui::input::InputEditor;
 use crate::ui::keymap::{KeyAction, Keymaps};
 use crate::ui::panel_render::{build_left_panel_info, build_panel_data};
+#[cfg(feature = "vigil")]
+use crate::ui::renderer::VigilStatusRow;
 use crate::ui::renderer::{LineEntry, Renderer};
 use crate::ui::search_rewind::{
     allow_always_downgrade_reason, is_placeholder_pattern, open_rewind_picker, rewind_session,
@@ -285,6 +287,13 @@ pub async fn run_interactive(
     // ui-redesign: shared system-load snapshot. Polled in the
     // background; read at panel paint time. Cheap clone (Arc bump).
     sysload: crate::ui::sysload::SharedSysLoad,
+    #[cfg(feature = "vigil")] mut vigil_wake_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
+    #[cfg(feature = "vigil")] mut vigil_observance_rx: Option<
+        tokio::sync::mpsc::Receiver<crate::extras::vigil::reaper::Observance>,
+    >,
+    #[cfg(feature = "vigil")] vigil_ctl_tx: Option<
+        tokio::sync::mpsc::Sender<crate::extras::vigil::types::VigilCtl>,
+    >,
 ) -> anyhow::Result<()> {
     let _guard = TerminalGuard::new(cfg.keyboard_enhancement.unwrap_or(true))?;
 
@@ -541,6 +550,13 @@ pub async fn run_interactive(
     #[allow(unused_mut)]
     #[cfg(feature = "loop")]
     let mut loop_state: Option<crate::extras::r#loop::LoopState> = None;
+
+    #[cfg(feature = "vigil")]
+    let mut vigil_state: Option<crate::extras::vigil::VigilState> =
+        Some(crate::extras::vigil::VigilState {
+            active: vigil_wake_rx.is_some(),
+            pending_observance: None,
+        });
 
     // Snapshot plugin-registered shortcuts (P9c). Seeded at UI
     // startup; refreshed at the top of each event loop iteration
@@ -1655,6 +1671,10 @@ pub async fn run_interactive(
     // the latest model decides locally which keys and commands it owns.
     let (view_tx, mut view_rx) = mpsc::unbounded_channel::<crate::ui::view::ViewUpdate>();
     let mut view_model = crate::ui::view::start(view_tx, cfg.view_engine.as_deref());
+    // Key focus: false = the prompt owns typed keys (the default); true =
+    // the user handed them to the focused panel (`focus_panel`, Alt+P).
+    // `promote::focus_of` turns it plus the model into a `Focus`.
+    let mut panel_engaged = false;
     // Optional external panel feed (off by default). Its handle lives for
     // the loop; dropping it on exit stops the subscription task.
     let _panel_feed = crate::extras::panel_feed::start(cfg.panel_feed.as_ref());
@@ -1710,6 +1730,36 @@ pub async fn run_interactive(
                     &activity,
                     gitstat.snapshot(),
                 ));
+            }
+            #[cfg(feature = "vigil")]
+            {
+                if let Some(ref vigil_ctl) = vigil_ctl_tx {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let _ = vigil_ctl
+                        .send(crate::extras::vigil::types::VigilCtl::StatusReq { respond_to: tx })
+                        .await;
+                    if let Ok(statuses) = rx.await {
+                        let rows: Vec<VigilStatusRow> = statuses
+                            .into_iter()
+                            .map(|s| VigilStatusRow {
+                                name: s.name,
+                                trigger: s.trigger.as_str().to_string(),
+                                interval_secs: s.reap_interval_secs,
+                                running: s.running,
+                                paused: s.paused,
+                                last_event_count: s.last_event_count,
+                                last_event_age: s.last_event_at.and_then(|ts| {
+                                    chrono::DateTime::parse_from_rfc3339(&ts).ok().map(|dt| {
+                                        let elapsed =
+                                            chrono::Utc::now().signed_duration_since(dt.to_utc());
+                                        crate::ui::panel_data::format_duration_short(elapsed)
+                                    })
+                                }),
+                            })
+                            .collect();
+                        renderer.set_vigil_status(rows);
+                    }
+                }
             }
         }
 
@@ -1844,6 +1894,22 @@ pub async fn run_interactive(
         // Snapshot the shell-box mount deadline for this iteration so the
         // mount-timer select! arm can move it into its async block.
         let mount_deadline = ui.shell_mount_deadline;
+
+        // When vigil is active, slow the idle poll from 20Hz to 1Hz so the
+        // CPU isn't constantly waking during a quiet observance window.
+        #[cfg(feature = "vigil")]
+        let idle_sleep_ms: u64 = if vigil_state.as_ref().is_some_and(|vs| vs.active) {
+            1000
+        } else {
+            50
+        };
+        #[cfg(not(feature = "vigil"))]
+        let idle_sleep_ms: u64 = 50;
+
+        // When vigil is compiled out, declare a dummy wake receiver so
+        // the vigil select! arm is syntactically present but inert.
+        #[cfg(not(feature = "vigil"))]
+        let mut vigil_wake_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>> = None;
 
         tokio::select! {
                     // #387: poll arms in order so USER INPUT takes priority — when a
@@ -2077,9 +2143,12 @@ pub async fn run_interactive(
                                 // Ctrl+C pass through. Decided from the model
                                 // alone; the loop never waits on the engine.
                                 if !from_sequence {
-                                    use crate::ui::view::promote::{KeyRoute, grid_event, route_key};
+                                    use crate::ui::view::promote::{
+                                        EditorMode, KeyRoute, focus_of, grid_event, route_key,
+                                    };
                                     let grid_open = view_model.swarm_open();
-                                    match route_key(&view_model, &key, action) {
+                                    let focus = focus_of(&view_model, panel_engaged);
+                                    match route_key(&view_model, &key, action, focus, EditorMode::Insert) {
                                         KeyRoute::Grid(name) if grid_open => {
                                             crate::ui::view::submit(grid_event(
                                                 name,
@@ -2094,6 +2163,15 @@ pub async fn run_interactive(
                                                 continue;
                                             }
                                             if grid_open { continue; }
+                                        }
+                                        KeyRoute::EnterPanel | KeyRoute::LeavePanel => {
+                                            panel_engaged = matches!(
+                                                route_key(&view_model, &key, action, focus, EditorMode::Insert),
+                                                KeyRoute::EnterPanel
+                                            );
+                                            renderer.set_panel_key_focus(panel_engaged);
+                                            renderer.request_repaint();
+                                            continue;
                                         }
                                         KeyRoute::Swallow if grid_open => continue,
                                         _ => {}
@@ -2767,6 +2845,9 @@ pub async fn run_interactive(
                                         }
                                         continue;
                                     }
+                                    // No panel claims keys: nothing to focus,
+                                    // and the chord must not reach the editor.
+                                    Some(KeyAction::FocusPanel) => continue,
                                     Some(KeyAction::ToggleSwarm) => {
                                         // Full-screen grid of the external
                                         // panels; the view engine toggles it.
@@ -3102,7 +3183,7 @@ pub async fn run_interactive(
                                         // /help) have no UserMessage event, so we keep the echo.
                                         write_user_lines(&mut renderer, &text)?;
                                         renderer.write_line("", Color::White)?;
-                                        let result = handle_slash(&expanded, &mut agent, &mut client, &mut renderer, session, cli, cfg, context, &mut ui.show_reasoning, &mut ui.is_running, &mut input, &permission, &ask_tx, &question_tx, &plan_tx, &mut ui.todo_tools_enabled, &bg_store, &sandbox, #[cfg(unix)] &user_tx, #[cfg(feature = "loop")] &mut loop_state, #[cfg(feature = "mcp")] mcp_manager.as_ref(), #[cfg(feature = "semantic")] semantic_manager, #[cfg(feature = "lsp")] lsp_manager.as_ref(), &mut ui.plan_phase).await;
+                                        let result = handle_slash(&expanded, &mut agent, &mut client, &mut renderer, session, cli, cfg, context, &mut ui.show_reasoning, &mut ui.is_running, &mut input, &permission, &ask_tx, &question_tx, &plan_tx, &mut ui.todo_tools_enabled, &bg_store, &sandbox, #[cfg(unix)] &user_tx, #[cfg(feature = "loop")] &mut loop_state, #[cfg(feature = "vigil")] &mut vigil_state, #[cfg(feature = "vigil")] &vigil_ctl_tx, #[cfg(feature = "mcp")] mcp_manager.as_ref(), #[cfg(feature = "semantic")] semantic_manager, #[cfg(feature = "lsp")] lsp_manager.as_ref(), &mut ui.plan_phase).await;
                                         match result {
                                         Ok(SlashOutcome::DeferCompress { instructions }) => {
                                             let instructions = instructions.as_deref().and_then(|s| {
@@ -3757,6 +3838,10 @@ pub async fn run_interactive(
                                     state: &mut loop_state,
                                     label: &mut ui.loop_label,
                                 };
+                                #[cfg(feature = "vigil")]
+                                let vigil_bits = run_handlers::done::VigilBits {
+                                    state: &mut vigil_state,
+                                };
                                 run_handlers::handle_done(
                                     &mut ctx,
                                     response,
@@ -3777,6 +3862,8 @@ pub async fn run_interactive(
                                     &mut ui.done_phase,
                                     #[cfg(feature = "loop")]
                                     loop_bits,
+                                    #[cfg(feature = "vigil")]
+                                    vigil_bits,
                                 ).await?;
                             }
                             AgentEvent::Usage {
@@ -4249,6 +4336,10 @@ pub async fn run_interactive(
                                     state: &mut loop_state,
                                     label: &mut ui.loop_label,
                                 };
+                                #[cfg(feature = "vigil")]
+                                let vigil_bits = run_handlers::done::VigilBits {
+                                    state: &mut vigil_state,
+                                };
                                 run_handlers::done::finish_done(
                                     &mut ctx,
                                     result.response,
@@ -4267,6 +4358,8 @@ pub async fn run_interactive(
                                     plugin_manager,
                                     #[cfg(feature = "loop")]
                                     loop_bits,
+                                    #[cfg(feature = "vigil")]
+                                    vigil_bits,
                                 )
                                 .await?;
                             }
@@ -4989,6 +5082,11 @@ pub async fn run_interactive(
                             }
                         }
                         view_model = update.model;
+                        // The panel let go of its keys: focus returns to the prompt.
+                        if panel_engaged && view_model.panel_keys.is_empty() {
+                            panel_engaged = false;
+                            renderer.set_panel_key_focus(false);
+                        }
                         renderer.request_repaint();
                     }
                     _ = async {
@@ -5099,7 +5197,13 @@ pub async fn run_interactive(
                             // next prompt's `agent.clone()` forwards them to the
                             // loop + the request's tool defs — and adopt the
                             // connected manager so the panel + `/mcp` see it.
-                            agent.extend_loop_tools(tools);
+                            for name in agent.extend_loop_tools(tools) {
+                                tracing::warn!(
+                                    target: "dirge::mcp",
+                                    tool = %name,
+                                    "MCP tool skipped: a live tool already has that name"
+                                );
+                            }
                             // #701: re-publish the live agent so `current_agent()`
                             // (what a tooled `task(agent=…)` subagent forks off)
                             // and the `call-tool` registry (plugins and addons)
@@ -5536,9 +5640,76 @@ pub async fn run_interactive(
                     // active path already re-asserts.
                     _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)), if !ui.is_running => {
                         renderer.reassert_terminal_modes();
+                    },
+                    // Vigil wake — triggered by the reaper after a
+                    // successful observance. The vigils may be disabled
+                    // at compile time; the `if vigil_wake_rx.is_some()`
+                    // guard ensures the arm is inert when vigil is off.
+                    // Gate on `!ui.is_running` too: if an observance
+                    // lands mid-turn we must NOT consume its wake token,
+                    // or the prompt is stranded in the channel with no
+                    // re-delivery. Leaving the token queued lets this
+                    // arm re-fire once the agent goes idle and drain the
+                    // observance then — the "find an opportunity"
+                    // semantics.
+                    _ = async {
+                        match &mut vigil_wake_rx {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending::<Option<()>>().await,
+                        }
+                    }, if vigil_wake_rx.is_some() && !ui.is_running => {
+                        #[cfg(feature = "vigil")]
+                        {
+                            if !ui.is_running
+                                && let Some(ref mut rx) = vigil_observance_rx
+                                && let Ok(obs) = rx.try_recv()
+                            {
+                                // Store observance metadata so the post-turn
+                                // handler can dispatch on-vigil-observance
+                                // with :response and :exit after the agent turn.
+                                if let Some(ref mut vs) = vigil_state {
+                                    vs.pending_observance = Some(
+                                        crate::extras::vigil::PendingObservance {
+                                            vigil_name: obs.vigil_name.clone(),
+                                            event_count: obs.event_count,
+                                            running: obs.running.clone(),
+                                            signal: serde_json::to_string(&obs.context)
+                                                .unwrap_or_else(|_| "{}".to_string()),
+                                        },
+                                    );
+                                }
+                                let prompt = if obs.prompt.is_empty() {
+                                    format!("[vigil] {} - {} event(s)", obs.vigil_name, obs.event_count)
+                                } else {
+                                    obs.prompt.clone()
+                                };
+                                ui.last_user_prompt.clone_from(&prompt);
+                                let history = crate::agent::runner::convert_history(session);
+                                session.add_message(MessageRole::User, &prompt);
+                                begin_snapshot_turn(session);
+                                let runner = agent.clone().spawn_runner(
+                                    crate::provider::Prompt::text(
+                                        crate::agent::tools::background::prepend_pending_notifications(
+                                            &prompt,
+                                            bg_store.as_ref(),
+                                        ),
+                                    ),
+                                    history,
+                                    Some(ui.interjection_queue.clone()),
+                                    Some(session.assets_dir()),
+                                );
+                                runner.install_into(
+                                    &mut ui.agent_rx,
+                                    &mut ui.agent_abort,
+                                    &mut ui.agent_interject,
+                                    &mut ui.agent_cancel,
+                                    &mut ui.is_running,
+                                );
+                            }
+                        }
                     }
                     else => {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(idle_sleep_ms)).await;
                     }
                 }
     }

@@ -25,7 +25,7 @@ set -euo pipefail
 
 HIVE_TEST_URL=${HIVE_TEST_URL:-https://github.com/hive-agi/hive-test}
 HIVE_TEST_SHA=${HIVE_TEST_SHA:-4d20774cf592966c9ac54fa7fe7a1e2f7d6ae68d}
-TEST_NSES=(dirge.view-test)
+TEST_NSES=(dirge.view-test dirge.view-register-test)
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd "$here/../.." && pwd)

@@ -4,7 +4,8 @@
 //! [`HookPoint`](super::domain::HookPoint) and without an edit here.
 //!
 //! Free of ACP types: `_meta` is a JSON object, which is all ACP's `Meta`
-//! is. `extras::acp` bridges the protocol types onto these.
+//! is. `extras::acp` bridges the protocol types onto these. How the
+//! addons' answers combine is the addon host's fold for each key.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,8 +13,7 @@ use std::time::Duration;
 use serde_json::{Map, Value, json};
 
 use super::breaker::within as blocking_within;
-use super::domain::HookReply;
-use super::port::AddonEmitter;
+use super::port::AddonHooks;
 
 /// An ACP extension request: ctx `{"method" "params"}`, the method as the
 /// client sent it (leading `_` kept). The first non-null answer, in load
@@ -53,33 +53,6 @@ pub fn ext_ctx(method: &str, params: Value) -> Value {
     json!({ "method": method, "params": params })
 }
 
-/// The first non-null answer, in load order.
-pub fn ext_result(replies: &[HookReply]) -> Option<Value> {
-    replies
-        .iter()
-        .filter_map(|r| r.result.as_ref().ok())
-        .find(|v| !v.is_null())
-        .cloned()
-}
-
-/// `base` with every object answer's keys added. What `base` already holds
-/// wins, then earlier addons win over later ones. `None` when nothing is
-/// left.
-pub fn merged_meta(
-    base: Option<Map<String, Value>>,
-    replies: &[HookReply],
-) -> Option<Map<String, Value>> {
-    let mut meta = base.unwrap_or_default();
-    for answer in replies.iter().filter_map(|r| r.result.as_ref().ok()) {
-        if let Value::Object(keys) = answer {
-            for (key, value) in keys {
-                meta.entry(key.clone()).or_insert_with(|| value.clone());
-            }
-        }
-    }
-    (!meta.is_empty()).then_some(meta)
-}
-
 /// What `_meta` is being built for.
 #[derive(Debug, Clone, Default)]
 pub struct MetaRequest {
@@ -104,7 +77,7 @@ impl MetaRequest {
 /// The addons' answer to extension method `method`: `Ok(None)` when none
 /// answered, `Err` when they did not answer within [`BUDGET`].
 pub async fn ext_method(
-    host: Arc<dyn AddonEmitter>,
+    host: Arc<dyn AddonHooks>,
     method: &str,
     params: Value,
 ) -> Result<Option<Value>, String> {
@@ -112,20 +85,20 @@ pub async fn ext_method(
         return Ok(None);
     }
     let ctx = ext_ctx(method, params);
-    blocking_within(BUDGET, move || ext_result(&host.emit(EXT_METHOD_KEY, &ctx)))
+    blocking_within(BUDGET, move || host.fold(EXT_METHOD_KEY, &ctx))
         .await
         .map_err(|why| why.to_string())
 }
 
 /// Hand extension notification `method` to the addons without waiting.
-pub fn ext_notification(host: &dyn AddonEmitter, method: &str, params: Value) {
+pub fn ext_notification(host: &dyn AddonHooks, method: &str, params: Value) {
     host.post(EXT_NOTIFICATION_KEY, &ext_ctx(method, params));
 }
 
 /// `base` with the addons' `_meta` merged in. Addons that do not answer
-/// within [`BUDGET`] leave `base` as it is.
+/// within [`BUDGET`], or answer no object, leave `base` as it is.
 pub async fn meta(
-    host: Arc<dyn AddonEmitter>,
+    host: Arc<dyn AddonHooks>,
     request: MetaRequest,
     base: Option<Map<String, Value>>,
 ) -> Option<Map<String, Value>> {
@@ -134,9 +107,10 @@ pub async fn meta(
     }
     let ctx = request.ctx(&base);
     let budget = meta_budget(&request.method);
-    let replies = blocking_within(budget, move || host.emit(META_KEY, &ctx)).await;
-    match replies {
-        Ok(replies) => merged_meta(base, &replies),
+    let folded = blocking_within(budget, move || host.fold(META_KEY, &ctx)).await;
+    match folded {
+        Ok(Some(Value::Object(meta))) => Some(meta),
+        Ok(_) => base,
         Err(why) => {
             tracing::warn!(target: "dirge::addon", %why, method = %request.method, "addon ACP _meta skipped");
             base
@@ -162,49 +136,48 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// An [`AddonEmitter`] stub, no addon host behind it: one addon that
-    /// registered `keys` and answers each with `answers`, recording every
-    /// emit and post.
+    /// An [`AddonHooks`] stub, no addon host behind it: one addon that
+    /// registered `keys`, folds every hook call to `folded`, and records
+    /// every fold and post.
     #[derive(Default)]
-    struct RecordingEmitter {
+    struct KeyedHooks {
         keys: Vec<&'static str>,
-        answers: Vec<HookReply>,
+        folded: Option<Value>,
         calls: Mutex<Vec<(String, Value)>>,
     }
 
-    impl AddonEmitter for RecordingEmitter {
-        fn listens_key(&self, key: &str) -> bool {
-            self.keys.contains(&key)
-        }
-        fn emit(&self, key: &str, ctx: &Value) -> Vec<HookReply> {
+    impl KeyedHooks {
+        fn record(&self, key: &str, ctx: &Value) {
             self.calls
                 .lock()
                 .unwrap()
                 .push((key.to_string(), ctx.clone()));
-            self.answers.clone()
+        }
+    }
+
+    impl AddonHooks for KeyedHooks {
+        fn listens_key(&self, key: &str) -> bool {
+            self.keys.contains(&key)
+        }
+        fn fold(&self, key: &str, ctx: &Value) -> Option<Value> {
+            self.record(key, ctx);
+            self.folded.clone()
         }
         fn post(&self, key: &str, ctx: &Value) {
-            let _ = self.emit(key, ctx);
+            self.record(key, ctx);
         }
     }
 
     fn host(
         keys: &[&'static str],
-        answers: Vec<Value>,
-    ) -> (Arc<dyn AddonEmitter>, Arc<RecordingEmitter>) {
-        let rt = Arc::new(RecordingEmitter {
+        folded: Option<Value>,
+    ) -> (Arc<dyn AddonHooks>, Arc<KeyedHooks>) {
+        let rt = Arc::new(KeyedHooks {
             keys: keys.to_vec(),
-            answers: answers.into_iter().map(reply).collect(),
+            folded,
             ..Default::default()
         });
         (rt.clone(), rt)
-    }
-
-    fn reply(v: Value) -> HookReply {
-        HookReply {
-            addon_id: "stub".into(),
-            result: Ok(v),
-        }
     }
 
     fn usage() -> Map<String, Value> {
@@ -215,7 +188,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_ext_method_reaches_the_addon_and_its_answer_comes_back() {
-        let (host, rt) = host(&[EXT_METHOD_KEY], vec![json!({ "pong": 1 })]);
+        let (host, rt) = host(&[EXT_METHOD_KEY], Some(json!({ "pong": 1 })));
         let out = ext_method(host, "_zed/ping", json!({ "n": 1 })).await;
         assert_eq!(out, Ok(Some(json!({ "pong": 1 }))));
         assert_eq!(
@@ -229,45 +202,22 @@ mod tests {
 
     #[tokio::test]
     async fn no_listening_addon_means_no_answer_and_no_call() {
-        let (host, rt) = host(&[META_KEY], vec![json!({ "pong": 1 })]);
+        let (host, rt) = host(&[META_KEY], Some(json!({ "pong": 1 })));
         assert_eq!(ext_method(host, "_zed/ping", Value::Null).await, Ok(None));
         assert!(rt.calls.lock().unwrap().is_empty());
     }
 
-    #[test]
-    fn null_answers_and_failures_are_passes() {
-        let replies = vec![
-            HookReply {
-                addon_id: "a".into(),
-                result: Err("boom".into()),
-            },
-            reply(Value::Null),
-            reply(json!("second")),
-            reply(json!("third")),
-        ];
-        assert_eq!(ext_result(&replies), Some(json!("second")));
-        assert_eq!(ext_result(&[reply(Value::Null)]), None);
-    }
-
     #[tokio::test]
-    async fn addon_meta_merges_without_clobbering_usage() {
-        let (host, rt) = host(
-            &[META_KEY],
-            vec![
-                json!({ "usage": "forged", "zed.dev/panel": { "open": true } }),
-                json!({ "zed.dev/panel": "later loses", "x/y": 2 }),
-                json!("not an object"),
-            ],
-        );
+    async fn the_folded_meta_becomes_the_response_meta() {
+        let merged = json!({ "usage": { "totalTokens": 12 }, "x/y": 2 });
+        let (host, rt) = host(&[META_KEY], Some(merged.clone()));
         let request = MetaRequest {
             method: "session/prompt".into(),
             session_id: Some("s1".into()),
             meta: Some(Map::from_iter([("client".into(), json!("zed"))])),
         };
         let meta = super::meta(host, request, Some(usage())).await.unwrap();
-        assert_eq!(meta["usage"], json!({ "totalTokens": 12 }));
-        assert_eq!(meta["zed.dev/panel"], json!({ "open": true }));
-        assert_eq!(meta["x/y"], json!(2));
+        assert_eq!(Value::Object(meta), merged);
         let (key, ctx) = rt.calls.lock().unwrap()[0].clone();
         assert_eq!(key, META_KEY);
         assert_eq!(ctx["method"], "session/prompt");
@@ -277,8 +227,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_object_folded_keeps_the_base_meta() {
+        for folded in [None, Some(json!("not an object"))] {
+            let (host, _) = host(&[META_KEY], folded.clone());
+            let meta = super::meta(host, MetaRequest::default(), Some(usage())).await;
+            assert_eq!(meta, Some(usage()), "{folded:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn meta_is_untouched_when_no_addon_listens() {
-        let (host, rt) = host(&[EXT_METHOD_KEY], vec![json!({ "x": 1 })]);
+        let (host, rt) = host(&[EXT_METHOD_KEY], Some(json!({ "x": 1 })));
         assert_eq!(meta(host.clone(), MetaRequest::default(), None).await, None);
         assert_eq!(
             meta(host, MetaRequest::default(), Some(usage())).await,
@@ -289,7 +248,7 @@ mod tests {
 
     #[test]
     fn notifications_are_posted_with_the_same_ctx() {
-        let (host, rt) = host(&[EXT_NOTIFICATION_KEY], Vec::new());
+        let (host, rt) = host(&[EXT_NOTIFICATION_KEY], None);
         ext_notification(host.as_ref(), "_zed/saved", json!({ "path": "a.rs" }));
         assert_eq!(
             *rt.calls.lock().unwrap(),

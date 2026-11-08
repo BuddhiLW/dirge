@@ -1,0 +1,81 @@
+# lev System One sidecar (jlt-commons/lev, Apache-2.0). Serves the `english`
+# encoder on CPU over HTTP for dirge's on-vigil-rite noul gate.
+#
+# lev runs on jolt (Clojure on Chez Scheme). Per the lev README it needs ICU
+# and a BLAS that exports cblas_sgemm; the CPU kernels take the symbol's
+# address as a runtime parameter (native/lev_kernels.c), so the build needs
+# only a C compiler — no BLAS headers.
+
+# --- builder: fetch jolt + lev and compile the CPU kernels ------------------
+FROM ubuntu:24.04 AS builder
+
+ARG JOLT_VERSION=0.8.13
+ARG JOLT_SHA256=bc79b82f8e777172c865b26776c370c3e6791bd132c90cadeb7c140e3720ca09
+ARG LEV_COMMIT=15213f5524d4b6a5e31357cb8dc0321c56e1cc14
+
+ENV DEBIAN_FRONTEND=noninteractive HOME=/root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+# jolt — pinned digest. The host's v0.6.5 is too old for lev (missing
+# ffi/find-symbol); v0.8.13 is the first release confirmed to serve lev.
+RUN curl -fsSL \
+        "https://github.com/jolt-lang/jolt/releases/download/v${JOLT_VERSION}/jolt-v${JOLT_VERSION}-x86_64-linux.tar.gz" \
+        -o /tmp/jolt.tgz \
+    && echo "${JOLT_SHA256}  /tmp/jolt.tgz" | sha256sum -c - \
+    && tar xzf /tmp/jolt.tgz -C /tmp \
+    && mv "/tmp/jolt-v${JOLT_VERSION}-x86_64-linux/jolt" /usr/local/bin/jolt \
+    && chmod +x /usr/local/bin/jolt \
+    && rm -rf /tmp/jolt.tgz "/tmp/jolt-v${JOLT_VERSION}-x86_64-linux"
+
+# lev source pinned to a commit for reproducibility.
+RUN git clone https://github.com/jlt-commons/lev.git /lev \
+    && git -C /lev checkout "${LEV_COMMIT}"
+WORKDIR /lev
+RUN jolt kernels
+
+# --- runtime: jolt + built kernels + lev source, no toolchain ---------------
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive HOME=/root
+
+# OpenBLAS is the fast multi-threaded BLAS; the kernels resolve cblas_sgemm
+# from it at serve time via ffi/find-symbol. libicu74 is lev's runtime ICU
+# dep (libgfortran5 arrives as OpenBLAS's dependency).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        libicu74 \
+        libopenblas0-pthread \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/bin/jolt /usr/local/bin/jolt
+COPY --from=builder /lev /lev
+# jolt resolves lev's git/Maven deps from these caches at serve time; without
+# them `jolt -M:serve` would try to re-fetch (git deps need git, absent here).
+COPY --from=builder /root/.jolt /root/.jolt
+COPY --from=builder /root/.m2 /root/.m2
+
+# Preload OpenBLAS so ffi/find-symbol can resolve cblas_sgemm. Resolve the
+# arch-specific path at build time (not hardcoded x86_64) and pin it to a
+# stable location.
+RUN set -eux; \
+    p="$(ldconfig -p | awk '/libopenblas\.so\.0 / {print $NF; exit}')"; \
+    test -n "$p"; \
+    ln -sf "$p" /usr/local/lib/libopenblas-preload.so
+
+ENV LEV_HOST=0.0.0.0 \
+    LEV_DATA=/models/data \
+    LEV_DEFAULT_MODEL=english \
+    LEV_BACKEND=cpu \
+    LEV_DTYPE=f32 \
+    LD_PRELOAD=/usr/local/lib/libopenblas-preload.so \
+    OPENBLAS_NUM_THREADS=4
+
+EXPOSE 8080
+CMD ["jolt", "-M:serve"]

@@ -15,9 +15,11 @@ pub mod command_hooks;
 pub mod compaction;
 pub mod discovery;
 pub mod domain;
-pub mod emitter;
+pub mod emit;
 pub mod events;
+pub mod hooks;
 pub mod host;
+pub mod host_config;
 pub mod layout;
 pub mod lifecycle;
 pub mod live;
@@ -27,8 +29,11 @@ pub mod manifest;
 pub mod mcp;
 pub mod policy;
 pub mod port;
+pub mod settings;
 pub mod sink;
+pub mod spill;
 pub mod tool;
+pub mod tool_batch;
 #[cfg(feature = "plugin")]
 pub mod tool_calls;
 pub mod turn_hooks;
@@ -36,12 +41,14 @@ pub mod turn_hooks;
 #[cfg(test)]
 mod acceptance_tests;
 #[cfg(test)]
+mod dispatch_tests;
+#[cfg(test)]
+mod host_event_tests;
+#[cfg(test)]
 mod live_tests;
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-
-use serde_json::json;
 
 use cljrs::isolate::IsolateOptions;
 use domain::{AddonPlan, LoadFailure, ReloadReport};
@@ -93,7 +100,14 @@ pub fn install_from_config(cfg: &crate::config::Config) {
     if plan.is_empty() {
         return;
     }
+    settings::publish(&settings);
     let protocol = protocol_ns(&settings, &plan);
+    // The view runtime boots later and apart from the addon isolate; it
+    // requires each addon's `:dirge/view-ns` from these roots.
+    cljrs::view_addons::set(cljrs::view_addons::ViewAddons::from_manifests(
+        &plan.manifests,
+        &plan.source_roots,
+    ));
     match start_with(plan, harness(), &protocol, isolate_options(&settings)) {
         Ok(host) => {
             for failure in host.failures() {
@@ -132,9 +146,12 @@ pub fn reload(
         &extra_roots(settings),
         &manifest_dirs(settings),
     );
+    settings::publish(settings);
     if let Some(host) = global() {
+        host.set_host_config(host_wide_config(&settings::LiveConfig));
         let report = host.reload(load_set(&plan, true));
         register_commands(&host);
+        events::post_host(&[events::reloaded(&report)]);
         return Ok((host, report));
     }
     let protocol = protocol_ns(settings, &plan);
@@ -180,14 +197,25 @@ pub fn start_with(
     if set.manifests.is_empty() {
         return Err(describe_failures(&set.failures));
     }
+    let config = harness.config.clone();
     let isolate = Arc::new(cljrs::Isolate::spawn(
         set.source_roots.clone(),
         harness,
         protocol_ns,
         options,
     )?);
-    let host_config = json!({ "harness": "dirge", "version": env!("CARGO_PKG_VERSION") });
-    Ok(AddonHost::load(isolate, set, host_config))
+    Ok(AddonHost::load(
+        isolate,
+        set,
+        host_wide_config(config.as_ref()),
+    ))
+}
+
+/// The host config every addon's `:dirge/host` is narrowed from: harness,
+/// version, working directory and the settings `config` holds now.
+fn host_wide_config(config: &dyn port::ConfigSource) -> serde_json::Value {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    host_config::host_wide(env!("CARGO_PKG_VERSION"), &cwd, config.settings())
 }
 
 /// What loading `plan` works from. `with_sources` lists the addons' own
@@ -248,11 +276,14 @@ fn taken_by_dirge(name: &str) -> bool {
 }
 
 /// What `dirge.harness` reaches in this process: the TUI for notifications
-/// and panels, dirge's loop tools, and the MCP servers dirge connects to.
+/// and panels, dirge's loop tools, the MCP servers dirge connects to, and
+/// the running host for addon-to-addon emits.
 fn harness() -> Harness {
     let tui = Arc::new(sink::TuiSink);
     let mut harness = Harness::with_sink(tui.clone());
     harness.panels = tui;
+    harness.config = Arc::new(settings::LiveConfig);
+    harness.emitter = Arc::new(emit::HostEmitter::live());
     #[cfg(feature = "plugin")]
     if let Some(live) = tool_calls::LoopTools::live() {
         harness.tools = Arc::new(live);

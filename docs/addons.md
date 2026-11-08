@@ -111,6 +111,19 @@ implements when that is not `hive-addon.protocol`.
 `init-fn` is called with `:addon/config` and must return an addon. dirge then
 calls `initialize!` with `{:addon/id … :addon/config … :dirge/host {…}}`.
 
+`:dirge/host` is `{:harness "dirge" :version … :cwd … :config {…}}`. `:config`
+is the addon's own entry under `addons.settings` in `config.json`, keyed by
+addon id (`{}` when there is none); an addon never sees another addon's
+entry. `:addon/config` ships with the addon; `addons.settings` is what the
+user sets:
+
+```json
+{ "addons": { "settings": { "my.addon": { "greeting": "hi" } } } }
+```
+
+`/addons reload` reads the settings again. At any time an addon can read them
+with `(dirge.harness/config "my.addon")`.
+
 ## Tools
 
 Every entry of `(tools addon)` becomes a tool the model can call:
@@ -142,7 +155,7 @@ keys and ignores the rest:
 | `:dirge/system-prompt` | `{:cwd :session-id}` | text appended to the system prompt |
 | `:dirge/on-prompt` | `{:prompt :session-id :first-prompt? :tokens :ctx-max :pressure}` | text added before the user's prompt |
 | `:dirge/before-tool-call` | `{:tool :args :tool-call-id}` | `nil`, `{:block "reason"}`, `{:context "text"}` or `{:args {…}}` |
-| `:dirge/after-tool-call` | `{:tool :args :result :error? :tool-use-id :tokens :ctx-max :pressure}` | text appended to the tool result |
+| `:dirge/after-tool-call` | `{:tool :args :result :error? :tool-use-id :tokens :ctx-max :pressure}` | text (or `{:context "text"}`) appended to the tool result, and/or `{:result "text"}` replacing what the model sees of it (the last replacement wins) |
 | `:dirge/before-compact` | `{:count :tokens :reason :ctx-max :pressure :session-id}` | ignored |
 | `:dirge/compact` | `{:span :tokens :reason :focus :ctx-max :pressure :session-id}` | `nil` or `{:summary "text"}`, see [Compaction](#compaction) |
 | `:dirge/transform-context` | `{:messages :tokens :session-id}` | `nil` or `{:messages [...]}`, see [Turns](#turns) |
@@ -340,6 +353,8 @@ The `dirge.harness` namespace is available to addon code:
 | `(mcp-servers)` | names of the MCP servers dirge is connected to |
 | `(mcp-call server tool)` / `(mcp-call server tool args)` | call an MCP tool over dirge's own connection |
 | `(json-parse text)` | JSON text as data (keyword keys), or `nil` |
+| `(config id)` / `(config)` | the `addons.settings` entry of addon `id` (keyword keys, `{}` when absent), or every addon's settings keyed by id |
+| `(emit key)` / `(emit key payload)` | post the map `payload` to every addon's hook keyed `key`, see [Addon to addon](#addon-to-addon-emit); answers `{:ok true}` or `{:error msg}` |
 
 `panel` takes one of:
 
@@ -534,10 +549,50 @@ key an addon registered. A seam in dirge reaches such a key by name
 costs one call site, not a change to the addon host's types. The
 [turn hooks](#turns) are reached this way.
 
+### Addon to addon: `emit`
+
+Addons reach each other over the same open keys. `(dirge.harness/emit
+:acme/x {:n 1})` posts `{:n 1}` to the `:acme/x` hook of every loaded
+addon that registered one (the emitter's own included):
+
+```clojure
+;; addon A, in a command, a tool or a tool-call hook
+(dirge.harness/emit :acme/x {:n 1})   ;=> {:ok true}
+
+;; addon B
+(hooks [_] {:acme/x (fn [{:keys [n]}] (swap! !seen conj n) nil)})
+```
+
+- The key must be a namespaced keyword (or `"ns/name"` string). The
+  `dirge` and `dirge.*` namespaces are reserved for dirge's own hooks:
+  `(emit :dirge/event ...)` answers `{:error}`, so an addon cannot forge a
+  dirge event.
+- The payload is a map of plain data (it crosses as JSON); `nil` or no
+  payload sends `{}`. Anything else answers `{:error}`.
+- The post is queued and never awaited: `emit` returns before the
+  listeners run, their answers are dropped, and the post is dropped
+  outright when the isolate already holds 256 unrun posts (the bound the
+  `:dirge/event` stream shares). `{:ok true}` means queued, not heard.
+- It is refused, like `call-tool`, while dirge's event loop waits on the
+  addon (loading at startup, shutdown at exit, the system-prompt and
+  on-prompt hooks), and inside a posted hook call (an `emit` listener or
+  `:dirge/event`), so listeners cannot emit to each other without end.
+  Emit from a command, a tool or a tool-call hook.
+
 ### Watching the run: `:dirge/event`
 
 The `:dirge/event` hook hears every event of the main session's run as the
 front end gets it, one map per event, keyed by `:event`.
+
+It also hears the host's own lifecycle:
+
+| `:event` | Keys | When |
+|---|---|---|
+| `:mcp-connected` | `:server` | an MCP server became reachable |
+| `:mcp-disconnected` | `:server` | an MCP server is no longer reachable |
+| `:session-start` | `:session-id :cwd :first-prompt? :mcp-servers` | a session opens, before `:dirge/session-start` runs |
+| `:session-end` | `:session-id :cwd :reason` | a session closes, before `:dirge/session-end` runs |
+| `:addons-reloaded` | `:loaded :failed :tools-added :tools-removed` | `/addons reload` or a refresh replaced the addons |
 
 An event is heard as it serializes: `:event` is its name and its fields
 are the other keys, both kebab-case. An event with one unnamed field
@@ -576,6 +631,14 @@ answer is ignored and nothing waits for it: events are queued to the addon
 runtime and run in order after whatever it is doing, and when more than 256
 are waiting new ones are dropped.
 
+The renames in the table, and the way the addons' answers to a hook are
+combined into the one answer dirge reads (the first well-formed
+`:messages`, the first addon asking to stop, merged `_meta`, ...), are
+Clojure in the host namespace `dirge.addon.host`, each a method of a
+multimethod: `event-ctx` on `:event`, `shape-ctx` on the hook key (what a
+hook hears), and `fold-answers` on the hook key (how answers combine).
+Code running in the addon runtime can add a `defmethod` to any of them.
+
 ### Extending the host: `dirge/addon/host.cljc`
 
 The Clojure half of the addon host, `dirge.addon.host`, is built into dirge.
@@ -601,7 +664,7 @@ evaluated over the ones before it, in root order.
 
 dirge calls `use-protocol!`, `load-addon!`, `shutdown-addon!`,
 `reload-sources!`, `refresh!`, `call-tool`, `run-command`, `run-hook`,
-`run-hook-handler` and `shutdown-all!`. An overlay may redefine any of them,
+`run-hook-handler`, `emit-fold` and `shutdown-all!`. An overlay may redefine any of them,
 but each must still be a function afterwards. An overlay that fails to load,
 or that leaves one of them without a function, is undone whole, and the
 reason is logged at start and listed among the reload's source errors.

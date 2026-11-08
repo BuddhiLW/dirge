@@ -18,6 +18,8 @@ use ratatui::widgets::Widget;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ui::panels_ext::{ExternalPanels, PanelLine};
+#[cfg(feature = "vigil")]
+use crate::ui::renderer::VigilStatusRow;
 use crate::ui::renderer::{LeftPanelInfo, PanelData, SubagentStatusRow};
 
 use super::chat::crossterm_to_ratatui;
@@ -231,6 +233,129 @@ impl<'a> Widget for LeftPanel<'a> {
     }
 }
 
+/// Left panel widget that displays vigil status rows.
+#[cfg(feature = "vigil")]
+pub struct VigilLeftPanel<'a> {
+    data: &'a [VigilStatusRow],
+    style: Style,
+}
+
+#[cfg(feature = "vigil")]
+impl<'a> VigilLeftPanel<'a> {
+    pub fn new(data: &'a [VigilStatusRow]) -> Self {
+        Self {
+            data,
+            style: Style::default().fg(RColor::Green),
+        }
+    }
+
+    pub fn border_style(mut self, style: Style) -> Self {
+        self.style = style;
+        self
+    }
+}
+
+#[cfg(feature = "vigil")]
+impl<'a> Widget for VigilLeftPanel<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        paint_vigil_card(buf, area, self.data, self.style);
+    }
+}
+
+#[cfg(feature = "vigil")]
+fn paint_vigil_card(buf: &mut Buffer, area: Rect, data: &[VigilStatusRow], style: Style) {
+    let dim = RColor::DarkGray;
+    let green = RColor::Green;
+    let yellow = RColor::Yellow;
+    let panel_w = area.width as usize;
+    let box_w = area.width.saturating_sub(1);
+    let bs = style;
+
+    let mut dy = LEFT_PANEL_TOP_PAD;
+
+    // DIRGE banner
+    let banner = "D I R G E";
+    if dy < area.height {
+        let bw = banner.chars().count();
+        let bpad = panel_w.saturating_sub(bw) / 2;
+        buf.set_stringn(
+            area.x + bpad as u16,
+            area.y + dy,
+            banner,
+            panel_w.saturating_sub(bpad),
+            style,
+        );
+    }
+    dy += 2;
+
+    // VIGILS sub-panel
+    if data.is_empty() {
+        let h = 4;
+        if area.y + dy + h <= area.y + area.height {
+            let sp = SubPanel::new("VIGILS")
+                .line("· (none)", dim)
+                .border_style(bs);
+            sp.render(Rect::new(area.x, area.y + dy, box_w, h), buf);
+        }
+    } else {
+        // Each row: "  ● name          trigger  XXs"
+        let rows = data.len().min(
+            (area.y + area.height)
+                .saturating_sub(area.y + dy)
+                .saturating_sub(2) as usize,
+        );
+        let h = 2 + rows as u16;
+        if area.y + dy + h <= area.y + area.height {
+            let mut sp = SubPanel::new("VIGILS").border_style(bs);
+            let inner_w = box_w as usize;
+            for row in data.iter().take(rows) {
+                let glyph = if row.paused {
+                    ("○", dim)
+                } else if row.running {
+                    ("●", green)
+                } else {
+                    ("◐", yellow)
+                };
+                let interval = if row.interval_secs >= 60 {
+                    format!("{}m", row.interval_secs / 60)
+                } else {
+                    format!("{}s", row.interval_secs)
+                };
+                // Event ticker: "⚡N" when events were recently reaped.
+                let ev_tick = if row.last_event_count > 0 {
+                    let age = row.last_event_age.as_deref().unwrap_or("");
+                    format!("⚡{} {}", row.last_event_count, age)
+                } else {
+                    String::new()
+                };
+                // Layout: "  ● name  trigger  ⚡3 5s  10s"
+                let rhs = if ev_tick.is_empty() {
+                    format!("{}  {}", row.trigger, interval)
+                } else {
+                    format!("{}  {}  {}", row.trigger, ev_tick, interval)
+                };
+                let name_limit = inner_w.saturating_sub(6 + rhs.len() + 2);
+                let name = if row.name.chars().count() > name_limit && name_limit > 3 {
+                    let truncated: String = row
+                        .name
+                        .chars()
+                        .take(name_limit.saturating_sub(1))
+                        .collect();
+                    format!("{truncated}…")
+                } else {
+                    row.name.clone()
+                };
+                let line = format!("  {} {}  {}", glyph.0, name, rhs);
+                sp = sp.line(line, glyph.1);
+            }
+            sp.render(Rect::new(area.x, area.y + dy, box_w, h), buf);
+        }
+    }
+}
+
 /// One row of top padding so the left-panel content doesn't sit
 /// flush against the unified top frame. Matches the right panel's
 /// symmetric padding for visual balance.
@@ -269,6 +394,9 @@ pub(crate) fn subagent_preview_line(row: &SubagentStatusRow) -> Option<String> {
 /// Rows kept free for a minimal ACTIVITY box (top + 1 row + bottom +
 /// spacer) when sizing external panels, so they can't evict it.
 const ACTIVITY_MIN_ROWS: u16 = 4;
+
+/// Badge on the focused panel while it holds key focus.
+pub(crate) const PANEL_KEYS_HINT: &str = "keys: Esc returns";
 
 /// One sub-panel ready to paint: title, optional badge, styled body rows.
 type BoxLines = (String, Option<String>, Vec<Row>);
@@ -310,6 +438,16 @@ fn fit_external_panels(panels: &ExternalPanels, budget: u16) -> Vec<BoxLines> {
         for (i, b) in out.iter_mut().enumerate() {
             b.1 = Some(format!("{}/{total}", i + 1));
         }
+    }
+    // The focused panel holding key focus says how to give it back.
+    if panels.key_focus()
+        && panels.focused().is_some()
+        && let Some(first) = out.first_mut()
+    {
+        first.1 = Some(match first.1.take() {
+            Some(n) => format!("{n} {PANEL_KEYS_HINT}"),
+            None => PANEL_KEYS_HINT.to_string(),
+        });
     }
     out
 }

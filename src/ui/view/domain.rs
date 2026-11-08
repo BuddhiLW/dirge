@@ -219,6 +219,7 @@ pub enum NoticeLevel {
 #[serde(rename_all = "kebab-case")]
 pub enum PanelScope {
     Both,
+    Left,
     Right,
 }
 

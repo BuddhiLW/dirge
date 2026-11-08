@@ -370,6 +370,8 @@ pub enum PanelMode {
     /// Show debug panel instead of system info (gated on ≥100 cols).
     /// Only meaningful when a DAP session is active.
     Debug,
+    /// Show vigil status in the left panel instead of vitals.
+    Vigil,
 }
 
 /// Which side panels a `/display` spec (or the `display` config value)
@@ -424,6 +426,8 @@ pub fn parse_display_spec(spec: &str) -> Result<PaneVisibility, String> {
 }
 
 // Re-exported from submodules so existing imports don't break.
+#[cfg(feature = "vigil")]
+pub use crate::ui::panel_data::VigilStatusRow;
 pub use crate::ui::panel_data::{LeftPanelInfo, PanelData, SubagentStatusRow};
 /// Normalized selection range — `start <= end` in row-major order.
 /// Coordinates are `(buffer_line_idx, char_offset_in_line)`. Used by
@@ -599,6 +603,9 @@ pub struct Renderer {
     /// chat-tab tails are refreshed just before each paint while the
     /// grid is open.
     swarm_agents: Vec<crate::ui::swarm::SwarmAgent>,
+    /// Live vigil status rows for the left panel when in Vigil mode.
+    #[cfg(feature = "vigil")]
+    vigil_status: Vec<VigilStatusRow>,
     /// DAP debug panel snapshot — updated each UI tick when a
     /// DAP session is active and panel mode is Debug.
     #[cfg(feature = "dap")]
@@ -758,6 +765,8 @@ impl Renderer {
             external_panels: Default::default(),
             swarm_view: None,
             swarm_agents: Vec::new(),
+            #[cfg(feature = "vigil")]
+            vigil_status: Vec::new(),
             #[cfg(feature = "dap")]
             debug_panel_data: None,
             alert_overlay: None,
@@ -931,6 +940,7 @@ impl Renderer {
             selection_start,
             selection_end,
             right_panel_mode,
+            left_panel_mode,
             ..
         } = self;
 
@@ -1132,6 +1142,9 @@ impl Renderer {
             input_bg: crate::ui::theme::input_bg(),
             picker: picker_overlay.as_ref(),
             right_panel_mode: *right_panel_mode,
+            left_panel_mode: *left_panel_mode,
+            #[cfg(feature = "vigil")]
+            vigil_data: &self.vigil_status,
             tooltip,
             swarm: swarm_view.as_ref(),
             swarm_agents,
@@ -1412,6 +1425,17 @@ impl Renderer {
         self.right_panel_mode = mode;
     }
 
+    /// Set only the left panel mode (used by `/panel vigils`).
+    pub fn set_left_panel_mode(&mut self, mode: PanelMode) {
+        self.left_panel_mode = mode;
+    }
+
+    /// Replace the vigil status snapshot in the left panel.
+    #[cfg(feature = "vigil")]
+    pub fn set_vigil_status(&mut self, rows: Vec<VigilStatusRow>) {
+        self.vigil_status = rows;
+    }
+
     /// Apply a parsed `/display` selection (or the `display` config
     /// value): each listed side panel is forced on, each omitted one
     /// forced off — an explicit user choice, so `On`/`Off` rather than
@@ -1449,7 +1473,9 @@ impl Renderer {
     /// Replace the whole external panel set.
     #[allow(dead_code)]
     pub fn set_external_panels(&mut self, panels: crate::ui::panels_ext::ExternalPanels) {
+        let key_focus = self.external_panels.key_focus();
         self.external_panels = panels;
+        self.external_panels.set_key_focus(key_focus);
     }
 
     /// Fold one external panel op into the left-panel state; the
@@ -1466,6 +1492,11 @@ impl Renderer {
 
     /// The swarm grid's cells in paint order: external panels, then
     /// subagents.
+    /// Show whether the focused panel holds key focus (its title hint).
+    pub fn set_panel_key_focus(&mut self, on: bool) {
+        self.external_panels.set_key_focus(on);
+    }
+
     pub fn focused_external_panel_id(&self) -> Option<String> {
         self.external_panels.focused().map(str::to_string)
     }
@@ -1732,6 +1763,7 @@ impl Renderer {
             PanelMode::On => self.content_indent() >= 15,
             PanelMode::Auto => cols >= PANEL_AUTO_MIN_COLS && self.content_indent() >= 15,
             PanelMode::Debug => cols >= PANEL_AUTO_MIN_COLS && self.content_indent() >= 15,
+            PanelMode::Vigil => cols >= PANEL_AUTO_MIN_COLS && self.content_indent() >= 15,
         }
     }
 

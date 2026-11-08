@@ -293,6 +293,10 @@ otherwise dirge shows a warning and sends nothing. A reply that fails (no feed
 running, the producer unreachable or answering non-2xx) is shown as a
 notification in the chat area.
 
+Keys a `show` op declares (`keys`) fire only while the panel holds key
+focus: press Alt+P (`focus_panel`) to give it focus, Esc or Alt+P to
+return to the prompt. Until then every typed letter goes to the prompt.
+
 ## Swarm grid
 
 The left side panel shows external panels as compact boxes. `/swarm`

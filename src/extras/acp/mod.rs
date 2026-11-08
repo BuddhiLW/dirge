@@ -6,8 +6,13 @@ pub mod mcp_servers;
 pub mod model_option;
 mod permission_forward;
 mod plan_update;
+mod session_load;
+mod session_store;
 
 use std::sync::Arc;
+
+use self::session_load::{handle_load_session, persist_session};
+use self::session_store::{FileSessionStore, SessionStore};
 
 use agent_client_protocol::schema::v1::*;
 use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Responder, Stdio};
@@ -114,7 +119,7 @@ async fn register_run(
     run.generation = generation;
     let mut map = sessions.lock().await;
     let entry = map.entry(id.to_string()).or_insert_with(|| AcpSession {
-        session: Session::new(provider, model, 0),
+        session: session_load::stored_session(provider, model, id),
         cwd: std::env::current_dir().unwrap_or_default(),
         model_override: None,
         provider_override: None,
@@ -188,6 +193,9 @@ struct AcpState {
     cfg: Config,
     context: ContextFiles,
     sessions: SessionMap,
+    /// D3: where sessions persist. `None` under `--no-session`, and then
+    /// `loadSession` is not advertised.
+    store: Option<Arc<dyn SessionStore>>,
     /// The addons, as the composition root injected them.
     addons: AddonSeam,
 }
@@ -198,11 +206,17 @@ pub async fn serve(
     context: ContextFiles,
     addons: AddonSeam,
 ) -> anyhow::Result<()> {
+    let store: Option<Arc<dyn SessionStore>> = if cli.no_session {
+        None
+    } else {
+        Some(Arc::new(FileSessionStore))
+    };
     let state = Arc::new(AcpState {
         cli,
         cfg,
         context,
         sessions: tokio::sync::Mutex::new(HashMap::new()),
+        store,
         addons,
     });
     let dispatch_addons = state.addons.clone();
@@ -226,6 +240,16 @@ pub async fn serve(
                 move |req: NewSessionRequest, responder, cx| {
                     let state = state.clone();
                     async move { handle_new_session(req, responder, cx, &state).await }
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let state = state.clone();
+                move |req: LoadSessionRequest, responder, cx| {
+                    let state = state.clone();
+                    async move { handle_load_session(req, responder, cx, &state).await }
                 }
             },
             on_receive_request!(),
@@ -312,7 +336,8 @@ async fn handle_initialize(
     responder: Responder<InitializeResponse>,
     state: &AcpState,
 ) -> Result<(), agent_client_protocol::Error> {
-    let caps = AgentCapabilities::new();
+    // D3: `session/load` works only when sessions persist.
+    let caps = AgentCapabilities::new().load_session(state.store.is_some());
     #[cfg(feature = "mcp")]
     let caps = caps.mcp_capabilities(mcp_servers::capabilities());
 
@@ -350,7 +375,7 @@ async fn handle_new_session(
     state.sessions.lock().await.insert(
         session_id.to_string(),
         AcpSession {
-            session: Session::new(&provider, &model, 0),
+            session: session_load::stored_session(&provider, &model, &session_id.0),
             cwd: req.cwd.clone(),
             model_override: None,
             provider_override: None,
@@ -815,6 +840,7 @@ async fn run_prompt(
         turn_tool_calls,
     )
     .await;
+    persist_session(&state.sessions, state.store.as_deref(), &id_key).await;
 
     // The ACP spec requires `Cancelled` when the client sent `session/cancel`,
     // even though the aborted runner just closed its channel without a `Done`.
@@ -823,13 +849,17 @@ async fn run_prompt(
     } else {
         StopReason::EndTurn
     };
-    // Addon `_meta` keys join `usage` and never replace it.
+    // `provider_str` is an alias; the usage convention follows the provider
+    // type its entry declares. Addon `_meta` keys join `usage` and never
+    // replace it.
+    let provider_type =
+        crate::provider::provider_type_for_alias(&provider_str, &state.cfg.providers_map());
     let meta = addon_seam::meta(
         &state.addons,
         "session/prompt",
         Some(&id_key),
         request_meta.as_ref(),
-        usage.meta(&provider_str),
+        usage.meta(&provider_type),
     )
     .await;
     let _ = responder.respond(PromptResponse::new(reason).meta(meta));
@@ -868,11 +898,13 @@ impl TurnUsage {
     /// the provider reported no usage (a slash command, or a provider that
     /// sends none). `inputTokens` is the whole prompt whatever the provider's
     /// convention, so cached tokens are a part of it, never added to it.
-    fn meta(&self, provider: &str) -> Option<Meta> {
+    /// `provider_type` is the resolved provider type, not the session's
+    /// provider alias: the convention belongs to the backend.
+    fn meta(&self, provider_type: &str) -> Option<Meta> {
         if !self.reported {
             return None;
         }
-        let input = self.tokens.prompt_total(Some(provider));
+        let input = self.tokens.prompt_total(Some(provider_type));
         let output = self.tokens.output_tokens;
         let usage = serde_json::json!({
             "inputTokens": input,
@@ -1500,6 +1532,25 @@ mod tests {
         assert_eq!(meta["usage"]["totalTokens"], 9_530);
         assert_eq!(meta["usage"]["cachedReadTokens"], 9_000);
         assert_eq!(meta["usage"]["cachedWriteTokens"], 400);
+    }
+
+    #[test]
+    fn prompt_usage_counts_cached_tokens_for_an_aliased_anthropic_provider() {
+        // The session's provider is an alias; the usage convention follows
+        // the provider type its entry declares.
+        let providers = std::collections::HashMap::from([(
+            "work-claude".to_string(),
+            crate::config::ProviderEntry {
+                provider_type: Some("anthropic".to_string()),
+                ..Default::default()
+            },
+        )]);
+        let provider_type = crate::provider::provider_type_for_alias("work-claude", &providers);
+        let mut usage = TurnUsage::default();
+        usage.add(100, 9_000, 400, 30);
+        let meta = usage.meta(&provider_type).unwrap();
+        assert_eq!(meta["usage"]["inputTokens"], 9_500);
+        assert_eq!(meta["usage"]["totalTokens"], 9_530);
     }
 
     struct TestDir(PathBuf);
@@ -2239,6 +2290,21 @@ mod tests {
         let (cli, cfg, id) = (default_cli(), Config::default(), "s");
         let sessions = session_map_with(id);
         let req = set_model_request(id, "model", "llama-3.1");
+        let options = apply_model_config(&sessions, &cli, &cfg, &req)
+            .await
+            .expect("the switch applies");
+        assert_eq!(selected_model(&options), "llama-3.1");
+        let (model_ovr, _, _) = session_overrides(&sessions, id).await;
+        assert_eq!(model_ovr.as_deref(), Some("llama-3.1"));
+    }
+
+    /// A value id padded with whitespace switches to the trimmed model: the
+    /// session stores the id without the padding.
+    #[tokio::test]
+    async fn set_model_option_stores_the_trimmed_model() {
+        let (cli, cfg, id) = (default_cli(), Config::default(), "s");
+        let sessions = session_map_with(id);
+        let req = set_model_request(id, "model", "  llama-3.1\n");
         let options = apply_model_config(&sessions, &cli, &cfg, &req)
             .await
             .expect("the switch applies");

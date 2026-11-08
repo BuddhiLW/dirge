@@ -10,8 +10,8 @@ use cljrs_value::{Arity, NativeFn, Value, ValueResult};
 use serde_json::{Value as Json, json};
 
 use super::bridge;
-use crate::addons::policy;
-use crate::addons::port::{Harness, Level};
+use crate::addons::port::{Harness, Level, addon_settings};
+use crate::addons::{emit, policy};
 
 /// Namespace addon code requires to reach dirge.
 pub const HARNESS_NS: &str = "dirge.harness";
@@ -23,6 +23,11 @@ const BLOCKED_MCP_CALL: &str = "mcp-call is unavailable while dirge waits on thi
 const BLOCKED_CALL_TOOL: &str = "call-tool is unavailable while dirge waits on this addon \
      (system-prompt and on-prompt hooks, load, shutdown); call it from a command, \
      a tool or a tool-call hook";
+
+const BLOCKED_EMIT: &str = "emit is unavailable while dirge waits on this addon \
+     (system-prompt and on-prompt hooks, load, shutdown) and inside a posted hook \
+     call (an emit or :dirge/event listener); emit from a command, a tool or a \
+     tool-call hook";
 
 /// Register `dirge.harness` into `globals`.
 ///
@@ -59,10 +64,23 @@ const BLOCKED_CALL_TOOL: &str = "call-tool is unavailable while dirge waits on t
 /// - `(refresh!)`: once the current call returns, ask every addon again for
 ///   its tools, hooks and commands, without shutting it down, and hand the
 ///   changes to the running agent. For definitions changed at a REPL.
+/// - `(config addon-id)`: the settings the user wrote for `addon-id` under
+///   `addons.settings` in `config.json` (keyword keys), or `{}` when there
+///   are none. `(config)` answers every addon's settings keyed by id. Read
+///   through the harness's `ConfigSource` at call time.
+/// - `(emit key)` / `(emit key payload)`: post the map `payload` to every
+///   addon's hook keyed `key`, addon to addon. `key` is a namespaced
+///   keyword outside the reserved `dirge` namespaces (`:acme/x`). The post
+///   is queued and never awaited, and dropped when the isolate is backed
+///   up. Answers `{:ok true}`, or `{:error msg}` for a refused key or
+///   payload, and while dirge's event loop waits on the addon (as for
+///   `call-tool`) or while a posted hook call is being delivered, so
+///   listeners cannot emit to each other without end.
 pub fn install(
     globals: &Arc<GlobalEnv>,
     harness: Harness,
     caller_on_runtime: Rc<Cell<bool>>,
+    delivering_post: Rc<Cell<bool>>,
     refresh_requested: Rc<Cell<bool>>,
 ) {
     let Harness {
@@ -70,7 +88,32 @@ pub fn install(
         panels,
         mcp,
         tools,
+        config,
+        emitter,
     } = harness;
+    let emit_blocked = caller_on_runtime.clone();
+    define(globals, "emit", Arity::Variadic { min: 1 }, move |args| {
+        if emit_blocked.get() || delivering_post.get() {
+            return Ok(bridge::to_clj(&json!({ "error": BLOCKED_EMIT })));
+        }
+        let payload = args.get(1).map(bridge::to_json);
+        let answer = emit::emit_key(&text(&args[0]))
+            .and_then(|key| Ok((key, emit::emit_ctx(payload.as_ref())?)))
+            .and_then(|(key, ctx)| emitter.emit(&key, &ctx))
+            .map_or_else(
+                |error| json!({ "error": error }),
+                |()| json!({ "ok": true }),
+            );
+        Ok(bridge::to_clj(&answer))
+    });
+    define(globals, "config", Arity::Variadic { min: 0 }, move |args| {
+        let settings = config.settings();
+        let answer = match args.first() {
+            Some(id) => addon_settings(&settings, &text(id)),
+            None => Json::Object(settings),
+        };
+        Ok(bridge::to_clj(&answer))
+    });
     define(globals, "notify", Arity::Variadic { min: 1 }, move |args| {
         let level = args.get(1).map_or(Level::Info, level_of);
         sink.notify(level, &text(&args[0]));
