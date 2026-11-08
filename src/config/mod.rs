@@ -19,7 +19,7 @@ use crate::extras::acp::config::AcpServerConfig;
 ///
 /// `provider_type` is optional: when the alias matches a built-in
 /// (anthropic, cerebras, deepseek, gemini, glm, kimi, ollama, openai, opencode,
-/// openrouter, requesty, or custom), it is inferred from the key. Set it only when aliasing
+/// openrouter, requesty, opper, cheaperinference, or custom), it is inferred from the key. Set it only when aliasing
 /// a built-in backend under a different name — e.g.
 /// `"ollama": { "provider_type": "openai", "base_url": "..." }`
 /// aliases the OpenAI-compatible backend under the alias `ollama`.
@@ -331,7 +331,13 @@ fn model_image_support(model: &str) -> ImageSupport {
 fn provider_type_supports_images(provider_type: Option<&str>) -> bool {
     matches!(
         provider_type.map(|s| s.to_ascii_lowercase()).as_deref(),
-        Some("anthropic") | Some("openai") | Some("gemini") | Some("openrouter") | Some("requesty")
+        Some("anthropic")
+            | Some("openai")
+            | Some("gemini")
+            | Some("openrouter")
+            | Some("requesty")
+            | Some("opper")
+            | Some("cheaperinference")
     )
 }
 
@@ -1192,8 +1198,8 @@ pub struct Config {
     /// which replies ALLOW/DENY instead of asking the human. Unset
     /// (default) = human prompts as usual. See docs/permissions.md.
     pub approval_provider: Option<String>,
-    /// UI color theme. Known built-in values: `phosphor` (default,
-    /// 80s CRT green) and `plain` (white/cyan).
+    /// UI color theme. Built-ins: `phosphor` (default, 80s CRT green),
+    /// `plain` (white/cyan), and `ansi` (terminal palette, including pywal).
     ///
     /// Any other value looks for a custom theme file at
     /// `~/.config/dirge/<theme>.theme.json` — see the
@@ -2517,7 +2523,7 @@ pub fn load() -> Config {
                     "error: provider {:?} has invalid provider_type {:?}.\n\
                      Either the alias must match a built-in (openrouter, openai,\n\
                      openai-responses, anthropic, gemini, deepseek, glm, cerebras,\n\
-                     opencode, ollama, requesty, custom) or set `provider_type` explicitly\n\
+                     opencode, ollama, requesty, opper, cheaperinference, custom) or set `provider_type` explicitly\n\
                      to one of those.",
                     name, ptype,
                 );
@@ -3785,6 +3791,30 @@ mod provider_role_tests {
             .expect("bare Requesty built-in should resolve");
 
         assert_eq!(name, "requesty");
+        assert!(entry.provider_type.is_none());
+        assert!(entry.model.is_none());
+    }
+
+    #[test]
+    fn opper_bare_builtin_alias_resolves_without_provider_entry() {
+        let cfg = cfg_with_providers(r#"{ "provider": "opper" }"#);
+        let (name, entry) = cfg
+            .resolve_role(ConfigRole::Default)
+            .expect("bare Opper built-in should resolve");
+
+        assert_eq!(name, "opper");
+        assert!(entry.provider_type.is_none());
+        assert!(entry.model.is_none());
+    }
+
+    #[test]
+    fn cheaper_inference_bare_builtin_alias_resolves_without_provider_entry() {
+        let cfg = cfg_with_providers(r#"{ "provider": "cheaperinference" }"#);
+        let (name, entry) = cfg
+            .resolve_role(ConfigRole::Default)
+            .expect("bare Cheaper Inference built-in should resolve");
+
+        assert_eq!(name, "cheaperinference");
         assert!(entry.provider_type.is_none());
         assert!(entry.model.is_none());
     }

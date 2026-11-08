@@ -1284,18 +1284,19 @@ fn opt_esc_rejects() {
     );
 }
 
-/// Every modal text field must ignore control chords rather than typing
-/// them (dirge-x2zf). Three fields take free text — plan-approval feedback,
-/// the question tool's custom answer, and the permission deny note — and
-/// two of them had carried the guard from the start. The third pushed the
-/// literal `c` of a Ctrl+C into the user's answer for as long as it had
-/// existed, which is how a key that cancels everywhere else came to corrupt
-/// text here.
+/// Every modal free-text field must route keystrokes through the shared
+/// [`entry_edit`] decider rather than a hand-rolled `match key.code`. Three
+/// fields take free text — plan-approval feedback, the question tool's custom
+/// answer, and the permission deny note. The hand-rolled copies are how the
+/// question answer lost Backspace on terminals that send the BS byte and once
+/// pushed the literal `c` of a Ctrl+C into the user's answer; one decider means
+/// one place to keep correct.
 ///
-/// A count, not a parse: crude enough to fool, strict enough to catch the
-/// mistake anyone actually makes — adding a fourth field and forgetting.
+/// A scan, not a parse: crude enough to fool, strict enough to catch the
+/// mistake anyone actually makes — adding a fourth field and hand-rolling its
+/// own key handling.
 #[test]
-fn every_modal_text_field_ignores_control_chords() {
+fn every_modal_text_field_routes_through_entry_edit() {
     let src = include_str!("mod.rs");
     let lines: Vec<&str> = src.lines().collect();
     let mut fields = 0;
@@ -1304,12 +1305,13 @@ fn every_modal_text_field_ignores_control_chords() {
             continue;
         }
         fields += 1;
-        // The guard rides on the `KeyCode::Char(c)` arm just above.
+        // The routing rides on the `EntryEdit::Insert(c)` arm (on the line
+        // itself, or just above for the multi-arm fields).
         let window = lines[i.saturating_sub(6)..=i].join("\n");
         assert!(
-            window.contains("KeyModifiers::CONTROL"),
-            "the text field at mod.rs:{} types control chords instead of \
-             ignoring them; guard `KeyCode::Char(c)` on `!CONTROL` as the \
+            window.contains("EntryEdit::Insert"),
+            "the text field at mod.rs:{} pushes characters without going \
+             through `entry_edit`; route it through the shared decider as the \
              other modal fields do",
             i + 1,
         );
@@ -1373,6 +1375,93 @@ fn opt_space_off_options_without_custom_is_ignored() {
     // No custom row and cursor somehow at num_options: Space does nothing.
     let a = option_select_action(KC::Char(' '), KeyModifiers::NONE, true, false, 3, 3, false);
     assert_eq!(a, OptionAction::Ignore);
+}
+
+// ============================================================
+// entry_edit — free-text answer field keystrokes
+// ============================================================
+
+#[test]
+fn entry_printable_char_inserts() {
+    assert_eq!(
+        entry_edit(KC::Char('x'), KeyModifiers::NONE),
+        EntryEdit::Insert('x')
+    );
+}
+
+#[test]
+fn entry_space_inserts() {
+    // Space is text here, not a select/toggle key.
+    assert_eq!(
+        entry_edit(KC::Char(' '), KeyModifiers::NONE),
+        EntryEdit::Insert(' ')
+    );
+}
+
+#[test]
+fn entry_backspace_deletes_before_caret() {
+    assert_eq!(
+        entry_edit(KC::Backspace, KeyModifiers::NONE),
+        EntryEdit::Backspace
+    );
+}
+
+#[test]
+fn entry_ctrl_h_deletes_like_backspace() {
+    // The user's terminal can report Backspace as the BS byte (0x08), which
+    // crossterm decodes as Ctrl+H rather than `KeyCode::Backspace`. Before the
+    // fix this key was silently dropped by the custom-answer field.
+    assert_eq!(
+        entry_edit(KC::Char('h'), KeyModifiers::CONTROL),
+        EntryEdit::Backspace
+    );
+}
+
+#[test]
+fn entry_ctrl_g_opens_external_editor() {
+    assert_eq!(
+        entry_edit(KC::Char('g'), KeyModifiers::CONTROL),
+        EntryEdit::ExternalEditor
+    );
+}
+
+#[test]
+fn entry_plain_g_inserts() {
+    // A bare `g` is ordinary text in an answer field, not the editor chord.
+    assert_eq!(
+        entry_edit(KC::Char('g'), KeyModifiers::NONE),
+        EntryEdit::Insert('g')
+    );
+}
+
+#[test]
+fn entry_altgr_char_inserts() {
+    // Windows reports AltGr as Ctrl+Alt+printable — real text, not a chord.
+    assert_eq!(
+        entry_edit(KC::Char('@'), KeyModifiers::CONTROL | KeyModifiers::ALT),
+        EntryEdit::Insert('@')
+    );
+}
+
+#[test]
+fn entry_enter_and_esc_are_not_edits() {
+    // Enter/Esc are terminal (submit/discard) and handled by the caller.
+    assert_eq!(entry_edit(KC::Enter, KeyModifiers::NONE), EntryEdit::Ignore);
+    assert_eq!(entry_edit(KC::Esc, KeyModifiers::NONE), EntryEdit::Ignore);
+}
+
+#[test]
+fn entry_ctrl_c_is_not_an_edit() {
+    // Ctrl+C is the panic gesture — the caller maps it to a rejection; the
+    // field must not push the literal 'c'.
+    assert_eq!(
+        entry_edit(KC::Char('c'), KeyModifiers::CONTROL),
+        EntryEdit::Ignore
+    );
+    assert_eq!(
+        entry_edit(KC::Char('d'), KeyModifiers::CONTROL),
+        EntryEdit::Ignore
+    );
 }
 
 // ============================================================

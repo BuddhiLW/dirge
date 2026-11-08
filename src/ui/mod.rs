@@ -757,7 +757,7 @@ pub async fn run_interactive(
     // can borrow the same locals (`agent`, channels, `context`, …) the
     // former arms did.
     macro_rules! dispatch_modal {
-        ($ev:expr) => {
+        ($ev:expr, $user_tx:expr) => {
             // dirge-7543: a paste while a modal owns the input must NOT fall
             // through to the compose editor below. The Question custom-answer
             // field is the only modal that takes free text, so deliver the
@@ -885,50 +885,54 @@ pub async fn run_interactive(
                                 unreachable!()
                             };
                             if let Some(e) = entry {
-                                // Typing feedback for the "edit" path.
-                                match key.code {
-                                    KeyCode::Enter => {
-                                        let fb = e.buf.trim().to_string();
-                                        if !fb.is_empty() {
-                                            decision = Some(PlanApprovalDecision::Edit(fb));
-                                        }
-                                        // Empty feedback → ignore Enter, keep typing.
-                                    }
-                                    KeyCode::Esc => {
-                                        // Discard the draft, return to a/e/c.
-                                        *entry = None;
-                                        renderer.write_line(
-                                            "  (edit cancelled) [a] approve   [e] edit   [c] cancel",
-                                            c_perm(),
-                                        )?;
-                                        renderer.request_repaint();
-                                    }
-                                    KeyCode::Backspace => {
-                                        e.buf.pop();
-                                        render_custom_entry(
-                                            &mut renderer,
-                                            &e.buf,
-                                            e.input_anchor,
-                                        );
-                                        renderer.request_repaint();
-                                    }
-                                    KeyCode::Char(c)
-                                        if !key.modifiers.contains(KeyModifiers::CONTROL) =>
-                                    {
+                                // Typing feedback for the "edit" path, through the
+                                // shared decider (Backspace accepts the BS byte;
+                                // Ctrl+G opens $EDITOR).
+                                match entry_edit(key.code, key.modifiers) {
+                                    EntryEdit::Insert(c) => {
                                         e.buf.push(c);
-                                        render_custom_entry(
-                                            &mut renderer,
-                                            &e.buf,
-                                            e.input_anchor,
-                                        );
+                                        render_custom_entry(&mut renderer, &e.buf, e.input_anchor);
                                         renderer.request_repaint();
                                     }
-                                    // Ctrl+C bails from feedback entry too (not just
-                                    // the a/e/c screen), matching the rest of the UI.
-                                    _ if is_ctrl_c => {
-                                        decision = Some(PlanApprovalDecision::Cancel)
+                                    EntryEdit::Backspace => {
+                                        e.buf.pop();
+                                        render_custom_entry(&mut renderer, &e.buf, e.input_anchor);
+                                        renderer.request_repaint();
                                     }
-                                    _ => {}
+                                    EntryEdit::ExternalEditor => {
+                                        #[cfg(unix)]
+                                        if let Some(text) =
+                                            edit_entry_in_editor(&mut renderer, $user_tx, &e.buf)
+                                        {
+                                            e.buf = text;
+                                        }
+                                        render_custom_entry(&mut renderer, &e.buf, e.input_anchor);
+                                        renderer.request_repaint();
+                                    }
+                                    EntryEdit::Ignore => match key.code {
+                                        KeyCode::Enter => {
+                                            let fb = e.buf.trim().to_string();
+                                            if !fb.is_empty() {
+                                                decision = Some(PlanApprovalDecision::Edit(fb));
+                                            }
+                                            // Empty feedback → ignore Enter, keep typing.
+                                        }
+                                        KeyCode::Esc => {
+                                            // Discard the draft, return to a/e/c.
+                                            *entry = None;
+                                            renderer.write_line(
+                                                "  (edit cancelled) [a] approve   [e] edit   [c] cancel",
+                                                c_perm(),
+                                            )?;
+                                            renderer.request_repaint();
+                                        }
+                                        // Ctrl+C bails from feedback entry too (not just
+                                        // the a/e/c screen), matching the rest of the UI.
+                                        _ if is_ctrl_c => {
+                                            decision = Some(PlanApprovalDecision::Cancel)
+                                        }
+                                        _ => {}
+                                    },
                                 }
                             } else {
                                 // Choosing approve / edit / cancel.
@@ -998,56 +1002,62 @@ pub async fn run_interactive(
                             let num_options = question.options.len();
 
                             if let Some(entry) = &mut q.entry {
-                                // Innermost former loop: free-form text entry.
-                                match key.code {
-                                    KeyCode::Enter => {
-                                        q.custom_text = if entry.buf.is_empty() {
-                                            None
-                                        } else {
-                                            Some(std::mem::take(&mut entry.buf))
-                                        };
-                                        q.entry = None;
-                                        if !multi {
-                                            if let Some(ct) = q.custom_text.take() {
-                                                q.answers.push(vec![ct]);
-                                            }
-                                            QStep::Next
-                                        } else {
-                                            // Multi: keep going; Enter again confirms.
-                                            QStep::Stay
-                                        }
-                                    }
-                                    KeyCode::Esc => {
-                                        // Discard the typed text, back to options.
-                                        q.entry = None;
-                                        QStep::Stay
-                                    }
-                                    KeyCode::Backspace => {
-                                        entry.buf.pop();
-                                        QStep::Stay
-                                    }
-                                    // dirge-x2zf: unguarded, this pushed the
-                                    // literal 'c' of a Ctrl+C into the user's
-                                    // answer. `PlanApproval`'s entry has
-                                    // carried this guard all along; this one
-                                    // is the copy that never got it.
-                                    KeyCode::Char(c)
-                                        if !key.modifiers.contains(KeyModifiers::CONTROL) =>
-                                    {
+                                // Innermost former loop: free-form text entry,
+                                // through the shared decider — Backspace accepts
+                                // the BS byte, Ctrl+G opens $EDITOR.
+                                match entry_edit(key.code, key.modifiers) {
+                                    EntryEdit::Insert(c) => {
                                         entry.buf.push(c);
                                         QStep::Stay
                                     }
-                                    // Ctrl+C bails from the answer field too,
-                                    // not just the option list.
-                                    _ if key.modifiers.contains(KeyModifiers::CONTROL)
-                                        && matches!(
-                                            key.code,
-                                            KeyCode::Char('c') | KeyCode::Char('d')
-                                        ) =>
-                                    {
-                                        QStep::Rejected
+                                    EntryEdit::Backspace => {
+                                        entry.buf.pop();
+                                        QStep::Stay
                                     }
-                                    _ => QStep::Stay,
+                                    EntryEdit::ExternalEditor => {
+                                        #[cfg(unix)]
+                                        if let Some(text) =
+                                            edit_entry_in_editor(&mut renderer, $user_tx, &entry.buf)
+                                        {
+                                            entry.buf = text;
+                                        }
+                                        QStep::Stay
+                                    }
+                                    EntryEdit::Ignore => match key.code {
+                                        KeyCode::Enter => {
+                                            q.custom_text = if entry.buf.is_empty() {
+                                                None
+                                            } else {
+                                                Some(std::mem::take(&mut entry.buf))
+                                            };
+                                            q.entry = None;
+                                            if !multi {
+                                                if let Some(ct) = q.custom_text.take() {
+                                                    q.answers.push(vec![ct]);
+                                                }
+                                                QStep::Next
+                                            } else {
+                                                // Multi: keep going; Enter again confirms.
+                                                QStep::Stay
+                                            }
+                                        }
+                                        KeyCode::Esc => {
+                                            // Discard the typed text, back to options.
+                                            q.entry = None;
+                                            QStep::Stay
+                                        }
+                                        // Ctrl+C/D bail from the answer field
+                                        // too, not just the option list.
+                                        _ if key.modifiers.contains(KeyModifiers::CONTROL)
+                                            && matches!(
+                                                key.code,
+                                                KeyCode::Char('c') | KeyCode::Char('d')
+                                            ) =>
+                                        {
+                                            QStep::Rejected
+                                        }
+                                        _ => QStep::Stay,
+                                    },
                                 }
                             } else {
                                 // Option-select. Decision is pure (dirge-72h2);
@@ -1356,27 +1366,31 @@ pub async fn run_interactive(
                                     decision = Some(UserDecision::deny());
                                     still_typing = false;
                                 } else {
-                                    match key.code {
-                                        KeyCode::Enter => {
-                                            let note = note.trim().to_string();
-                                            decision = Some(UserDecision::Deny {
-                                                note: (!note.is_empty()).then_some(note),
-                                            });
-                                            still_typing = false;
-                                        }
-                                        // Back to the action keys, draft discarded.
-                                        KeyCode::Esc => still_typing = false,
-                                        KeyCode::Backspace => {
+                                    match entry_edit(key.code, key.modifiers) {
+                                        EntryEdit::Insert(c) => note.push(c),
+                                        EntryEdit::Backspace => {
                                             note.pop();
                                         }
-                                        KeyCode::Char(c)
-                                            if !key
-                                                .modifiers
-                                                .contains(KeyModifiers::CONTROL) =>
-                                        {
-                                            note.push(c)
+                                        EntryEdit::ExternalEditor => {
+                                            #[cfg(unix)]
+                                            if let Some(text) =
+                                                edit_entry_in_editor(&mut renderer, $user_tx, &note)
+                                            {
+                                                note = text;
+                                            }
                                         }
-                                        _ => {}
+                                        EntryEdit::Ignore => match key.code {
+                                            KeyCode::Enter => {
+                                                let note = note.trim().to_string();
+                                                decision = Some(UserDecision::Deny {
+                                                    note: (!note.is_empty()).then_some(note),
+                                                });
+                                                still_typing = false;
+                                            }
+                                            // Back to the action keys, draft discarded.
+                                            KeyCode::Esc => still_typing = false,
+                                            _ => {}
+                                        },
                                     }
                                 }
                                 if still_typing {
@@ -1877,7 +1891,7 @@ pub async fn run_interactive(
                         // #387 follow-up: if a modal owns the input, route the event
                         // there (swallowing keys) instead of the compose editor.
                         if ui.input_mode.is_modal() {
-                            dispatch_modal!(ev);
+                            dispatch_modal!(ev, &user_tx);
                         }
                         match ev {
                             // Mouse Down/Drag/Up that selection::handle declined
@@ -5555,6 +5569,71 @@ fn option_select_action(
         }
         _ => OptionAction::Ignore,
     }
+}
+
+/// The effect of one keystroke on a modal free-text field (the questionnaire
+/// custom answer, plan-approval feedback, permission deny note). Pure
+/// (unit-tested); the caller maps it onto the field's buffer and re-renders.
+/// Enter/Esc/Ctrl+C/D are NOT edits — they stay in the caller so each field
+/// keeps its own submit/discard semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryEdit {
+    /// Insert this character at the end of the buffer.
+    Insert(char),
+    /// Delete the character before the caret.
+    Backspace,
+    /// Ctrl+G: open the field in `$EDITOR`.
+    ExternalEditor,
+    /// Nothing for this field to do — the caller decides (Enter submits, Esc
+    /// discards, Ctrl+C/D reject).
+    Ignore,
+}
+
+/// Map a keystroke to an [`EntryEdit`] for a single-line free-text field.
+///
+/// Crucially this accepts BOTH decodings of the Backspace key. A terminal whose
+/// `kbs` is `^H` (MobaXterm, screen, several serial consoles) sends the raw BS
+/// byte `0x08`, which crossterm reports as Ctrl+H rather than
+/// `KeyCode::Backspace` — so a hand-rolled `KeyCode::Backspace` matcher silently
+/// drops the user's Backspace. The compose editor has always handled Ctrl+H via
+/// its keymap (`delete_char_back`); routing every modal field through this one
+/// decider gives them the same behavior.
+///
+/// `Ctrl+G` opens the external editor, matching the compose box. Ctrl+C/D stay
+/// [`EntryEdit::Ignore`] so the caller can read them as the panic gesture.
+fn entry_edit(key: KeyCode, mods: KeyModifiers) -> EntryEdit {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    let alt = mods.contains(KeyModifiers::ALT);
+    // AltGr on Windows arrives as Ctrl+Alt+printable — real text, not a chord
+    // (mirrors `input::normalize_altgr`).
+    let altgr = ctrl && alt;
+    if ctrl && !altgr && matches!(key, KeyCode::Char('c') | KeyCode::Char('d')) {
+        return EntryEdit::Ignore;
+    }
+    match key {
+        KeyCode::Char('g') if ctrl && !altgr => EntryEdit::ExternalEditor,
+        KeyCode::Backspace => EntryEdit::Backspace,
+        KeyCode::Char('h') if ctrl && !altgr => EntryEdit::Backspace,
+        KeyCode::Char(c) if !ctrl || altgr => EntryEdit::Insert(c),
+        _ => EntryEdit::Ignore,
+    }
+}
+
+/// Hand a modal free-text field to `$EDITOR`, suspending the TUI around the
+/// child exactly as the compose box's Ctrl+G does. Returns the edited text — the
+/// field is single-line, so newlines the editor introduced collapse to spaces —
+/// or `None` when the editor was aborted or there is no `/dev/tty` to suspend
+/// against (in which case the field is left untouched).
+#[cfg(unix)]
+fn edit_entry_in_editor(
+    renderer: &mut Renderer,
+    user_tx: &tokio::sync::mpsc::UnboundedSender<crate::event::UserEvent>,
+    seed: &str,
+) -> Option<String> {
+    let _drained = terminal::suspend_tui_for_subprocess(user_tx)?;
+    let edited = crate::ui::external_editor::edit_text(seed, "answer");
+    terminal::resume_tui_after_subprocess(renderer, user_tx);
+    edited.map(|s| s.replace(['\n', '\r', '\t'], " ").trim_end().to_string())
 }
 
 /// #387 follow-up: write a question's header + soft-wrapped stem and

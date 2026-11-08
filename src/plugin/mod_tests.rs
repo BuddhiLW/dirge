@@ -3943,3 +3943,76 @@ fn top_dyns_offset_is_stable() {
         "janet_dyn must read back what janet_setdyn wrote"
     );
 }
+
+/// An eval that times out must NOT be treated as a dead connection.
+/// `nrepl-eval`'s retry path reconnects and re-runs the whole eval on any
+/// error; for a *timeout* that just repeats the slow work (observed: a 3 s
+/// timeout took 6 s) and, when the server has gone away, turns a clean
+/// timeout into an uninterruptible handshake that freezes dirge. So only
+/// genuine transport failures may be retried.
+#[cfg(feature = "plugin")]
+#[test]
+fn nrepl_timeout_is_not_retried_as_a_connection_error() {
+    let mut mgr = nrepl_state_env();
+    for msg in [
+        "nREPL eval timed out after 3s",
+        "timeout",
+        "Runtime VM error: timeout",
+    ] {
+        assert_eq!(
+            mgr.eval(&format!("(nrepl-connection-error? \"{msg}\")"))
+                .unwrap(),
+            "false",
+            "{msg:?} must not be retried"
+        );
+    }
+    for msg in [
+        "nREPL connection closed by server",
+        "broken pipe",
+        "Connection reset by peer",
+    ] {
+        assert_eq!(
+            mgr.eval(&format!("(nrepl-connection-error? \"{msg}\")"))
+                .unwrap(),
+            "true",
+            "{msg:?} must be retried"
+        );
+    }
+}
+
+/// `nrepl-timeout-error?` gates the OTHER half of the timeout handling:
+/// after a timeout the eval is still running server-side and its eventual
+/// reply would desync every later eval, so `nrepl-eval` must drop the
+/// connection rather than reuse the session. Only timeout text may do that;
+/// an ordinary eval error (a compile error, a thrown exception) leaves the
+/// connection perfectly usable and must NOT be torn down.
+#[cfg(feature = "plugin")]
+#[test]
+fn nrepl_timeout_detection_is_precise() {
+    let mut mgr = nrepl_state_env();
+    for msg in [
+        "nREPL eval timed out after 3s",
+        "timeout",
+        "Runtime VM error: timeout",
+        "Execution error ... timeout",
+    ] {
+        assert_eq!(
+            mgr.eval(&format!("(nrepl-timeout-error? \"{msg}\")"))
+                .unwrap(),
+            "true",
+            "{msg:?} must be detected as a timeout"
+        );
+    }
+    for msg in [
+        "Execution error (ExceptionInfo) at user/eval (REPL:1). boom",
+        "Syntax error compiling at (REPL:1:1). Unable to resolve symbol",
+        "nREPL connection closed by server",
+    ] {
+        assert_eq!(
+            mgr.eval(&format!("(nrepl-timeout-error? \"{msg}\")"))
+                .unwrap(),
+            "false",
+            "{msg:?} is not a timeout and must not drop the connection"
+        );
+    }
+}
