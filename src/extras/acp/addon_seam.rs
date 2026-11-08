@@ -3,18 +3,52 @@
 //! dirge sends. Without the `addons` feature, or with no addon listening,
 //! every call answers as if no addon were there: an extension request gets
 //! method-not-found and `_meta` stays what dirge built.
+//!
+//! The addons are reached through the [`AddonSeam`] the composition root
+//! (`main`) hands [`serve`](super::serve): an
+//! [`AddonHooks`](crate::addons::port::AddonHooks) port, never the
+//! process-wide host.
 
 use agent_client_protocol::Responder;
 use agent_client_protocol::schema::v1::{ExtNotification, ExtRequest, Meta};
 use serde_json::Value;
 
+/// What the ACP server reaches the addons through: the emitter injected at
+/// startup, or nothing (no host running, or a build without `addons`).
+#[derive(Clone, Default)]
+pub struct AddonSeam {
+    #[cfg(feature = "addons")]
+    emitter: Option<std::sync::Arc<dyn crate::addons::port::AddonHooks>>,
+}
+
+impl AddonSeam {
+    /// A seam onto `emitter`.
+    #[cfg(feature = "addons")]
+    pub fn new(emitter: Option<std::sync::Arc<dyn crate::addons::port::AddonHooks>>) -> Self {
+        Self { emitter }
+    }
+
+    /// The seam onto the addon host this process started, if any.
+    pub fn current() -> Self {
+        #[cfg(feature = "addons")]
+        {
+            Self::new(crate::addons::hooks::current())
+        }
+        #[cfg(not(feature = "addons"))]
+        {
+            Self::default()
+        }
+    }
+}
+
 /// Answer extension request `ext` with the addons' result, or with
 /// method-not-found when no addon answers.
 pub(super) async fn answer_ext_method(
+    seam: AddonSeam,
     ext: ExtRequest,
     responder: Responder<Value>,
 ) -> Result<(), agent_client_protocol::Error> {
-    match ext_response(ext_method(&ext).await) {
+    match ext_response(ext_method(&seam, &ext).await) {
         Ok(result) => responder.respond(result),
         Err(error) => responder.respond_with_error(error),
     }
@@ -44,8 +78,8 @@ fn params(raw: &serde_json::value::RawValue) -> Value {
 }
 
 #[cfg(feature = "addons")]
-async fn ext_method(ext: &ExtRequest) -> Result<Option<Value>, String> {
-    match crate::addons::global() {
+async fn ext_method(seam: &AddonSeam, ext: &ExtRequest) -> Result<Option<Value>, String> {
+    match seam.emitter.clone() {
         Some(host) => {
             crate::addons::acp::ext_method(host, &wire_method(&ext.method), params(&ext.params))
                 .await
@@ -55,16 +89,16 @@ async fn ext_method(ext: &ExtRequest) -> Result<Option<Value>, String> {
 }
 
 #[cfg(not(feature = "addons"))]
-async fn ext_method(_ext: &ExtRequest) -> Result<Option<Value>, String> {
+async fn ext_method(_seam: &AddonSeam, _ext: &ExtRequest) -> Result<Option<Value>, String> {
     Ok(None)
 }
 
 /// Hand extension notification `notif` to the addons without waiting.
 #[cfg(feature = "addons")]
-pub(super) fn ext_notification(notif: &ExtNotification) {
-    if let Some(host) = crate::addons::global() {
+pub(super) fn ext_notification(seam: &AddonSeam, notif: &ExtNotification) {
+    if let Some(host) = seam.emitter.as_deref() {
         crate::addons::acp::ext_notification(
-            &host,
+            host,
             &wire_method(&notif.method),
             params(&notif.params),
         );
@@ -72,19 +106,20 @@ pub(super) fn ext_notification(notif: &ExtNotification) {
 }
 
 #[cfg(not(feature = "addons"))]
-pub(super) fn ext_notification(_notif: &ExtNotification) {}
+pub(super) fn ext_notification(_seam: &AddonSeam, _notif: &ExtNotification) {}
 
 /// The `_meta` of dirge's response to `method`: `base` (what dirge put
 /// there, e.g. `usage`) with the addons' keys merged in, never over
 /// `base`'s. `incoming` is the `_meta` the client sent with the request.
 #[cfg(feature = "addons")]
 pub(super) async fn meta(
+    seam: &AddonSeam,
     method: &str,
     session_id: Option<&str>,
     incoming: Option<&Meta>,
     base: Option<Meta>,
 ) -> Option<Meta> {
-    let Some(host) = crate::addons::global() else {
+    let Some(host) = seam.emitter.clone() else {
         return base;
     };
     let request = crate::addons::acp::MetaRequest {
@@ -97,6 +132,7 @@ pub(super) async fn meta(
 
 #[cfg(not(feature = "addons"))]
 pub(super) async fn meta(
+    _seam: &AddonSeam,
     _method: &str,
     _session_id: Option<&str>,
     _incoming: Option<&Meta>,
@@ -135,22 +171,56 @@ mod tests {
         );
     }
 
-    /// No addon host is installed in tests, which is what an ACP server
-    /// without addons (or without the feature) sees.
+    /// An empty seam is what an ACP server without addons (or without the
+    /// feature) sees.
     #[tokio::test]
     async fn without_addons_an_ext_method_is_not_found_and_meta_is_kept() {
+        let seam = AddonSeam::default();
         let raw = serde_json::value::RawValue::from_string("{}".into()).unwrap();
         let ext = ExtRequest::new("zed/ping", std::sync::Arc::from(raw));
         assert_eq!(
-            code(ext_response(ext_method(&ext).await).unwrap_err()),
+            code(ext_response(ext_method(&seam, &ext).await).unwrap_err()),
             json!(-32601)
         );
         let mut base = Meta::new();
         base.insert("usage".into(), json!({"totalTokens": 3}));
         assert_eq!(
-            meta("session/prompt", Some("s1"), None, Some(base.clone())).await,
+            meta(
+                &seam,
+                "session/prompt",
+                Some("s1"),
+                None,
+                Some(base.clone())
+            )
+            .await,
             Some(base)
         );
-        assert_eq!(meta("initialize", None, None, None).await, None);
+        assert_eq!(meta(&seam, "initialize", None, None, None).await, None);
+    }
+
+    /// An injected emitter is reached with the method as the client sent it.
+    #[cfg(feature = "addons")]
+    #[tokio::test]
+    async fn an_injected_emitter_answers_ext_methods() {
+        use crate::addons::port::AddonHooks;
+
+        struct Pong;
+        impl AddonHooks for Pong {
+            fn listens_key(&self, key: &str) -> bool {
+                key == crate::addons::acp::EXT_METHOD_KEY
+            }
+            fn fold(&self, _key: &str, ctx: &Value) -> Option<Value> {
+                Some(json!({ "method": ctx["method"] }))
+            }
+            fn post(&self, _key: &str, _ctx: &Value) {}
+        }
+
+        let seam = AddonSeam::new(Some(std::sync::Arc::new(Pong)));
+        let raw = serde_json::value::RawValue::from_string("{}".into()).unwrap();
+        let ext = ExtRequest::new("zed/ping", std::sync::Arc::from(raw));
+        assert_eq!(
+            ext_method(&seam, &ext).await,
+            Ok(Some(json!({ "method": "_zed/ping" })))
+        );
     }
 }

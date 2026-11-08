@@ -275,6 +275,26 @@ pub trait HarnessSink: Send + Sync + 'static {
     fn notify(&self, addon_level: Level, message: &str);
 }
 
+// --- AddonHooks port -------------------------------------------------------
+
+/// The narrow face of the addon host a seam outside it needs: fold the
+/// addons' answers to the hook keyed `key`, or post a ctx without waiting.
+/// [`AddonHost`](super::host::AddonHost) implements it; a seam (ACP, say)
+/// takes it injected from the composition root instead of reaching for the
+/// process-wide host, so its tests run against a stub. Distinct from
+/// [`AddonEmitter`], which is the addon-to-addon `dirge.harness/emit` port.
+pub trait AddonHooks: Send + Sync + 'static {
+    /// True when at least one addon registered a hook keyed `key`.
+    fn listens_key(&self, key: &str) -> bool;
+
+    /// The addons' answers to the hook keyed `key`, folded the way the
+    /// host's fold for `key` does. `None` when nothing was answered.
+    fn fold(&self, key: &str, ctx: &Value) -> Option<Value>;
+
+    /// Hand `ctx` to the hook keyed `key` without waiting; answers dropped.
+    fn post(&self, key: &str, ctx: &Value);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ConfigSource, Level, NoConfig, ToolGateway, ToolsUnavailable, addon_settings};

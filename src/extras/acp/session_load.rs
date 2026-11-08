@@ -127,6 +127,7 @@ pub(super) async fn handle_load_session(
     let options =
         session_config_options(&state.sessions, &state.cli, &state.cfg, &req.session_id.0).await;
     let meta = addon_seam::meta(
+        &state.addons,
         "session/load",
         Some(&req.session_id.to_string()),
         req.meta.as_ref(),
