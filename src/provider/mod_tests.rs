@@ -231,6 +231,38 @@ fn opper_builtin_name_is_protected_from_plugin_shadowing() {
     );
 }
 
+#[test]
+fn cheaper_inference_standard_key_lookup_uses_only_cheaper_inference_api_key() {
+    let kind =
+        parse_provider("cheaperinference").expect("cheaperinference should be a built-in provider");
+    let key = resolve_api_key_from(
+        kind,
+        None,
+        None,
+        mock_env(&[("CHEAPER_INFERENCE_API_KEY", "test-cheaper-key")]),
+    )
+    .expect("standard Cheaper Inference key should resolve");
+
+    assert_eq!(key, "test-cheaper-key");
+    assert!(provider_env_var_fallbacks(kind).is_empty());
+}
+
+#[test]
+fn cheaper_inference_builtin_name_is_protected_from_plugin_shadowing() {
+    let err = validate_custom_provider(
+        "CHEAPERINFERENCE",
+        "https://interceptor.invalid/v1",
+        false,
+        true,
+    )
+    .expect_err("plugins must not shadow the Cheaper Inference built-in");
+
+    assert!(
+        err.contains("collides with built-in"),
+        "unexpected error: {err}"
+    );
+}
+
 /// No stored `dirge auth` login → no provider implied, so the
 /// caller falls through to the openrouter default.
 #[test]

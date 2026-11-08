@@ -25,3 +25,11 @@ reason = "zbus_names was merged into zbus 6.0.0; dirge reaches it transitively v
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0372"
 reason = "zvariant_derive was merged into zbus 6.0.0; dirge reaches it transitively via notify-rust 4.18 → zbus 5.18, and notify-rust still pins zbus 5, so there is no upgrade path yet"
+
+# Reachability premise (re-check on any lockfile change): block-buffer 0.10.x
+# enters the tree ONLY via gaoya 0.2.2 → sha-1 0.10. If
+# `cargo tree -i block-buffer@0.10.4` ever shows another path, or gaoya
+# ships a release on digest 0.12+, drop this ignore.
+[[IgnoredVulns]]
+id = "GHSA-qwgh-2vcv-g2f7"
+reason = "block-buffer < 0.12.1 is reached only via gaoya 0.2.2 → sha-1 0.10 (simhash text hashing); gaoya has no newer release. The bug requires catching a panic from inside a compression callback and reusing the buffer, which dirge's usage never does"

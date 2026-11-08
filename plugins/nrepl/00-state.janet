@@ -105,6 +105,7 @@
 (var nrepl-port nil)
 (var nrepl-connected false)
 (var nrepl-eval-timeout 120)  # per-eval timeout in seconds
+(var nrepl-connect-timeout 10)  # seconds to await the clone handshake
 (var nrepl-current-eval-id nil)  # active eval id for interrupt
 (var nrepl-rbuf @"")      # bytes read but not yet decoded (see below)
 
@@ -154,7 +155,16 @@
   # Fresh socket → drop any leftover bytes from a previous session.
   (set nrepl-rbuf @"")
   (nrepl-send-msg conn @{"op" "clone" "id" "dirge-clone"})
-  (def clone-resp (nrepl-read-msg conn))
+  # Bounded: an endpoint that accepts but never answers must fail, not
+  # wedge the (uninterruptible) C read. The bound is deliberately
+  # independent of `nrepl-eval-timeout` — that one may be minutes for a
+  # long computation, which would be an unacceptable connect hang.
+  (def clone-resp
+    (try
+      (nrepl-read-msg conn nrepl-connect-timeout)
+      ([err]
+        (try (:close conn) ([_] nil))
+        (error (string "nREPL clone handshake failed: " err)))))
   (def session (get clone-resp "new-session"))
   (set nrepl-conn conn)
   (set nrepl-session session)
@@ -202,6 +212,38 @@
     (set nrepl-connected false)
     (set nrepl-rbuf @""))
   (connect-nrepl-inner nrepl-host nrepl-port))
+
+(defn nrepl-connection-error? [err]
+  "True only for errors that mean the SOCKET is gone and a reconnect +
+  retry can help. An eval error (including the per-eval timeout) is not
+  one: retrying it repeats work the user is already waiting on, and if
+  the server died mid-eval the retry's clone handshake blocks in a C
+  socket read that no interrupt can reach — freezing dirge until the
+  host's own deadline. So match on transport-failure text only."
+  (def s (string/ascii-lower (string err)))
+  (def needles
+    ["connection closed by server" "broken pipe" "connection reset"
+     "connection aborted" "eof" "not connected"])
+  (var hit false)
+  (each needle needles
+    (if (string/find needle s)
+      (set hit true)))
+  hit)
+
+(defn nrepl-timeout-error? [err]
+  "True when an eval failed on the per-eval timeout (either our own
+  \"timed out after Ns\" or the Janet read timeout). The connection has
+  to be dropped in that case: the eval keeps running server-side and its
+  late reply would desync the next eval. Matches on timeout wording only,
+  so an ordinary eval error (compile error, thrown exception) leaves the
+  connection intact."
+  (def s (string/ascii-lower (string err)))
+  (def needles ["timeout" "timed out"])
+  (var hit false)
+  (each needle needles
+    (if (string/find needle s)
+      (set hit true)))
+  hit)
 
 # ── paren repair ─────────────────────────────────────────────────
 #
@@ -337,11 +379,26 @@
   (var result
     (try (nrepl-eval-inner repaired)
          ([err]
-          # A broken-pipe / closed error means the socket went stale
-          # (e.g. the nREPL server was restarted). Reconnect once and
-          # retry; if the server is genuinely down, this re-raises.
-          (nrepl-reconnect)
-          (nrepl-eval-inner repaired))))
+          (cond
+            # A transport failure (broken pipe / closed socket) means the
+            # socket went stale (e.g. the nREPL server was restarted).
+            # Reconnect once and retry then.
+            (nrepl-connection-error? err)
+            (do
+              (nrepl-reconnect)
+              (nrepl-eval-inner repaired))
+            # A TIMEOUT is not retried: the slow eval would just run
+            # again (doubling the wait) and, if the server is gone, the
+            # retry's clone handshake wedges dirge. Worse, the timed-out
+            # eval is still running server-side, so its late reply would
+            # desync the next eval — drop the connection to start clean.
+            (nrepl-timeout-error? err)
+            (do
+              (nrepl-disconnect)
+              (error err))
+            # Any other eval error (compile error, thrown exception)
+            # leaves the connection perfectly usable — propagate it.
+            (error err)))))
   (def result-table @{:result (get result "result")
                        :out (get result "out")
                        :err (get result "err")

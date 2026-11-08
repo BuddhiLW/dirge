@@ -81,6 +81,9 @@ pub(crate) async fn oneshot_with_model(
         super::AnyModel::Ollama(m) => run_oneshot(m, label, preamble, prompt, disable).await,
         super::AnyModel::Requesty(m) => run_oneshot(m, label, preamble, prompt, disable).await,
         super::AnyModel::Opper(m) => run_oneshot(m, label, preamble, prompt, disable).await,
+        super::AnyModel::CheaperInference(m) => {
+            run_oneshot(m, label, preamble, prompt, disable).await
+        }
         super::AnyModel::Custom(m) => run_oneshot(m, label, preamble, prompt, disable).await,
     }
 }
@@ -461,6 +464,7 @@ mod tests {
         assert_eq!(reasoning_disable_for_kind("cerebras", None), None);
         assert_eq!(reasoning_disable_for_kind("requesty", None), None);
         assert_eq!(reasoning_disable_for_kind("opper", None), None);
+        assert_eq!(reasoning_disable_for_kind("cheaperinference", None), None);
     }
 
     #[test]
